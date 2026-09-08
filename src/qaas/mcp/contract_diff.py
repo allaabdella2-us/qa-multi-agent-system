@@ -9,7 +9,7 @@ changes as consumer-visible facts with a breaking/non-breaking verdict attached.
 Two things follow from CONDUIT's brief (§4.5):
 
 * **The declared contract is the reference.** `spec_a` defaults to
-  `target-app/openapi.yaml` and `spec_b` to the running app's `/openapi.json`,
+  the target's declared spec and `spec_b` to the running app's `/openapi.json`,
   so "drift" here means the implementation disagrees with the published spec —
   which is the defect, not the other way round.
 * **A finding ships with a failing test.** `generate_contract_test` emits a
@@ -681,12 +681,17 @@ def build_tools(ctx: ToolContext) -> list:
     up an MCP transport.
     """
 
-    default_spec = ctx.target_app / DEFAULT_SPEC_FILE
+    # `layout.spec` has existed since the schema was written and nothing read
+    # it, so every target was assumed to keep an `openapi.yaml` at its root.
+    _profile = getattr(ctx.config, "profile", None)
+    _declared_spec = getattr(getattr(_profile, "layout", None), "spec", None) if _profile else None
+    default_spec = ctx.target_app / (_declared_spec or DEFAULT_SPEC_FILE)
+    _spec_label = str(_declared_spec or DEFAULT_SPEC_FILE)
 
     @tool(
         "diff_openapi",
         "Compare two OpenAPI documents semantically. Defaults to the declared contract "
-        "(target-app/openapi.yaml) against the running app's /openapi.json, so a reported change "
+        f"({_spec_label}) against the running app's /openapi.json, so a reported change "
         "means the implementation disagrees with the spec. Pass file paths when the app is down.",
         {
             "type": "object",
@@ -781,7 +786,7 @@ def build_tools(ctx: ToolContext) -> list:
 
     @tool(
         "find_consumers",
-        "Find likely call sites of an endpoint in this repository (notably target-app/web/src). "
+        "Find likely call sites of an endpoint in this repository, across its declared frontend roots. "
         "Heuristic: it matches the literal path string and the stable prefix before any {param}, "
         "so a client that assembles its URL from fragments will be missed and an unrelated string "
         "that happens to contain the path will be reported.",
@@ -852,7 +857,7 @@ def build_tools(ctx: ToolContext) -> list:
                 "endpoint": {"type": "string", "description": "Spec path, e.g. '/v1/invoices'."},
                 "method": {"type": "string", "description": "HTTP method, e.g. 'GET'."},
                 "expectation": {"type": "string", "description": "Why you are generating it — what you expect to break. Recorded in the test's docstring."},
-                "spec": {"type": "string", "description": "Spec to read the contract from. Default: target-app/openapi.yaml."},
+                "spec": {"type": "string", "description": f"Spec to read the contract from. Default: {_spec_label}."},
                 "expected_status": {"type": "integer", "description": "Override the success status. Default: the first 2xx in the spec."},
             },
         },

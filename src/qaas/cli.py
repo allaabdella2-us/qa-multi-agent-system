@@ -44,6 +44,23 @@ def _activate_target(system_yaml_text: str, target_name: str) -> str:
     return f"target: {target_name}\n" + system_yaml_text
 
 
+def _ledger_path(cfg) -> Path | None:
+    """The golden ledger for this target, if it has one.
+
+    `profile.ledger` has existed since the schema was written; this used to be
+    hardcoded to `<target>/defects.yaml`. Most targets have no ledger at all --
+    a golden ledger is a property of a *calibration* target, not of every
+    application -- so None is the ordinary answer, not a failure.
+    """
+    profile = getattr(cfg, "profile", None)
+    declared = getattr(profile, "ledger", None) if profile else None
+    root = Path(profile.root) if profile else Path(cfg.target_app)
+    if declared:
+        return root / declared
+    fallback = root / "defects.yaml"
+    return fallback if fallback.exists() else None
+
+
 def _system_yaml(config_dir: Path | str | None) -> Path:
     """The system.yaml actually in force, for messages that name it."""
     if config_dir is not None:
@@ -569,9 +586,16 @@ def score(
     from qaas.scorecard import GoldenLedger, score as score_run
 
     cfg = load_config(config_dir)
-    ledger_path = Path(cfg.target_app) / "defects.yaml"
-    if not ledger_path.exists():
-        console.print(f"[red]no golden ledger at {ledger_path}[/red]")
+    ledger_path = _ledger_path(cfg)
+    if ledger_path is None or not ledger_path.exists():
+        console.print(
+            "[yellow]this target has no golden ledger, so there is nothing to score against.[/yellow]\n"
+            "[dim]A golden ledger lists known defects with their expected domain and severity, and\n"
+            "`qaas score` measures recall and precision against it. It is a property of a\n"
+            "calibration target, not of an ordinary application -- most targets will never\n"
+            "have one. Set `ledger:` in the target profile if yours does; the bundled demo app\n"
+            "ships in the project's git repository, not in the wheel.[/dim]"
+        )
         raise typer.Exit(1)
 
     if run_id is None:
@@ -646,9 +670,9 @@ def sweep(
     report = asyncio.run(conductor.run(mode))
     console.print_json(data=report.summary())
 
-    ledger_path = Path(cfg.target_app) / "defects.yaml"
-    if not ledger_path.exists():
-        console.print("[yellow]no golden ledger; ran without scoring[/yellow]")
+    ledger_path = _ledger_path(cfg)
+    if ledger_path is None or not ledger_path.exists():
+        console.print("[yellow]no golden ledger for this target; ran without scoring[/yellow]")
         return
 
     store = RunStore(report.run_id, root)

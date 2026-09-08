@@ -36,9 +36,19 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from qaas.mcp.context import ToolContext, err, ok
 
-COMPOSE_FILENAME = "docker-compose.yml"
-SEED_DIR = "api/seed"
+#: Fallbacks only. Every one of these has a field on the target profile
+#: (`environment.compose_file`, `environment.seed_sql`) that had existed since
+#: the schema was written and that nothing read -- so the "portable" seam was
+#: fiction, and anyone pointing this at their own repository hit a hardcoded
+#: `target-app/api/seed/fixtures.sql` on their first run. These now apply only
+#: when the profile is silent.
+DEFAULT_COMPOSE_FILENAME = "docker-compose.yml"
+DEFAULT_SEED_DIR = "api/seed"
 DEFAULT_FIXTURE_FILE = "fixtures.sql"
+
+# Kept as the old names so nothing importing them breaks.
+COMPOSE_FILENAME = DEFAULT_COMPOSE_FILENAME
+SEED_DIR = DEFAULT_SEED_DIR
 
 #: Lets a test point the server at a docker that is not there, and lets an
 #: operator point it at a non-PATH install, without either one editing code.
@@ -50,16 +60,27 @@ SEED_TIMEOUT_S = 120
 SHORT_TIMEOUT_S = 30
 LOGIN_TIMEOUT_S = 15
 
-#: The seeded accounts from `target-app/api/seed/fixtures.sql`. Impersonation is
-#: a real login against the running API rather than a hand-minted JWT, so a token
-#: an agent receives here is exactly the token a browser would receive — an auth
-#: bug in issuance is therefore visible to the agent instead of bypassed by it.
-SEEDED_USERS: dict[str, str] = {
+#: Impersonation is a real login against the running API rather than a
+#: hand-minted JWT, so the token an agent receives is exactly the token a
+#: browser would receive — an auth bug in issuance is visible to the agent
+#: instead of bypassed by it. That part was always right.
+#:
+#: What was wrong: the accounts and the password were hardcoded to the bundled
+#: demo. `profile.auth.roles` has existed all along, and `Role.password()`
+#: already reads from an environment variable precisely so that a committed
+#: profile never carries a credential. Until this was wired up, pointing qaas at
+#: a real application with `auth.mode: login` would POST the literal string
+#: below at that application's login endpoint. These are fallbacks for the
+#: bundled demo now, used only when the profile declares no roles.
+FALLBACK_USERS: dict[str, str] = {
     "admin": "admin@northwind.test",
     "member": "member@northwind.test",
     "viewer": "viewer@northwind.test",
 }
-SEEDED_PASSWORD = "password123"
+FALLBACK_PASSWORD = "password123"
+
+SEEDED_USERS = FALLBACK_USERS  # old name, kept for importers
+SEEDED_PASSWORD = FALLBACK_PASSWORD
 
 _FIXTURE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _FLAG_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -131,8 +152,71 @@ def docker_bin() -> str | None:
 # --------------------------------------------------------------------------
 
 
+def _environment(ctx: ToolContext):
+    """The target's environment block, or None when no profile is loaded."""
+    profile = getattr(ctx.config, "profile", None)
+    return getattr(profile, "environment", None) if profile else None
+
+
 def _compose_path(ctx: ToolContext) -> Path:
-    return ctx.target_app / COMPOSE_FILENAME
+    """The compose file this target declares, falling back to the usual name."""
+    env = _environment(ctx)
+    declared = getattr(env, "compose_file", None) if env else None
+    return ctx.target_app / (declared or DEFAULT_COMPOSE_FILENAME)
+
+
+def _seed_dir(ctx: ToolContext) -> Path:
+    """Where fixture SQL lives for this target.
+
+    `environment.seed_sql` names a file; its directory is the fixture
+    directory, which lets a project keep fixtures anywhere without this server
+    having an opinion about `api/seed`.
+    """
+    env = _environment(ctx)
+    declared = getattr(env, "seed_sql", None) if env else None
+    if declared:
+        return (ctx.target_app / declared).parent.resolve()
+    return (ctx.target_app / DEFAULT_SEED_DIR).resolve()
+
+
+def _login_path(ctx: ToolContext) -> str:
+    """The login path this target declares. `auth.login_endpoint` is written as
+    "POST /v1/auth/login", so the verb is stripped off."""
+    profile = getattr(ctx.config, "profile", None)
+    auth = getattr(profile, "auth", None) if profile else None
+    declared = getattr(auth, "login_endpoint", None) if auth else None
+    if not declared:
+        return "/v1/auth/login"
+    path = declared.split(None, 1)[-1].strip() if " " in declared else declared.strip()
+    return path if path.startswith("/") else f"/{path}"
+
+
+def _roles(ctx: ToolContext) -> dict[str, tuple[str, str | None]]:
+    """role -> (username, password), from the profile where one declares them.
+
+    `profile.auth.roles` and `Role.password()` have existed since the schema was
+    written; nothing read them, so impersonation was welded to three demo
+    accounts and a literal password. Pointing qaas at a real application with
+    `auth.mode: login` would have POSTed that literal at its login endpoint.
+
+    Passwords come from the environment variable each role names, never from the
+    profile itself, because a profile is committed to a repository.
+    """
+    profile = getattr(ctx.config, "profile", None)
+    auth = getattr(profile, "auth", None) if profile else None
+    declared = getattr(auth, "roles", None) or {}
+    if declared:
+        return {name: (role.username, role.password()) for name, role in declared.items()}
+    # No roles declared: the bundled demo, whose fixture password is public and
+    # whose accounts exist only inside a throwaway container.
+    return {name: (email, FALLBACK_PASSWORD) for name, email in FALLBACK_USERS.items()}
+
+
+def _default_fixture(ctx: ToolContext) -> str:
+    """The filename `seed(fixture="default")` means for this target."""
+    env = _environment(ctx)
+    declared = getattr(env, "seed_sql", None) if env else None
+    return Path(declared).name if declared else DEFAULT_FIXTURE_FILE
 
 
 def _load_compose(path: Path) -> dict[str, Any]:
@@ -370,10 +454,10 @@ def build_tools(ctx: ToolContext) -> list:
                 f"Fixture name '{fixture}' is not a bare filename. "
                 "Pass a name like 'default' or 'refunds', never a path."
             )
-        filename = DEFAULT_FIXTURE_FILE if fixture == "default" else (
+        filename = _default_fixture(ctx) if fixture == "default" else (
             fixture if fixture.endswith(".sql") else f"{fixture}.sql"
         )
-        seed_dir = (ctx.target_app / SEED_DIR).resolve()
+        seed_dir = _seed_dir(ctx)
         path = (seed_dir / filename).resolve()
         if not path.is_relative_to(seed_dir):
             return err(f"Fixture '{fixture}' resolves outside {seed_dir}.")
@@ -654,7 +738,7 @@ def build_tools(ctx: ToolContext) -> list:
         {
             "type": "object",
             "required": ["role"],
-            "properties": {"role": {"type": "string", "enum": sorted(SEEDED_USERS), "description": "Seeded role to impersonate."}},
+            "properties": {"role": {"type": "string", "description": "A role this target declares under auth.roles."}},
         },
     )
     async def impersonate(args: dict[str, Any]) -> dict[str, Any]:
@@ -662,9 +746,22 @@ def build_tools(ctx: ToolContext) -> list:
         if gate:
             return gate
         role = str(args["role"]).lower()
-        email = SEEDED_USERS.get(role)
-        if email is None:
-            return err(f"No seeded user for role '{role}'. Seeded roles: {', '.join(sorted(SEEDED_USERS))}.")
+        roles = _roles(ctx)
+        entry = roles.get(role)
+        if entry is None:
+            return err(
+                f"No role '{role}' for this target. Declared roles: "
+                f"{', '.join(sorted(roles)) or '(none -- set auth.roles in the target profile)'}."
+            )
+        email, password = entry
+        if not password:
+            profile = getattr(ctx.config, "profile", None)
+            auth = getattr(profile, "auth", None) if profile else None
+            var = getattr(getattr(auth, "roles", {}).get(role, None), "password_env", "QAAS_PASSWORD")
+            return err(
+                f"Role '{role}' names environment variable {var} for its password and it is unset. "
+                "Export it and try again -- credentials are never read from the profile itself."
+            )
 
         compose = _load_compose(compose_file)
         urls = _service_urls(compose)
@@ -674,9 +771,15 @@ def build_tools(ctx: ToolContext) -> list:
         if base is None:
             return err("No HTTP service with a published port in the compose file; nowhere to log in.")
 
-        payload = json.dumps({"email": email, "password": SEEDED_PASSWORD}).encode()
+        # Field names come from the profile: not every API calls them
+        # "email" and "password".
+        profile = getattr(ctx.config, "profile", None)
+        auth = getattr(profile, "auth", None) if profile else None
+        user_field = getattr(auth, "username_field", None) or "email"
+        pass_field = getattr(auth, "password_field", None) or "password"
+        payload = json.dumps({user_field: email, pass_field: password}).encode()
         request = urllib.request.Request(
-            f"{base.rstrip('/')}/v1/auth/login", data=payload,
+            f"{base.rstrip('/')}{_login_path(ctx)}", data=payload,
             headers={"Content-Type": "application/json"}, method="POST",
         )
 
