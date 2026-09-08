@@ -1,2 +1,0 @@
-[   11491ms] [ERROR] Failed to load resource: the server responded with a status of 422 (Unprocessable Entity) @ http://localhost:5173/v1/orders?status=:0
-[   16020ms] [ERROR] Failed to load resource: the server responded with a status of 422 (Unprocessable Entity) @ http://localhost:5173/v1/orders?status=:0

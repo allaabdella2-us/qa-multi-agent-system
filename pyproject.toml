@@ -1,8 +1,24 @@
 [project]
-name = "qaas"
+# Distribution name is `qaas-python` (`qaas` was taken); the import package and
+# the CLI are both `qaas`.
+name = "qaas-python"
 version = "0.1.0"
-description = "Multi-agent QA & remediation system"
+description = "A multi-agent QA system: finds real defects, reproduces them, files tickets, fixes them, and proves the fix"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [{ name = "Alla Abdella" }]
+keywords = ["qa", "testing", "multi-agent", "agents", "claude", "llm", "bug-finding"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "claude-agent-sdk>=0.2.127",
     "pydantic>=2.9",
@@ -17,12 +33,31 @@ dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
 [project.scripts]
 qaas = "qaas.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/allaabdella2-us/qa-multi-agent-system"
+Repository = "https://github.com/allaabdella2-us/qa-multi-agent-system"
+Issues = "https://github.com/allaabdella2-us/qa-multi-agent-system/issues"
+Changelog = "https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/CHANGELOG.md"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
+# Non-.py files under this tree ship too, which is how prompts/ already reaches
+# users and how skills/ and defaults/ will.
 packages = ["src/qaas"]
+exclude = ["**/__pycache__", "**/*.pyc"]
+
+[tool.hatch.build.targets.sdist]
+# The sdist carries the calibration corpus (target-app/ + its golden ledger) so a
+# contributor can run `qaas score`. The wheel does not: it is 69M, and it is a
+# deliberately vulnerable application that has no business in site-packages.
+include = [
+    "src/", "config/", "target-app/", "tests/", ".claude/skills/",
+    "README.md", "LICENSE", "ARCHITECTURE.md", "CLAUDE.md", "BUILD_PLAN.md",
+    "pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

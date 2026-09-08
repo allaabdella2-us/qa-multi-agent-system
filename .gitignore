@@ -6,3 +6,7 @@ __pycache__/
 node_modules/
 .DS_Store
 .env
+
+# Run debris — agents write these while exploring; they are not source.
+.playwright-mcp/
+/*.png

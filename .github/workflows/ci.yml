@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  test:
+    # Everything here is free and offline. The `llm`, `docker`, `github` and
+    # `jira` markers are deselected by addopts in pyproject.toml, so no API key
+    # is needed and no network call is made. Keep it that way: a CI run that
+    # costs money is a CI run people switch off.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv venv && uv pip install -e ".[dev]"
+      - name: Tests
+        run: uv run pytest -q
+      - name: Config, prompts and allowlists are coherent
+        run: uv run qaas validate
+      - name: Every agent's options assemble without calling the API
+        run: uv run qaas run --mode pr-check --dry-run
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.12" }
+      - run: uv build
+      - run: uvx twine check dist/*
+      - name: The wheel must not carry the demo app
+        # target-app/ is 69M of deliberately vulnerable code. It belongs in the
+        # sdist for contributors, never in site-packages.
+        run: |
+          if unzip -l dist/*.whl | grep -q "target-app/"; then
+            echo "::error::the wheel contains target-app/"; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with: { name: dist, path: dist/ }
