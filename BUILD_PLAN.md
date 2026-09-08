@@ -117,7 +117,7 @@ CONDUIT gets `contract_diff` and ships a failing contract test as evidence (§4.
 FORGE reproduces, minimizes, runs N times for flake rate, and commits a failing test to `qa/repro/*`. CLERK dedupes, scores against the rubric, resolves owner from the map, routes, and files — the only agent holding tracker write.
 **Verify:** full discovery→triage run produces local tickets with real repro steps and attached failing tests; a second run on the same code files **zero** new tickets and increments occurrence counts instead.
 
-### M6 — Close the loop: PROOF + CONDUCTOR run modes ✅ built, live verification blocked on the host
+### M6 — Close the loop: PROOF + CONDUCTOR run modes ✅ done, verified live
 PROOF re-runs FORGE's test against a patched build and returns `VERIFIED`/`NOT_FIXED`/`REGRESSED`. CONDUCTOR gains all five discovery run modes, budget governor, concurrency caps, and escalation.
 **Verify:** the acceptance test for the whole system — fix one seeded defect by hand on a branch, run `qaas run --mode fix-cycle --ticket <id>`, and PROOF returns `VERIFIED`; revert the fix and it returns `NOT_FIXED`. Then `qaas run --mode nightly && qaas score` prints the §12 scorecard: acceptance rate, duplicate rate, false-positive rate, cost per accepted ticket.
 
@@ -183,9 +183,37 @@ turned up two defects in this system rather than one in the target:
 Both are the point of running the thing live: neither was visible to 528 offline
 tests, and (2) meant no `full-loop` run could ever have closed.
 
-**Still open.** The live `fix-cycle` re-run. It is blocked on the host, not the
-code: Docker Desktop's containerd store is returning `input/output error` with
-the machine at 99% disk.
+**A third defect, found only by re-running.** CORVID-7 then escalated twice with
+a correct one-line fix sitting on the branch, because two rules in this repo
+contradicted each other: `CLAUDE.md` required MENDER to retire the seeded
+defect's ledger entry in the same commit, and `mender.yaml`'s `write_paths`
+forbade it. MENDER tried and the guardrail refused
+(`Edit  write refused: target-app/defects.yaml is outside MENDER's sandbox`).
+Every seeded defect has a ledger entry, so this deadlocked *any* fix to any of
+them. The sandbox was right and the rule was wrong: the ledger is the answer key
+and must stay unwritable by the agents it scores, so the same-commit obligation
+now sits on a human at merge, and `adversarial-review` carries the general
+lesson — never request a change the author is not permitted to make.
+
+**Closed live on CORVID-8**, 2026-09-08, `fix-cycle`, $6.84, zero escalations:
+
+```
+PROOF   NOT_FIXED   defect confirmed present
+MENDER              currency: str added to InvoiceOut (1 line of product code)
+ARBITER APPROVE
+PROOF   VERIFIED    re-verified on MENDER's branch
+```
+
+PROOF ran the original failing test 5 of 5 times for flake, then the full 22-test
+`qa/repro` suite, and correctly attributed all 11 failures to other open tickets
+(CORVID-7, CORVID-SEC-6) with source confirmation rather than to the diff. The
+second PROOF dispatch is the hop the branch-selection fix above made reachable at
+all. Verified independently afterwards: the diff is one product line and the live
+endpoint returns `currency`.
+
+CORVID-7 remains escalated, correctly — shipping it alone makes orders 26-30
+unreachable in a UI with no pager (UI-08, filed as CORVID-16). That is a product
+decision, which is what escalation is for.
 
 ### Adding agents 7–15 afterwards
 A new discovery agent should be a prompt file plus a `config/agents/<NAME>.yaml` naming its allowlist — no changes to conductor, runner, or guardrails. Whether that holds is the real test of M3, so the first Phase-2 agent (VAULT) will be added as a smoke test of the extension path before this build is called done.
