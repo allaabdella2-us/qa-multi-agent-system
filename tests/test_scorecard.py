@@ -314,3 +314,90 @@ def test_sharing_a_file_with_a_planted_case_is_not_reporting_it(ledger):
     )
     card = score([e], ledger, domains={"api"})
     assert not card.regressions_on_planted
+
+
+# -- retiring a repaired defect ---------------------------------------------
+#
+# ARBITER escalated a correct one-line fix on CORVID-7 because `defects.yaml`
+# had no way to record that a seeded defect had been repaired: CLAUDE.md
+# requires the ledger to change in the same commit as the defect, and the only
+# options were to delete the entry (losing the severity/domain expectations a
+# past score depends on) or leave it stale (a permanent phantom miss). These
+# pin the third answer.
+
+
+def _ledger_with(tmp_path, defects, not_defects=()):
+    import yaml
+    path = tmp_path / "defects.yaml"
+    path.write_text(yaml.safe_dump(
+        {"version": 1, "app": "t", "defects": list(defects), "not_defects": list(not_defects)}
+    ))
+    return GoldenLedger.load(path)
+
+
+def _seed(defect_id="API-01", **over):
+    d = {
+        "id": defect_id, "domain": "api", "class": "bug", "severity": "major",
+        "title": "Orders list accepts a limit parameter and ignores it",
+        "detail": "The handler declares limit and never applies it.",
+        "location": {"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
+        "keywords": ["limit", "unbounded", "pagination", "ignored"],
+        "phase": 1,
+    }
+    d.update(over)
+    return d
+
+
+def _report():
+    return env(
+        title="GET /v1/orders ignores the limit query parameter",
+        summary="The limit parameter is validated and echoed but never applied; unbounded page.",
+        location={"endpoint": "GET /v1/orders", "paths": ["target-app/api/app/routes/orders.py"]},
+    )
+
+
+def test_an_unfixed_defect_is_expected_and_counts_for_recall(tmp_path):
+    led = _ledger_with(tmp_path, [_seed()])
+    assert led.defects[0].retired is False
+    card = score([], led)
+    assert card.total_golden == 1
+    assert card.missed == ["API-01"], "still expected, so not finding it is a miss"
+
+
+def test_a_fixed_defect_leaves_the_recall_denominator(tmp_path):
+    """The phantom miss this field exists to prevent: without it, a repaired
+    defect is counted against recall on every run for the rest of the project."""
+    led = _ledger_with(tmp_path, [_seed(fixed_in="fix/CORVID-7-orders-limit")])
+    assert led.defects[0].retired is True
+    card = score([], led)
+    assert card.total_golden == 0
+    assert card.missed == []
+    assert card.recall == 0.0  # nothing expected, nothing found
+
+
+def test_reporting_a_fixed_defect_is_neither_a_find_nor_a_false_positive(tmp_path):
+    """The fix lives on a branch. An agent scanning a tree without it is right
+    to report the defect, so precision must not be punished -- and recall must
+    not be flattered either."""
+    led = _ledger_with(tmp_path, [_seed(fixed_in="fix/CORVID-7-orders-limit")])
+    card = score([_report()], led)
+    assert card.matches == []
+    assert card.false_positives == [], "a correct observation is not a false positive"
+    assert [g for _, g in card.retired_hits] == ["API-01"]
+    assert card.summary()["retired_hits"] == 1
+
+
+def test_retiring_one_defect_does_not_disturb_the_others(tmp_path):
+    led = _ledger_with(tmp_path, [
+        _seed("API-01", fixed_in="fix/x"),
+        _seed("API-02", location={"endpoint": "GET /v1/orders/{id}",
+                                  "paths": ["api/app/routes/orders.py"]},
+              title="Order detail leaks across organizations",
+              detail="No org scoping on the detail route.",
+              keywords=["tenant", "cross-tenant", "org", "leak", "authorization"]),
+    ])
+    card = score([_report()], led)
+    assert card.total_golden == 1, "only the unfixed defect is expected"
+    assert card.missed == ["API-02"]
+    assert [g for _, g in card.retired_hits] == ["API-01"]
+    assert card.false_positives == []

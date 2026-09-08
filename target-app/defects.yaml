@@ -11,6 +11,13 @@
 #
 # Keep this file in sync with the code. If you change a seeded defect, change its
 # entry in the same commit — a stale ledger silently corrupts every score.
+#
+# To repair a seeded defect, set `fixed_in: <ref>` on its entry in the same
+# commit as the fix. The entry is then retired: it leaves the recall denominator
+# instead of becoming a phantom miss on every future run, and a finding that
+# still matches it counts as neither a find nor a false positive (correct on any
+# tree the fix has not reached). Do not delete the entry — the severity and
+# domain expectations here are what make a past score reproducible.
 
 version: 1
 app: corvid
@@ -289,6 +296,28 @@ defects:
 # Things that look like defects and are not. A finding that matches one of these
 # is a false positive and is scored as such.
 not_defects:
+  - id: UI-08
+    domain: frontend
+    class: bug
+    severity: major
+    title: Orders list renders one unbounded page with no pagination control
+    location:
+      ui_route: /orders
+      paths: [web/src/routes/OrdersList.tsx]
+    detail: >
+      OrdersList calls listOrders({ status }) with neither limit nor offset and
+      renders no pager, so it shows whatever one response contains. This is
+      masked today by API-01: the server ignores its own limit and returns every
+      order, so the table happens to look complete. Repairing API-01 makes the
+      endpoint correctly return its default 25 and the remaining orders become
+      unreachable — the client-side "Search by reference" box then reports no
+      match for rows that exist. A latent defect that a correct server fix turns
+      into a visible regression, which is why it must be fixed alongside API-01
+      rather than after it.
+    keywords: ["pagination", "pager", "unbounded", "page", "orders list", "no control"]
+    phase: 1
+    discovered_not_seeded: true
+
   - id: NOT-01
     title: Legacy orders endpoint returns 410 Gone
     location:

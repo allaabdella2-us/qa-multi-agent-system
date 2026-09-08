@@ -44,6 +44,18 @@ class GoldenDefect:
     # They still count, but they are weaker evidence: the ledger is a floor on
     # what exists in the app, never a complete oracle.
     discovered_not_seeded: bool = False
+    #: The ref a fix for this defect landed on, once one has. Retires the entry
+    #: from the recall denominator without deleting it -- ARBITER escalated a
+    #: correct fix because the schema had no way to say this, and CLAUDE.md
+    #: requires the ledger to change in the same commit as the defect. Deleting
+    #: the entry instead would lose the severity and domain expectations that
+    #: make a past score reproducible.
+    fixed_in: str | None = None
+
+    @property
+    def retired(self) -> bool:
+        """Fixed, so no longer expected to be present. Not scored for recall."""
+        return self.fixed_in is not None
 
 
 @dataclass(frozen=True)
@@ -94,6 +106,7 @@ def _golden(d: dict[str, Any]) -> GoldenDefect:
         phase=int(d.get("phase", 1)),
         security_relevant=bool(d.get("security_relevant", False)),
         discovered_not_seeded=bool(d.get("discovered_not_seeded", False)),
+        fixed_in=(str(d["fixed_in"]) if d.get("fixed_in") else None),
     )
 
 
@@ -249,6 +262,10 @@ class Scorecard:
     false_positives: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
     regressions_on_planted: list[tuple[str, str]] = field(default_factory=list)
+    #: Findings that matched a defect already marked `fixed_in`. Neither a find
+    #: nor a false positive: the report is correct wherever the fix has not
+    #: landed, so scoring it either way would be a lie about the run.
+    retired_hits: list[tuple[str, str]] = field(default_factory=list)
     total_golden: int = 0
     total_envelopes: int = 0
     cost_usd: float = 0.0
@@ -293,6 +310,7 @@ class Scorecard:
             "duplicate_rate": round(self.duplicate_rate, 3),
             "severity_agreement": round(self.severity_agreement, 3),
             "planted_misreported": len(self.regressions_on_planted),
+            "retired_hits": len(self.retired_hits),
             "cost_usd": round(self.cost_usd, 4),
             "cost_per_accepted": (
                 round(self.cost_per_accepted, 4) if self.cost_per_accepted is not None else None
@@ -317,14 +335,21 @@ def score(
     counting it as a find would reward exactly the ticket-spam this system is
     built to avoid.
     """
-    golden = [d for d in ledger.for_phase(phase) if domains is None or d.domain in domains]
+    in_scope = [d for d in ledger.for_phase(phase) if domains is None or d.domain in domains]
+    # A defect marked `fixed_in` is still matched -- so a report of it is not
+    # written off as a false positive -- but it leaves the recall denominator.
+    # Counting a repaired defect as a miss on every future run is exactly the
+    # silent corruption CLAUDE.md warns about.
+    golden = [d for d in in_scope if not d.retired]
+    retired = {d.id for d in in_scope if d.retired}
+    matchable = in_scope
     card = Scorecard(total_golden=len(golden), total_envelopes=len(envelopes), cost_usd=cost_usd)
 
     pairs = sorted(
         (
             (similarity(env, g), env, g)
             for env in envelopes
-            for g in golden
+            for g in matchable
             if similarity(env, g) >= threshold
         ),
         key=lambda t: -t[0],
@@ -341,15 +366,18 @@ def score(
             continue
         claimed_golden.add(g.id)
         claimed_env.add(env.id)
-        card.matches.append(
-            Match(
-                golden_id=g.id,
-                envelope_id=env.id,
-                score=round(sim, 3),
-                reported_severity=env.severity.value,
-                expected_severity=g.severity,
+        if g.id in retired:
+            card.retired_hits.append((env.id, g.id))
+        else:
+            card.matches.append(
+                Match(
+                    golden_id=g.id,
+                    envelope_id=env.id,
+                    score=round(sim, 3),
+                    reported_severity=env.severity.value,
+                    expected_severity=g.severity,
+                )
             )
-        )
 
     # Second pass: an envelope whose best match was taken gets its next-best
     # before anything else. Branding it a duplicate here was a real bug — two
@@ -363,15 +391,18 @@ def score(
         if g.id not in claimed_golden:
             claimed_golden.add(g.id)
             claimed_env.add(env.id)
-            card.matches.append(
-                Match(
-                    golden_id=g.id,
-                    envelope_id=env.id,
-                    score=round(sim, 3),
-                    reported_severity=env.severity.value,
-                    expected_severity=g.severity,
+            if g.id in retired:
+                card.retired_hits.append((env.id, g.id))
+            else:
+                card.matches.append(
+                    Match(
+                        golden_id=g.id,
+                        envelope_id=env.id,
+                        score=round(sim, 3),
+                        reported_severity=env.severity.value,
+                        expected_severity=g.severity,
+                    )
                 )
-            )
 
     for sim, env, g in contested:
         if env.id not in claimed_env:
