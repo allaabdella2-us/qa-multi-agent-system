@@ -283,11 +283,21 @@ class Conductor:
         max_reopens = self.config.thresholds.max_proof_reopens
         reopens = 0
 
+        # The envelope names the *repro* branch, which by construction carries a
+        # failing test and no fix -- it is written before any fix exists. Sending
+        # PROOF back there after a remediation round made this loop unable to
+        # ever reach VERIFIED: MENDER would fix, ARBITER approve, and PROOF
+        # re-verify the unfixed branch it had just failed on, burn a reopen and
+        # escalate. A live run recorded exactly that ("this branch cannot carry
+        # a fix"). Where MENDER put the fix is only knowable after the fact, so
+        # it is read back out of the ledger below.
+        repro_branch = envelope.reproduction.environment.branch or "main"
+        fix_branch: str | None = None
+
         while True:
-            branch = envelope.reproduction.environment.branch or "main"
             await self._dispatch(
                 specs["PROOF"], store, budget, report,
-                tasks.proof(ticket, envelope, branch=branch), map_version,
+                tasks.proof(ticket, envelope, branch=fix_branch or repro_branch), map_version,
             )
             verdict = self._latest_verdict(store, ticket)
 
@@ -312,8 +322,12 @@ class Conductor:
 
             reopens += 1
             store.log("reopened", agent="PROOF", ticket_key=ticket, attempt=reopens)
+            mark = len(list(store.ledger("vcs")))
             if not await self._remediate(envelope, specs, store, budget, report, map_version):
                 return
+            # Keep the previous branch if this round wrote nothing: a re-verify
+            # of the last fix beats silently falling back to the repro branch.
+            fix_branch = self._branch_written_since(store, mark) or fix_branch
 
     async def _remediate(self, envelope, specs, store, budget, report, map_version) -> bool:
         """MENDER -> ARBITER, bounded. Returns whether a fix is ready to re-verify.
@@ -352,6 +366,23 @@ class Conductor:
             f"{ticket}: {self.config.thresholds.max_mender_arbiter_round_trips} "
             "MENDER/ARBITER round trips without approval; escalating")
         return False
+
+    @staticmethod
+    def _branch_written_since(store, mark: int) -> str | None:
+        """The branch MENDER actually wrote to during one remediation round.
+
+        Scoped to the ledger entries added since `mark` rather than searched
+        run-wide, because a run verifies several tickets against one ledger and
+        an earlier ticket's `fix/*` branch is the wrong answer here. The last
+        write wins: MENDER ends a successful round on `push` or `open_pr`.
+        """
+        for entry in reversed(list(store.ledger("vcs"))[mark:]):
+            if entry.agent != "MENDER":
+                continue
+            branch = entry.detail.get("branch")
+            if branch:
+                return str(branch)
+        return None
 
     @staticmethod
     def _latest_verdict(store, ticket_key: str) -> str | None:

@@ -307,6 +307,56 @@ async def test_not_fixed_with_a_mender_runs_the_fix_loop(cfg, tmp_path, verdicts
     assert not report.escalations
 
 
+def _mender_pushes(branch: str):
+    """MENDER's hook: log the vcs write a real fix round leaves in the ledger."""
+    def hook(ctx, spec):
+        ctx.store.log("vcs", agent="MENDER", action="create_branch", branch=branch)
+        ctx.store.log("vcs", agent="MENDER", action="push", branch=branch)
+    return hook
+
+
+async def test_proof_reverifies_on_menders_branch_not_the_repro_branch(cfg, tmp_path, verdicts):
+    """The bug this pins: the envelope names the *repro* branch, which carries
+    the failing test and no fix. Re-sending PROOF there after a remediation
+    round made VERIFIED unreachable -- PROOF re-verified the unfixed branch it
+    had just failed on, burned a reopen and escalated. A live run recorded
+    exactly that."""
+    calls, behaviour, script = verdicts
+    script("NOT_FIXED", "VERIFIED")
+    behaviour["ARBITER"] = {"review": "APPROVE"}
+    behaviour["MENDER"] = {"hook": _mender_pushes("fix/CORVID-1-limit")}
+    store = RunStore.new(tmp_path)
+    _filed(store, branch="qa/repro/61297327-orders-limit-ignored")
+
+    report = await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    proof_tasks = [task for name, task in calls if name == "PROOF"]
+    assert len(proof_tasks) == 2, [n for n, _ in calls]
+    assert "qa/repro/61297327-orders-limit-ignored" in proof_tasks[0]
+    assert "fix/CORVID-1-limit" in proof_tasks[1]
+    assert "qa/repro/61297327-orders-limit-ignored" not in proof_tasks[1].splitlines()[0]
+    assert not report.escalations
+
+
+async def test_a_remediation_round_that_writes_nothing_keeps_the_repro_branch(cfg, tmp_path, verdicts):
+    """No vcs write means no fix branch to find. PROOF stays where it was rather
+    than being sent to some other ticket's branch picked up from the ledger."""
+    calls, behaviour, script = verdicts
+    script("NOT_FIXED", "VERIFIED")
+    behaviour["ARBITER"] = {"review": "APPROVE"}
+    behaviour["MENDER"] = {}
+    store = RunStore.new(tmp_path)
+    # A stale entry from an earlier ticket in the same run: run-wide scanning
+    # would hand PROOF this branch, which has nothing to do with CORVID-1.
+    store.log("vcs", agent="MENDER", action="push", branch="fix/CORVID-99-unrelated")
+    _filed(store, branch="qa/repro/orders-limit")
+
+    await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    proof_tasks = [task for name, task in calls if name == "PROOF"]
+    assert len(proof_tasks) == 2
+    assert "qa/repro/orders-limit" in proof_tasks[1]
+    assert "CORVID-99" not in proof_tasks[1]
+
+
 async def test_arbiter_requesting_changes_sends_it_back_to_mender(cfg, tmp_path, verdicts):
     """§8.3: bounded round trips. Two REQUEST_CHANGES exhausts the limit and
     escalates rather than looping until the budget is gone."""
