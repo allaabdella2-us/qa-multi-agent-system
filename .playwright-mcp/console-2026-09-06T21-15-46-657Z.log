@@ -1,0 +1,2 @@
+[   29112ms] [ERROR] Access to fetch at 'http://localhost:8000/v1/orders/37' from origin 'http://localhost:5173' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource. @ http://localhost:5173/orders/37:0
+[   29112ms] [ERROR] Failed to load resource: net::ERR_FAILED @ http://localhost:8000/v1/orders/37:0

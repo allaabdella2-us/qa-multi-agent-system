@@ -1,0 +1,246 @@
+openapi: 3.1.0
+info:
+  title: Corvid Orders API
+  version: "1.0.0"
+  description: >
+    Order and invoice management for small organizations. This document is the
+    contract. Where the implementation disagrees with it, the implementation is
+    wrong until a spec change says otherwise.
+servers:
+  - url: http://localhost:8000
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, example: not_found }
+            message: { type: string }
+
+    Order:
+      type: object
+      required: [id, org_id, reference, status, total_cents, currency, created_at]
+      properties:
+        id: { type: integer }
+        org_id: { type: integer }
+        reference: { type: string }
+        status: { type: string, enum: [draft, placed, paid, refunded, cancelled] }
+        total_cents: { type: integer, minimum: 0 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        created_at: { type: string, format: date-time }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/OrderItem" }
+
+    OrderItem:
+      type: object
+      required: [sku, description, quantity, unit_price_cents]
+      properties:
+        sku: { type: string }
+        description: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        unit_price_cents: { type: integer, minimum: 0 }
+
+    OrderCreate:
+      type: object
+      required: [reference, items]
+      additionalProperties: false
+      properties:
+        reference: { type: string, minLength: 1, maxLength: 64 }
+        currency: { type: string, minLength: 3, maxLength: 3, default: USD }
+        items:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/OrderItem" }
+
+    OrderPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Order" }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    Invoice:
+      type: object
+      required: [id, order_id, number, amount_cents, currency, issued_at, status]
+      properties:
+        id: { type: integer }
+        order_id: { type: integer }
+        number: { type: string }
+        amount_cents: { type: integer }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        issued_at: { type: string, format: date-time }
+        status: { type: string, enum: [open, paid, void] }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+
+    LoginResponse:
+      type: object
+      required: [access_token, token_type, role]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [bearer] }
+        role: { type: string, enum: [admin, member, viewer] }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Forbidden:
+      description: Authenticated but not permitted
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: No such resource
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/auth/login:
+    post:
+      summary: Exchange credentials for a token
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LoginRequest" } } }
+      responses:
+        "200":
+          description: Token issued
+          content: { application/json: { schema: { $ref: "#/components/schemas/LoginResponse" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/orders:
+    get:
+      summary: List orders in the caller's organization
+      operationId: listOrders
+      parameters:
+        - { name: limit,  in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: status, in: query, schema: { type: string, enum: [draft, placed, paid, refunded, cancelled] } }
+      responses:
+        "200":
+          description: A bounded page of orders
+          content: { application/json: { schema: { $ref: "#/components/schemas/OrderPage" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: Create an order
+      description: >
+        Server-controlled fields (status, total_cents) are computed and must be
+        rejected if supplied by the client.
+      operationId: createOrder
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/OrderCreate" } } }
+      responses:
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: Validation failed
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /v1/orders/legacy:
+    get:
+      summary: Removed in v1. Present so old clients get a clear answer.
+      deprecated: true
+      operationId: legacyOrders
+      responses:
+        "410":
+          description: Gone, permanently. Use GET /v1/orders.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  /v1/orders/{order_id}:
+    parameters:
+      - { name: order_id, in: path, required: true, schema: { type: integer } }
+    get:
+      summary: Fetch one order from the caller's organization
+      description: Orders outside the caller's organization must return 404, never their contents.
+      operationId: getOrder
+      responses:
+        "200":
+          description: The order
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      summary: Cancel an order
+      operationId: deleteOrder
+      responses:
+        "204": { description: Cancelled }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/orders/{order_id}/refund:
+    parameters:
+      - { name: order_id, in: path, required: true, schema: { type: integer } }
+    post:
+      summary: Refund a paid order
+      description: Requires the admin role. Members and viewers must receive 403.
+      operationId: refundOrder
+      responses:
+        "200":
+          description: Refunded
+          content: { application/json: { schema: { $ref: "#/components/schemas/Order" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/invoices:
+    get:
+      summary: List invoices in the caller's organization
+      operationId: listInvoices
+      parameters:
+        - { name: limit,  in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: offset, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        "200":
+          description: Invoices
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total, limit, offset]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Invoice" }
+                  total: { type: integer }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/health:
+    get:
+      summary: Liveness probe
+      security: []
+      operationId: health
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }

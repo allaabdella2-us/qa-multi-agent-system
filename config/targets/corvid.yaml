@@ -1,0 +1,56 @@
+# The bundled demo application. This profile is also the worked example: copy it
+# and edit for your own repository, or generate one with `qaas init <path>`.
+name: corvid
+root: target-app
+description: >
+  Corvid — order and invoice management for small organizations. A deliberately
+  buggy application used to calibrate this system: its defects are known, so
+  discovery can be scored rather than guessed at.
+default_branch: main
+
+layout:
+  backend: [api/app]
+  frontend: [web/src]
+  tests: [tests]
+  migrations: [api/migrations]
+  spec: openapi.yaml
+  ownership: CODEOWNERS
+
+environment:
+  mode: compose
+  compose_file: docker-compose.yml
+  services: [db, api, web]
+  api_url: http://localhost:8000
+  web_url: http://localhost:5173
+  health_path: /v1/health
+  seed_sql: api/seed/fixtures.sql
+  db_service: db
+  db_user: corvid
+  db_name: corvid
+
+auth:
+  mode: login
+  login_endpoint: POST /v1/auth/login
+  username_field: email
+  password_field: password
+  token_path: access_token
+  roles:
+    admin:
+      username: admin@northwind.test
+      password_env: CORVID_PASSWORD
+      description: Full access, including refunds.
+    member:
+      username: member@northwind.test
+      password_env: CORVID_PASSWORD
+      description: Can create and read orders in their own organization.
+    viewer:
+      username: viewer@northwind.test
+      password_env: CORVID_PASSWORD
+      description: Read-only. Must not be able to refund.
+    other_org:
+      username: admin@contoso.test
+      password_env: CORVID_PASSWORD
+      description: A second organization, for testing tenant isolation.
+
+# Only a calibration target has one of these.
+ledger: defects.yaml

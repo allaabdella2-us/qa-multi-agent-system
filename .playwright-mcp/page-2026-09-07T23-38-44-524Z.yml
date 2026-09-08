@@ -1,0 +1,53 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - generic [ref=f1e5]:
+      - generic [ref=f1e6]: Corvid Orders
+      - navigation "Main" [ref=f1e7]:
+        - link "Orders" [ref=f1e8] [cursor=pointer]:
+          - /url: /orders
+        - link "New order" [ref=f1e9] [cursor=pointer]:
+          - /url: /orders/new
+      - generic [ref=f1e10]:
+        - generic [ref=f1e11]: admin@northwind.testadmin
+        - button "Sign out" [ref=f1e12] [cursor=pointer]
+  - main [ref=f1e13]:
+    - generic [ref=f1e92]:
+      - generic [ref=f1e93]:
+        - heading "NW-9002" [level=1] [ref=f1e94]
+        - generic [ref=f1e95]: draft
+      - status [ref=f1e96]: Order placed.
+      - generic [ref=f1e97]:
+        - generic [ref=f1e98]:
+          - generic [ref=f1e99]:
+            - term [ref=f1e100]: Order id
+            - definition [ref=f1e101]: "37"
+          - generic [ref=f1e102]:
+            - term [ref=f1e103]: Created
+            - definition [ref=f1e104]: Sep 7, 2026
+          - generic [ref=f1e105]:
+            - term [ref=f1e106]: Total
+            - definition [ref=f1e107]: $47.50
+        - heading "Items" [level=2] [ref=f1e108]
+        - table [ref=f1e109]:
+          - rowgroup [ref=f1e110]:
+            - row [ref=f1e111]:
+              - columnheader "SKU" [ref=f1e112]
+              - columnheader "Description" [ref=f1e113]
+              - columnheader "Qty" [ref=f1e114]
+              - columnheader "Unit price" [ref=f1e115]
+              - columnheader "Line total" [ref=f1e116]
+          - rowgroup [ref=f1e117]:
+            - row [ref=f1e118]:
+              - cell "SKU-AAA" [ref=f1e119]
+              - cell "Widget large" [ref=f1e120]
+              - cell "3" [ref=f1e121]
+              - cell "$12.50" [ref=f1e122]
+              - cell "$37.50" [ref=f1e123]
+            - row [ref=f1e124]:
+              - cell "SKU-BBB" [ref=f1e125]
+              - cell "Widget small" [ref=f1e126]
+              - cell "2" [ref=f1e127]
+              - cell "$5.00" [ref=f1e128]
+              - cell "$10.00" [ref=f1e129]
+      - link "Back to orders" [ref=f1e130] [cursor=pointer]:
+        - /url: /orders

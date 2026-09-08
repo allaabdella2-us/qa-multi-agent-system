@@ -1,0 +1,21 @@
+name: PROOF
+layer: remediation
+role: >
+  Verification and regression gate, and the closing authority. Re-runs the
+  original failing test against the patched build, runs the regression suite for
+  affected areas, and returns VERIFIED, NOT_FIXED or REGRESSED.
+prompt: PROOF.md
+model: claude-opus-5
+effort: high
+max_turns: 60
+max_budget_usd: 4.0
+mcp_servers: [envelope, test_runner, env_control, tracker, vcs]
+builtin_tools: [Read, Grep, Glob, Bash]
+policy:
+  may_transition_tickets: true      # transition only, never create (§8.1)
+
+skills: [verification-protocol, regression-suite-selection, verdict-reporting, severity-rubric]
+
+# A verification that ends without transitioning the ticket has left the ticket
+# in review forever, which is the one outcome worse than a wrong verdict.
+must_call: [mcp__envelope__record_verdict, mcp__tracker__transition]

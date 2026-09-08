@@ -1,0 +1,866 @@
+"""qaas — command line for the multi-agent QA system."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config
+from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
+
+SKILLS_DIR = Path(__file__).resolve().parents[2] / ".claude" / "skills"
+
+app = typer.Typer(add_completion=False, help="Multi-agent QA & remediation system.")
+console = Console()
+
+ConfigDir = typer.Option("config", "--config", "-c", help="Config directory.")
+Root = typer.Option(DEFAULT_ROOT, "--root", help="Runtime state directory.")
+
+
+@app.command()
+def init(
+    repo: str = typer.Argument(..., help="Path to a local repository, or a git URL to clone."),
+    name: str = typer.Option(None, "--name", "-n", help="Target name. Defaults to the directory name."),
+    api_url: str = typer.Option(None, "--api-url", help="Base URL of a running API, if there is one."),
+    web_url: str = typer.Option(None, "--web-url", help="Base URL of a running UI, if there is one."),
+    clone_to: Path = typer.Option(Path("targets"), "--clone-to", help="Where to clone, for a git URL."),
+    config_dir: Path = ConfigDir,
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing profile."),
+) -> None:
+    """Point this system at a repository by writing a target profile.
+
+    Everything it writes is a guess you are expected to review. Nothing runs and
+    nothing is called until you do.
+    """
+    import re
+    import subprocess
+
+    import yaml as _yaml
+
+    from qaas.discover import build_profile
+    from qaas.target import Environment
+
+    repo_url = None
+    if re.match(r"^(https?://|git@|ssh://)", repo):
+        repo_url = repo
+        slug = re.sub(r"\.git$", "", repo.rstrip("/").split("/")[-1])
+        root = Path(clone_to) / slug
+        if root.exists():
+            console.print(f"[dim]using existing clone at {root}[/dim]")
+        else:
+            root.parent.mkdir(parents=True, exist_ok=True)
+            console.print(f"cloning {repo_url} -> {root}")
+            result = subprocess.run(
+                ["git", "clone", "--depth", "50", repo_url, str(root)],
+                capture_output=True, text=True, timeout=600,
+            )
+            if result.returncode != 0:
+                console.print(f"[red]clone failed:[/red] {result.stderr.strip()[:400]}")
+                raise typer.Exit(1)
+    else:
+        root = Path(repo).expanduser()
+        if not root.is_dir():
+            console.print(f"[red]not a directory:[/red] {root}")
+            raise typer.Exit(1)
+
+    target_name = (name or root.resolve().name).lower()
+    target_name = re.sub(r"[^a-z0-9-]+", "-", target_name).strip("-")[:40] or "target"
+
+    out = Path(config_dir) / "targets" / f"{target_name}.yaml"
+    if out.exists() and not force:
+        console.print(f"[red]{out} already exists.[/red] Use --force to overwrite.")
+        raise typer.Exit(1)
+
+    branch = "main"
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head.returncode == 0 and head.stdout.strip():
+        branch = head.stdout.strip()
+
+    profile, notes = build_profile(
+        target_name, root, repo_url=repo_url, default_branch=branch
+    )
+    if api_url or web_url:
+        profile = profile.model_copy(
+            update={"environment": Environment(mode="external", api_url=api_url, web_url=web_url)}
+        )
+
+    payload = profile.model_dump(exclude_none=True, exclude_defaults=False)
+    payload.pop("ledger", None)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        "# Target profile. Everything here was guessed by inspection — review it.\n"
+        "# Credentials never belong in this file: reference environment variables.\n\n"
+        + _yaml.safe_dump(payload, sort_keys=False, width=88)
+    )
+
+    console.print(f"\n[green]wrote {out}[/green]\n")
+    table = Table(header_style="bold", show_header=True)
+    table.add_column("detected")
+    table.add_column("value")
+    for label, value in (
+        ("backend", ", ".join(profile.layout.backend) or "-"),
+        ("frontend", ", ".join(profile.layout.frontend) or "-"),
+        ("tests", ", ".join(profile.layout.tests) or "-"),
+        ("api spec", profile.layout.spec or "-"),
+        ("ownership", profile.layout.ownership or "-"),
+        ("environment", profile.environment.mode),
+    ):
+        table.add_row(label, value)
+    console.print(table)
+
+    for note in notes:
+        console.print(f"[yellow]note:[/yellow] {note}")
+
+    console.print(
+        f"\n[bold]next[/bold]\n"
+        f"  1. Read {out} and correct anything wrong.\n"
+        f"  2. If the app runs somewhere, set environment.mode and the URLs, and fill in auth.\n"
+        f"  3. Set `target: {target_name}` in {config_dir}/system.yaml.\n"
+        f"  4. `qaas doctor` to check readiness, then `qaas run --mode pr-check --dry-run`.\n"
+    )
+
+
+@app.command()
+def targets(config_dir: Path = ConfigDir) -> None:
+    """List the target profiles this system knows about."""
+    from qaas.target import list_targets, load_target
+
+    names = list_targets(Path(config_dir) / "targets")
+    if not names:
+        console.print("[dim]no targets yet — run `qaas init <path-to-repo>`[/dim]")
+        return
+    active = load_config(config_dir).target
+    table = Table(header_style="bold")
+    for col in ("target", "root", "environment", "scored"):
+        table.add_column(col)
+    for n in names:
+        p = load_target(n, Path(config_dir) / "targets")
+        table.add_row(
+            f"[bold]{n}[/bold] (active)" if n == active else n,
+            p.root,
+            p.environment.mode,
+            "yes" if p.ledger else "no",
+        )
+    console.print(table)
+
+
+@app.command()
+def doctor(
+    config_dir: Path = ConfigDir,
+    target: str = typer.Option(None, "--target", "-t", help="Check this profile instead of the active one."),
+) -> None:
+    """Check whether a target is ready to run against."""
+    from qaas.target import load_target
+
+    cfg = load_config(config_dir)
+    profile = load_target(target, Path(config_dir) / "targets") if target else cfg.profile
+    if profile is None:
+        console.print("[red]no target profile loaded[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold]{profile.name}[/bold]  {profile.root}")
+    if profile.description:
+        console.print(f"[dim]{profile.description.strip()}[/dim]")
+
+    caps = profile.capabilities()
+    table = Table(header_style="bold")
+    table.add_column("capability")
+    table.add_column("", justify="center")
+    table.add_column("meaning")
+    meanings = {
+        "static_analysis": "read the code, schema and spec",
+        "spec_diff": "compare the implementation against a declared contract",
+        "live_api": "call the API and observe real responses",
+        "live_ui": "drive the UI in a browser",
+        "reset_state": "seed and reset between checks",
+        "impersonate": "act as different roles",
+        "scored": "measure recall against a golden ledger",
+    }
+    for cap, ok in caps.items():
+        table.add_row(cap, "[green]yes[/green]" if ok else "[dim]no[/dim]", meanings[cap])
+    console.print(table)
+
+    usable = [name for name, spec in sorted(cfg.agents.items()) if _agent_usable(spec, caps)]
+    blocked = [n for n in sorted(cfg.agents) if n not in usable]
+    console.print(f"\nagents that can work here: [green]{', '.join(usable)}[/green]")
+    if blocked:
+        console.print(f"agents that cannot: [yellow]{', '.join(blocked)}[/yellow]")
+
+    problems = profile.readiness()
+    if problems:
+        console.print("\n[red]not ready:[/red]")
+        for p in problems:
+            console.print(f"  - {p}")
+        raise typer.Exit(1)
+    console.print("\n[green]ready[/green]")
+
+
+def _agent_usable(spec, caps: dict[str, bool]) -> bool:
+    """Whether an agent can do useful work with the capabilities available.
+
+    SURFACE without a browser-reachable UI has nothing to do; the rest can all
+    contribute from static analysis alone, at lower confidence.
+    """
+    if spec.name == "SURFACE":
+        return caps["live_ui"]
+    if spec.name == "PROOF":
+        return caps["live_api"] or caps["static_analysis"]
+    return True
+
+
+@app.command()
+def validate(config_dir: Path = ConfigDir) -> None:
+    """Check config, prompts, and tool allowlists without calling the API."""
+    try:
+        cfg = load_config(config_dir)
+    except Exception as exc:
+        console.print(f"[red]config invalid:[/red] {exc}")
+        raise typer.Exit(1)
+
+    prompts_dir = Path(__file__).parent / "prompts"
+    problems: list[str] = []
+    for name, spec in sorted(cfg.agents.items()):
+        if not spec.prompt_path(prompts_dir).exists():
+            problems.append(f"{name}: missing prompt file {spec.prompt}")
+        if not spec.mcp_servers and not spec.builtin_tools:
+            problems.append(f"{name}: has no tools at all")
+        if spec.policy.may_create_tickets and spec.policy.max_tickets_per_run <= 0:
+            problems.append(f"{name}: may create tickets but has no per-run cap")
+        for skill in spec.skills:
+            if not (SKILLS_DIR / skill / "SKILL.md").exists():
+                problems.append(f"{name}: names skill '{skill}' with no SKILL.md")
+        for tool in spec.must_call:
+            if tool.startswith("mcp__") and tool.split("__")[1] not in spec.mcp_servers:
+                problems.append(f"{name}: must_call '{tool}' but lacks that server")
+
+    referenced = {s for spec in cfg.agents.values() for s in spec.skills}
+    orphans = {p.parent.name for p in SKILLS_DIR.glob("*/SKILL.md")} - referenced
+    if orphans:
+        problems.append(f"skills on disk that no agent uses: {', '.join(sorted(orphans))}")
+
+    table = Table(title="Agents", header_style="bold")
+    for col in ("agent", "layer", "model", "servers", "skills", "must call", "writes"):
+        table.add_column(col)
+    for name, spec in sorted(cfg.agents.items()):
+        writes = "read-only" if spec.policy.read_only else _describe_writes(spec)
+        table.add_row(
+            name,
+            spec.layer,
+            spec.model,
+            f"{len(spec.mcp_servers)}/{MAX_MCP_SERVERS_PER_AGENT}",
+            str(len(spec.skills)),
+            ", ".join(t.rsplit("__", 1)[-1] for t in spec.must_call) or "-",
+            writes,
+        )
+    console.print(table)
+
+    for mode, rm in sorted(cfg.run_modes.items()):
+        filing = "" if rm.files_tickets else "  [dim](no filing)[/dim]"
+        console.print(
+            f"[bold]{mode}[/bold]: {', '.join(rm.agents)}  "
+            f"[dim]budget ${rm.max_budget_usd:.2f}, {rm.max_wall_clock_s}s[/dim]{filing}"
+        )
+
+    if problems:
+        console.print("\n[red]problems:[/red]")
+        for p in problems:
+            console.print(f"  - {p}")
+        raise typer.Exit(1)
+    console.print("\n[green]config ok[/green]")
+
+
+def _describe_writes(spec) -> str:
+    bits = []
+    if spec.policy.write_paths:
+        bits.append("paths:" + ",".join(spec.policy.write_paths))
+    if spec.policy.branch_patterns:
+        bits.append("branch:" + ",".join(spec.policy.branch_patterns))
+    if spec.policy.may_create_tickets:
+        bits.append(f"tickets<={spec.policy.max_tickets_per_run}")
+    if spec.policy.may_transition_tickets:
+        bits.append("transition")
+    if spec.policy.may_open_pr:
+        bits.append("open-pr")
+    return " ".join(bits)
+
+
+@app.command()
+def runs(root: Path = Root, limit: int = 10) -> None:
+    """List recent runs with their cost and finding count."""
+    ids = list_runs(root)[:limit]
+    if not ids:
+        console.print("[dim]no runs yet[/dim]")
+        return
+    table = Table(header_style="bold")
+    for col in ("run", "envelopes", "agents", "cost"):
+        table.add_column(col)
+    for run_id in ids:
+        store = RunStore(run_id, root)
+        results = store.results()
+        table.add_row(
+            run_id,
+            str(len(store.envelopes())),
+            str(len(results)),
+            f"${store.total_cost_usd():.2f}",
+        )
+    console.print(table)
+
+
+@app.command()
+def show(run_id: str, root: Path = Root) -> None:
+    """Show one run's findings and ledger."""
+    store = RunStore(run_id, root)
+    for env in store.envelopes():
+        ok, reason = env.is_fileable()
+        gate = "[green]fileable[/green]" if ok else f"[yellow]held: {reason}[/yellow]"
+        console.print(
+            f"[bold]{env.severity.value:8s}[/bold] {env.domain.value:12s} "
+            f"{env.title}  [dim]({env.discovered_by}, conf {env.confidence:.2f})[/dim]  {gate}"
+        )
+    denials = list(store.ledger("denial"))
+    if denials:
+        console.print(f"\n[bold]guardrail denials ({len(denials)})[/bold]")
+        for d in denials:
+            console.print(f"  {d.agent}: {d.detail.get('tool')} — {d.detail.get('reason')}")
+
+
+@app.command()
+def map(root: Path = Root, version: str | None = None) -> None:
+    """Show the system map Cartographer produced."""
+    maps = SystemMapStore(root)
+    payload = maps.get(version)
+    if payload is None:
+        console.print("[dim]no system map yet — run CARTOGRAPHER[/dim]")
+        raise typer.Exit(1)
+    console.print(f"[bold]version[/bold] {version or maps.latest_version()}")
+    console.print_json(data=payload)
+
+
+@app.command()
+def run(
+    mode: str = typer.Option(..., "--mode", "-m", help="Run mode from system.yaml."),
+    config_dir: Path = ConfigDir,
+    root: Path = Root,
+    only: list[str] = typer.Option(None, "--only", help="Restrict the run to these agents."),
+    target: str = typer.Option(None, "--target", "-t", help="Target profile to run against. Overrides system.yaml."),
+    run_id: str = typer.Option(None, "--run-id", help="Continue an existing run rather than starting one."),
+    ticket: list[str] = typer.Option(None, "--ticket", help="Restrict a fix-cycle to these tickets."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Render the plan without calling the API."),
+) -> None:
+    """Execute a run. Costs real money unless --dry-run."""
+    import asyncio
+
+    from qaas.conductor import Conductor
+    from qaas.registry import describe
+    from qaas.target import load_target
+
+    cfg = load_config(config_dir)
+    if target:
+        profile = load_target(target, Path(config_dir) / "targets")
+        cfg = cfg.model_copy(update={"target": target, "profile": profile, "target_app": profile.root})
+    if cfg.profile:
+        problems = cfg.profile.readiness()
+        blocking = [p for p in problems if "does not exist" in p or "not a directory" in p]
+        if blocking:
+            console.print(f"[red]target '{cfg.target}' is not usable:[/red]")
+            for p in blocking:
+                console.print(f"  - {p}")
+            raise typer.Exit(1)
+        for p in problems:
+            console.print(f"[yellow]warning:[/yellow] {p}")
+        console.print(f"[dim]target: {cfg.target} ({cfg.profile.environment.mode})[/dim]")
+    if only:
+        wanted = {a.upper() for a in only}
+        unknown = wanted - set(cfg.agents)
+        if unknown:
+            console.print(f"[red]unknown agents: {', '.join(sorted(unknown))}[/red]")
+            raise typer.Exit(1)
+        mode_cfg = cfg.run_modes[mode]
+        cfg = cfg.model_copy(
+            update={
+                "run_modes": {
+                    **cfg.run_modes,
+                    mode: mode_cfg.model_copy(
+                        update={"agents": [a for a in mode_cfg.agents if a in wanted]}
+                    ),
+                }
+            }
+        )
+    specs = cfg.enabled_agents(mode)
+    rm = cfg.run_modes[mode]
+    console.print(
+        f"[bold]{mode}[/bold] — {len(specs)} agents, "
+        f"budget ${rm.max_budget_usd:.2f}, concurrency {rm.max_concurrency}"
+    )
+
+    if dry_run:
+        for spec in specs:
+            d = describe(spec)
+            console.print(
+                f"  [bold]{spec.name:14s}[/bold] {spec.model:18s} effort={spec.effort:7s} "
+                f"turns<={spec.max_turns:<3d} ${spec.max_budget_usd:.2f}"
+            )
+            console.print(f"    tools: {', '.join(d['allowed_tools'])}")
+            console.print(f"    prompt: {d['prompt_chars']} chars")
+        return
+
+    def on_event(kind: str, detail: dict) -> None:
+        if kind == "agent_started":
+            console.print(f"[dim]->[/dim] {detail.get('agent')} [dim](${detail.get('budget', 0):.2f})[/dim]")
+        elif kind == "finished":
+            console.print(
+                f"[dim]<-[/dim] {detail.get('agent')} "
+                f"[dim]${detail.get('cost', 0):.3f}, {detail.get('envelopes', 0)} findings[/dim]"
+            )
+        elif kind == "stopped":
+            console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
+
+    conductor = Conductor(cfg, repo_root=Path.cwd(), root=root, on_event=on_event, tickets=list(ticket) if ticket else None)
+    report = asyncio.run(conductor.run(mode, run_id=run_id))
+
+    console.print()
+    console.print_json(data=report.summary())
+    if report.failed or report.stopped_early:
+        raise typer.Exit(1)
+
+
+@app.command()
+def score(
+    run_id: str = typer.Argument(None, help="Run to score. Defaults to the most recent."),
+    config_dir: Path = ConfigDir,
+    root: Path = Root,
+    phase: int = typer.Option(1, help="Score against defects seeded for this phase and earlier."),
+    domains: list[str] = typer.Option(
+        None, "--domain", help="Restrict scoring to these domains. Use it when a run covered only part of the surface."
+    ),
+) -> None:
+    """Score a run against the golden ledger. This is the honest number."""
+    from qaas.scorecard import GoldenLedger, score as score_run
+
+    cfg = load_config(config_dir)
+    ledger_path = Path(cfg.target_app) / "defects.yaml"
+    if not ledger_path.exists():
+        console.print(f"[red]no golden ledger at {ledger_path}[/red]")
+        raise typer.Exit(1)
+
+    if run_id is None:
+        ids = list_runs(root)
+        if not ids:
+            console.print("[dim]no runs to score[/dim]")
+            raise typer.Exit(1)
+        run_id = ids[0]
+
+    store = RunStore(run_id, root)
+    card = score_run(
+        store.envelopes(),
+        GoldenLedger.load(ledger_path),
+        phase=phase,
+        domains=set(domains) if domains else None,
+        cost_usd=store.total_cost_usd(),
+    )
+    s = card.summary()
+
+    console.print(f"[bold]{run_id}[/bold]")
+    table = Table(header_style="bold")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    table.add_row("found", f"{s['found']} of {s['of']}")
+    table.add_row("recall", f"{s['recall']:.0%}")
+    table.add_row("precision", f"{s['precision']:.0%}")
+    table.add_row("false positives", f"{s['false_positives']} ({s['false_positive_rate']:.0%})")
+    table.add_row("duplicates", f"{s['duplicates']} ({s['duplicate_rate']:.0%})")
+    table.add_row("severity agreement", f"{s['severity_agreement']:.0%}")
+    table.add_row("cost", f"${s['cost_usd']:.2f}")
+    table.add_row(
+        "cost per accepted",
+        f"${s['cost_per_accepted']:.2f}" if s["cost_per_accepted"] is not None else "-",
+    )
+    console.print(table)
+
+    if card.matches:
+        console.print("\n[bold]found[/bold]")
+        for m in card.matches:
+            flag = "" if abs(m.severity_delta) <= 1 else f"  [yellow]severity off by {abs(m.severity_delta)}[/yellow]"
+            console.print(f"  [green]{m.golden_id}[/green] (match {m.score}){flag}")
+    if card.missed:
+        console.print(f"\n[bold]missed[/bold]: {', '.join(card.missed)}")
+    if card.regressions_on_planted:
+        console.print("\n[red]reported deliberately-correct behaviour as a defect[/red]")
+        for env_id, planted in card.regressions_on_planted:
+            console.print(f"  {planted}  [dim]({env_id})[/dim]")
+
+
+@app.command()
+def sweep(
+    mode: str = typer.Option("nightly", "--mode", "-m"),
+    config_dir: Path = ConfigDir,
+    root: Path = Root,
+    min_precision: float = typer.Option(
+        0.70, help="Quality gate. §11 stops the rollout below 70% accepted."
+    ),
+) -> None:
+    """Run, then score, then gate. This is the command to put in cron.
+
+    Exits non-zero when precision falls below the gate, so a scheduled sweep
+    that starts producing noise fails loudly instead of quietly filling a
+    backlog nobody reads.
+    """
+    import asyncio
+
+    from qaas.conductor import Conductor
+    from qaas.scorecard import GoldenLedger, score as score_run
+
+    cfg = load_config(config_dir)
+    conductor = Conductor(cfg, repo_root=Path.cwd(), root=root)
+    report = asyncio.run(conductor.run(mode))
+    console.print_json(data=report.summary())
+
+    ledger_path = Path(cfg.target_app) / "defects.yaml"
+    if not ledger_path.exists():
+        console.print("[yellow]no golden ledger; ran without scoring[/yellow]")
+        return
+
+    store = RunStore(report.run_id, root)
+    card = score_run(
+        store.envelopes(), GoldenLedger.load(ledger_path), cost_usd=store.total_cost_usd()
+    )
+    console.print_json(data=card.summary())
+
+    if card.precision < min_precision:
+        console.print(
+            f"[red]precision {card.precision:.0%} is below the {min_precision:.0%} gate[/red] — "
+            "tune before adding agents (§11)"
+        )
+        raise typer.Exit(1)
+    console.print(f"[green]precision {card.precision:.0%}, above the gate[/green]")
+
+
+# -- tracker-check ----------------------------------------------------------
+# Everything below exists so that the first live run is not also the first time
+# anyone finds out whether the configuration works. It makes read-only calls
+# only: an operator must be able to run it against the team's real board
+# without wondering what it left behind.
+
+#: Every environment variable the Jira backend reads, and what breaks without
+#: it. The order is the order they are needed in.
+_JIRA_ENV_HELP: dict[str, str] = {
+    "JIRA_BASE_URL": "site root, e.g. https://acme.atlassian.net (no /jira, no /rest path)",
+    "JIRA_EMAIL": "the bot account's Atlassian email — the one the token was minted for",
+    "JIRA_API_TOKEN": "an API token, not a password",
+    "JIRA_PROJECT_KEY": "default project for ordinary findings",
+    "JIRA_SECURITY_PROJECT_KEY": "restricted project; without it security findings are refused",
+    "JIRA_ISSUE_TYPE": "issue type to create (default: Bug)",
+}
+
+#: Never rendered, ever, in any form but a four-character tail.
+_JIRA_SECRET_ENV = frozenset({"JIRA_API_TOKEN"})
+
+#: House statuses this system actually drives. An unmapped one here is a real
+#: failure: PROOF asks for 'closed', nothing in the workflow matches, and the
+#: ticket stays open while the run reports a clean close. The rest of `STATUSES`
+#: are human dispositions — worth reporting, not worth failing on.
+_DRIVEN_STATUSES = ("open", "in_progress", "resolved", "closed")
+
+#: What `--dry-run-ticket` renders. A realistic CLERK ticket rather than a
+#: placeholder, because the point is to see the ADF, the labels and the
+#: fingerprint an engineer will actually receive.
+_SAMPLE_TICKET: dict[str, object] = {
+    "title": "Refund endpoint accepts any authenticated user",
+    "body": (
+        "## Repro\n"
+        "\n"
+        "- authenticate as an ordinary customer account\n"
+        "- POST /v1/orders/{order_id}/refund for an order owned by a different account\n"
+        "\n"
+        "```bash\n"
+        "curl -X POST -H \"Authorization: Bearer $CUSTOMER_TOKEN\" \\\n"
+        "  https://api.example.com/v1/orders/9001/refund\n"
+        "```\n"
+        "\n"
+        "## Impact\n"
+        "\n"
+        "Any authenticated user can refund any order. Money moves.\n"
+        "\n"
+        "## Acceptance criteria\n"
+        "\n"
+        "- the endpoint returns 403 when the caller does not own the order\n"
+        "- a regression test covers the cross-account case\n"
+    ),
+    "labels": ["agent-found"],
+    "severity": "critical",
+    "envelope_id": "env-sample-0001",
+    "fingerprint": "sha256:" + "ab12cd34" * 8,
+    "reporter": "CLERK",
+}
+
+
+def _env_display(name: str, value: str | None, required: tuple[str, ...]) -> str:
+    """One environment row. A credential's value never appears here.
+
+    The last four characters of a token are enough to tell two tokens apart
+    when you have both in front of you, and useless to anyone who does not.
+    """
+    text = (value or "").strip()
+    if not text:
+        return "[red]MISSING[/red]" if name in required else "[dim]unset[/dim]"
+    if name in _JIRA_SECRET_ENV:
+        if len(text) < 12:
+            return "[green]set[/green] (too short to show a tail safely)"
+        return f"[green]set[/green] (ends ...{text[-4:]})"
+    return f"[green]set[/green] ({text})"
+
+
+def _print_checks(rows: list[tuple[str, bool, str]]) -> None:
+    table = Table(title="connection", header_style="bold")
+    table.add_column("check")
+    table.add_column("", justify="center")
+    table.add_column("detail")
+    for label, passed, detail in rows:
+        table.add_row(label, "[green]ok[/green]" if passed else "[red]fail[/red]", detail)
+    console.print(table)
+
+
+def _check_jira_project(
+    tracker, key: str, role: str
+) -> tuple[list[tuple[str, bool, str]], list[str], list[Table]]:
+    """Verify one project: it exists, this account may write to it, the issue
+    type is available, and the house statuses map onto its workflow.
+
+    Returns its rows, its problems and any table to render, rather than
+    printing, so the caller controls the order the report reads in.
+    """
+    from qaas.adapters.tracker import TrackerError
+
+    rows: list[tuple[str, bool, str]] = []
+    problems: list[str] = []
+    tables: list[Table] = []
+
+    try:
+        info = tracker.project_info(key)
+    except TrackerError as exc:
+        rows.append((f"project {key}", False, str(exc)))
+        problems.append(f"the {role} project '{key}' could not be read. {exc}")
+        return rows, problems, tables
+    rows.append((f"project {key}", True, f"{info.get('name') or '?'} ({role})"))
+
+    try:
+        held = tracker.project_permissions(key)
+    except TrackerError as exc:
+        rows.append((f"permissions {key}", False, str(exc)))
+        problems.append(f"could not read this account's permissions on '{key}'. {exc}")
+    else:
+        lacking = [name for name, granted in held.items() if not granted]
+        rows.append(
+            (
+                f"permissions {key}",
+                not lacking,
+                "Browse, Create, Transition, Link"
+                if not lacking
+                else f"missing: {', '.join(lacking)}",
+            )
+        )
+        if lacking:
+            problems.append(
+                f"the account lacks {', '.join(lacking)} on '{key}'. Grant them to this "
+                "account's project role, or point the key at a project where it has them; "
+                "Browse reads an issue back, Create files, Transition closes, Link dedupes."
+            )
+
+    try:
+        statuses = tracker.project_statuses(key)
+    except TrackerError as exc:
+        rows.append((f"workflow {key}", False, str(exc)))
+        problems.append(f"could not read the workflow of '{key}'. {exc}")
+        return rows, problems, tables
+
+    wanted = tracker.issue_type.strip().lower()
+    matched = next((name for name in statuses if name.strip().lower() == wanted), None)
+    if matched is None:
+        rows.append(
+            (
+                f"issue type {key}",
+                False,
+                f"'{tracker.issue_type}' not in {', '.join(sorted(statuses)) or 'none'}",
+            )
+        )
+        problems.append(
+            f"'{key}' has no issue type called '{tracker.issue_type}'. It offers: "
+            f"{', '.join(sorted(statuses)) or 'nothing this account can see'}. Set "
+            "JIRA_ISSUE_TYPE to one of those."
+        )
+        return rows, problems, tables
+    rows.append((f"issue type {key}", True, f"'{matched}' exists in {key}"))
+
+    mapping = tracker.map_house_statuses(statuses[matched])
+    table = Table(title=f"workflow — {key} / {matched}", header_style="bold")
+    table.add_column("house status")
+    table.add_column("maps onto")
+    for house, target in mapping.items():
+        driven = house in _DRIVEN_STATUSES
+        if target:
+            table.add_row(house, target)
+        else:
+            table.add_row(
+                f"[red]{house}[/red]" if driven else house,
+                "[red]no match[/red]" if driven else "[yellow]no match[/yellow]",
+            )
+    tables.append(table)
+
+    unmapped = [h for h in _DRIVEN_STATUSES if mapping[h] is None]
+    if unmapped:
+        problems.append(
+            f"'{key}' has no status matching the house status(es) {', '.join(unmapped)}. "
+            "A transition to one of those will fail at the moment a ticket should close, "
+            f"which is the point at which nobody is watching. This project's statuses are: "
+            f"{', '.join(statuses[matched]) or 'none'}. Either rename a workflow status, or "
+            "use a project whose workflow speaks these words."
+        )
+    return rows, problems, tables
+
+
+def _tracker_check_jira(dry_run_ticket: bool) -> tuple[list[str], list[str]]:
+    """Every read-only Jira check. Returns (problems, warnings)."""
+    import os
+
+    from qaas.adapters.tracker import JiraTracker, TrackerConfigError, TrackerError
+
+    problems: list[str] = []
+    warnings: list[str] = []
+
+    table = Table(title="environment", header_style="bold")
+    table.add_column("variable")
+    table.add_column("status")
+    table.add_column("what it does")
+    for name, purpose in _JIRA_ENV_HELP.items():
+        table.add_row(name, _env_display(name, os.environ.get(name), JiraTracker.REQUIRED_ENV), purpose)
+    console.print(table)
+
+    missing = [n for n in JiraTracker.REQUIRED_ENV if not (os.environ.get(n) or "").strip()]
+    if missing:
+        for name in missing:
+            problems.append(f"{name} is unset or empty — {_JIRA_ENV_HELP[name]}. Export it.")
+        problems.append(
+            "nothing was contacted: the variables above are read at construction, so there "
+            "was nothing to connect with. These are credentials — export them in the shell "
+            "that runs qaas, never in config/, which is committed."
+        )
+        return problems, warnings
+
+    try:
+        tracker = JiraTracker()
+    except TrackerConfigError as exc:
+        problems.append(str(exc))
+        return problems, warnings
+
+    if tracker.security_project is None:
+        warnings.append(
+            "JIRA_SECURITY_PROJECT_KEY is unset. Security-relevant findings will be REFUSED "
+            "rather than filed — deliberately, because a vulnerability in a project the "
+            "company can read is a disclosure with no undo (§4.12, §10). They will be "
+            "escalated to a human instead. Set it to a project with restricted visibility "
+            "if you want them filed."
+        )
+
+    rows: list[tuple[str, bool, str]] = []
+    try:
+        who = tracker.whoami()
+    except TrackerError as exc:
+        rows.append(("auth", False, str(exc)))
+        _print_checks(rows)
+        problems.append(f"authentication failed, so no other check could run. {exc}")
+        return problems, warnings
+
+    account = who.get("displayName") or who.get("emailAddress") or "unknown account"
+    rows.append(("auth", True, f"authenticated as {account}"))
+
+    projects = [(tracker.default_project, "default")]
+    if tracker.security_project:
+        projects.append((tracker.security_project, "restricted"))
+
+    # Collected before anything is printed so the connection summary comes
+    # first and the workflow detail it refers to comes after it.
+    workflows: list[Table] = []
+    for key, role in projects:
+        extra_rows, extra_problems, extra_tables = _check_jira_project(tracker, key, role)
+        rows.extend(extra_rows)
+        problems.extend(extra_problems)
+        workflows.extend(extra_tables)
+    _print_checks(rows)
+    for workflow in workflows:
+        console.print(workflow)
+
+    if tracker.security_project:
+        warnings.append(
+            f"whether '{tracker.security_project}' is actually restricted cannot be checked "
+            "over the API — Jira exposes no read-only view of a project's issue-level "
+            "security scheme. Open it in a browser and confirm that people outside the "
+            "security group cannot see its issues before filing anything real."
+        )
+
+    if dry_run_ticket:
+        console.print("\n[bold]dry-run ticket[/bold] — this JSON would be POSTed to /rest/api/3/issue")
+        payload = tracker.create_payload(project=tracker.default_project, **_SAMPLE_TICKET)  # type: ignore[arg-type]
+        console.print_json(data=payload)
+        console.print("[dim]nothing was sent.[/dim]")
+
+    return problems, warnings
+
+
+@app.command("tracker-check")
+def tracker_check(
+    config_dir: Path = ConfigDir,
+    root: Path = Root,
+    dry_run_ticket: bool = typer.Option(
+        False, "--dry-run-ticket", help="Also render the JSON that would be POSTed for a sample finding."
+    ),
+) -> None:
+    """Validate the tracker configuration without creating anything.
+
+    Read-only: it authenticates, reads the projects, their permissions and their
+    workflows, and says what would break. Run it before the first live run, when
+    the alternative is discovering a wrong project key by watching real tickets
+    appear in front of real people.
+    """
+    cfg = load_config(config_dir)
+    console.print(
+        f"[bold]tracker backend[/bold]: {cfg.tracker}   "
+        f"[dim](tracker: in {Path(config_dir) / 'system.yaml'})[/dim]\n"
+    )
+
+    if cfg.tracker == "local":
+        tickets = Path(root) / "tickets"
+        count = len(list(tickets.glob("*.json"))) if tickets.is_dir() else 0
+        console.print(f"tickets are written as JSON under [bold]{tickets}[/bold] ({count} so far)")
+        console.print(
+            "[dim]no credentials are needed and nothing leaves this machine. Read what it "
+            "files there before switching to tracker: jira.[/dim]"
+        )
+        if dry_run_ticket:
+            console.print(
+                "\n[yellow]--dry-run-ticket renders the Jira REST payload[/yellow], which the "
+                "local backend does not use — it writes the house Issue model straight to "
+                "disk. Set tracker: jira to preview it."
+            )
+        console.print("\n[green]ready[/green]")
+        return
+
+    problems, warnings = _tracker_check_jira(dry_run_ticket)
+
+    for warning in warnings:
+        console.print(f"\n[yellow]warning:[/yellow] {warning}")
+    if problems:
+        console.print("\n[red]not ready:[/red]")
+        for problem in problems:
+            console.print(f"  - {problem}")
+        raise typer.Exit(1)
+    console.print("\n[green]ready[/green] — nothing was created by this check.")
+
+
+if __name__ == "__main__":
+    app()

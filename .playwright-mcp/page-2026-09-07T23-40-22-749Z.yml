@@ -1,0 +1,53 @@
+- generic [ref=f6e3]:
+  - banner [ref=f6e4]:
+    - generic [ref=f6e5]:
+      - generic [ref=f6e6]: Corvid Orders
+      - navigation "Main" [ref=f6e7]:
+        - link "Orders" [ref=f6e8] [cursor=pointer]:
+          - /url: /orders
+        - link "New order" [ref=f6e9] [cursor=pointer]:
+          - /url: /orders/new
+      - generic [ref=f6e10]:
+        - generic [ref=f6e11]: viewer@northwind.testviewer
+        - button "Sign out" [ref=f6e12] [cursor=pointer]
+  - main [ref=f6e13]:
+    - generic [ref=f6e53]:
+      - heading "Review order" [level=1] [ref=f6e55]
+      - generic [ref=f6e56]:
+        - generic [ref=f6e57]:
+          - generic [ref=f6e58]:
+            - term [ref=f6e59]: Reference
+            - definition [ref=f6e60]: NW-VIEWER-1
+          - generic [ref=f6e61]:
+            - term [ref=f6e62]: Status
+            - definition [ref=f6e63]:
+              - generic [ref=f6e64]: draft
+        - heading "Items" [level=2] [ref=f6e65]
+        - table [ref=f6e66]:
+          - rowgroup [ref=f6e67]:
+            - row [ref=f6e68]:
+              - columnheader "SKU" [ref=f6e69]
+              - columnheader "Description" [ref=f6e70]
+              - columnheader "Qty" [ref=f6e71]
+              - columnheader "Unit price" [ref=f6e72]
+              - columnheader "Line total" [ref=f6e73]
+          - rowgroup [ref=f6e74]:
+            - row [ref=f6e75]:
+              - cell "SKU-V1" [ref=f6e76]
+              - cell "Created by read-only viewer" [ref=f6e77]
+              - cell "1" [ref=f6e78]
+              - cell "$9.99" [ref=f6e79]
+              - cell "$9.99" [ref=f6e80]
+            - row [ref=f6e81]:
+              - cell "SKU-V2" [ref=f6e82]
+              - cell "Second line" [ref=f6e83]
+              - cell "1" [ref=f6e84]
+              - cell "$1.00" [ref=f6e85]
+              - cell "$1.00" [ref=f6e86]
+        - paragraph [ref=f6e87]:
+          - text: Total
+          - strong [ref=f6e88]: $10.99
+        - generic [ref=f6e89]:
+          - link "Back to order form" [ref=f6e90] [cursor=pointer]:
+            - /url: /orders/new
+          - button "Place order" [ref=f6e91] [cursor=pointer]

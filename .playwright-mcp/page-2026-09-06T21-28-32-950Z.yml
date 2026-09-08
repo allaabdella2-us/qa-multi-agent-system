@@ -1,0 +1,10 @@
+- generic [ref=f3e41]:
+  - heading "Sign in to Corvid" [level=1] [ref=f3e42]
+  - paragraph [ref=f3e43]: Order and invoice management for your organization.
+  - generic [ref=f3e44]:
+    - generic [ref=f3e45]: Email address
+    - textbox "Email address" [ref=f3e46]
+  - generic [ref=f3e47]:
+    - generic [ref=f3e48]: Password
+    - textbox "Password" [ref=f3e49]
+  - button "Sign in" [ref=f3e50] [cursor=pointer]

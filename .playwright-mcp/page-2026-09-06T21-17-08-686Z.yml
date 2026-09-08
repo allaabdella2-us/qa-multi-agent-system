@@ -1,0 +1,35 @@
+- generic [ref=f4e3]:
+  - banner [ref=f4e4]:
+    - generic [ref=f4e5]:
+      - generic [ref=f4e6]: Corvid Orders
+      - navigation "Main" [ref=f4e7]:
+        - link "Orders" [ref=f4e8] [cursor=pointer]:
+          - /url: /orders
+        - link "New order" [active] [ref=f4e9] [cursor=pointer]:
+          - /url: /orders/new
+      - button "Sign out" [ref=f4e12] [cursor=pointer]
+  - main [ref=f4e13]:
+    - generic [ref=f4e29]:
+      - heading "New order" [level=1] [ref=f4e31]
+      - generic [ref=f4e32]:
+        - generic [ref=f4e33]:
+          - generic [ref=f4e34]: Reference
+          - textbox "Reference" [ref=f4e35]
+        - heading "Items" [level=2] [ref=f4e36]
+        - generic [ref=f4e37]:
+          - generic [ref=f4e38]:
+            - generic [ref=f4e39]: SKU
+            - textbox "SKU" [ref=f4e40]
+          - generic [ref=f4e41]:
+            - generic [ref=f4e42]: Description
+            - textbox "Description" [ref=f4e43]
+          - generic [ref=f4e44]:
+            - generic [ref=f4e45]: Quantity
+            - spinbutton "Quantity" [ref=f4e46]: "1"
+          - generic [ref=f4e47]:
+            - generic [ref=f4e48]: Unit price
+            - spinbutton "Unit price" [ref=f4e49]
+          - button "Remove item 1" [disabled] [ref=f4e50]: Remove
+        - generic [ref=f4e51]:
+          - button "Add item" [ref=f4e52] [cursor=pointer]
+          - button "Create order" [ref=f4e53] [cursor=pointer]

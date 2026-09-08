@@ -1,0 +1,52 @@
+- generic [ref=f3e3]:
+  - banner [ref=f3e4]:
+    - generic [ref=f3e5]:
+      - generic [ref=f3e6]: Corvid Orders
+      - navigation "Main" [ref=f3e7]:
+        - link "Orders" [ref=f3e8] [cursor=pointer]:
+          - /url: /orders
+        - link "New order" [ref=f3e9] [cursor=pointer]:
+          - /url: /orders/new
+      - generic [ref=f3e10]:
+        - generic [ref=f3e11]: admin@northwind.testadmin
+        - button "Sign out" [ref=f3e12] [cursor=pointer]
+  - main [ref=f3e13]:
+    - generic [ref=f3e222]:
+      - generic [ref=f3e223]:
+        - heading "NW-9002" [level=1] [ref=f3e224]
+        - generic [ref=f3e225]: draft
+      - generic [ref=f3e226]:
+        - generic [ref=f3e227]:
+          - generic [ref=f3e228]:
+            - term [ref=f3e229]: Order id
+            - definition [ref=f3e230]: "37"
+          - generic [ref=f3e231]:
+            - term [ref=f3e232]: Created
+            - definition [ref=f3e233]: Sep 6, 2026
+          - generic [ref=f3e234]:
+            - term [ref=f3e235]: Total
+            - definition [ref=f3e236]: $25.00
+        - heading "Items" [level=2] [ref=f3e237]
+        - table [ref=f3e238]:
+          - rowgroup [ref=f3e239]:
+            - row [ref=f3e240]:
+              - columnheader "SKU" [ref=f3e241]
+              - columnheader "Description" [ref=f3e242]
+              - columnheader "Qty" [ref=f3e243]
+              - columnheader "Unit price" [ref=f3e244]
+              - columnheader "Line total" [ref=f3e245]
+          - rowgroup [ref=f3e246]:
+            - row [ref=f3e247]:
+              - cell "SKU-ALPHA" [ref=f3e248]
+              - cell "Blue widget" [ref=f3e249]
+              - cell "2" [ref=f3e250]
+              - cell "$10.00" [ref=f3e251]
+              - cell "$20.00" [ref=f3e252]
+            - row [ref=f3e253]:
+              - cell "SKU-BETA" [ref=f3e254]
+              - cell "Red widget" [ref=f3e255]
+              - cell "1" [ref=f3e256]
+              - cell "$5.00" [ref=f3e257]
+              - cell "$5.00" [ref=f3e258]
+      - link "Back to orders" [ref=f3e259] [cursor=pointer]:
+        - /url: /orders

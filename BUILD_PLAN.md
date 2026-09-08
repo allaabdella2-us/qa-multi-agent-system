@@ -1,0 +1,203 @@
+# Build Plan — Multi-Agent QA & Remediation System
+
+## Context
+
+`qa-agent-system-architecture.md` (v0.1) specifies a 15-agent QA system across four layers, but the repo contains nothing else — no code, no config, no target. The doc is a design, not a build: it names agents, tools, and contracts, and closes with seven open decisions (§13) that block implementation.
+
+This plan turns that design into a running system. Per the answers given:
+
+- **Runtime** — a Python service on the **Claude Agent SDK** (`claude-agent-sdk`). CONDUCTOR is a real state machine in code; each agent is a `query()` invocation with a hard tool allowlist.
+- **Scope** — the doc's own Phase 1 loop (CARTOGRAPHER, SURFACE, CONDUIT, FORGE, CLERK, PROOF), genuinely end-to-end, on a framework where agents 7–15 are config rather than code.
+- **Target** — a bundled, deliberately-buggy demo app as the system under test, with a golden defect ledger so precision/recall is measurable, not asserted.
+- **Integrations** — every external system behind an adapter with a local fake. The loop runs offline; real Jira/GitHub is a config swap.
+
+That settles §13: monorepo, Postgres, no existing E2E suite, ephemeral envs provided by Docker Compose against the bundled app.
+
+Status: plan approved, no code written yet. The milestone table below is the working checklist — keep it current as work lands.
+
+---
+
+## Two design decisions that shape everything
+
+**1. CONDUCTOR is Python, not a prompt.** §4.1 says "keep its reasoning shallow — routing, not analysis," and §10 makes it the enforcement point for budget and concurrency. A model cannot enforce a budget it is spending. So the run state machine, dispatch, retries, dead-letter queue, and the §8.3 loop breakers are ordinary code. This also makes runs reproducible and cheap to test.
+
+**2. Every agent is its own top-level `query()`, not a subagent of a parent.** The SDK's `agents=` parameter nests subagents under one conversation; that blurs the per-agent tool allowlist §5.3 depends on and pools cost into one number. Running each agent as a separate `query()` gives a genuine context boundary (design principle §2), an enforceable per-agent allowlist, and per-agent `total_cost_usd` from its `ResultMessage`. `AgentDefinition`/`agents=` stays available for *intra-agent* fan-out (e.g. SURFACE exploring several routes in parallel).
+
+---
+
+## Architecture
+
+```
+qa-multi-agent-system/
+├── qa-agent-system-architecture.md      # the spec (unchanged)
+├── BUILD_PLAN.md                        # this plan
+├── pyproject.toml                       # uv-managed, py3.12
+├── config/
+│   ├── system.yaml                      # run modes, budgets, thresholds, model per agent
+│   ├── agents/<AGENT>.yaml              # allowlist, prompt path, effort, max_turns, budget
+│   └── rules/                           # layering.yaml, severity-rubric.yaml, routing.yaml
+├── src/qaas/
+│   ├── envelope.py        # Pydantic DefectEnvelope v1.0 (§6) — the only inter-agent type
+│   ├── registry.py        # AgentSpec (YAML) -> ClaudeAgentOptions
+│   ├── conductor.py       # run state machine, budget governor, concurrency, dead-letter
+│   ├── runner.py          # invoke one agent, stream messages, record cost/usage/artifacts
+│   ├── guardrails.py      # can_use_tool + hooks = the §8.1 permission matrix, in code
+│   ├── store.py           # run ledger, artifact store, versioned system-map
+│   ├── scorecard.py       # §12 metrics; scores a run against the golden ledger
+│   ├── prompts/<AGENT>.md # system prompts, one file per agent
+│   ├── mcp/               # in-process SDK MCP servers (create_sdk_mcp_server)
+│   └── adapters/          # tracker{local,jira}, vcs{local,github}
+├── target-app/            # system under test
+│   ├── api/               # FastAPI + Postgres + one WebSocket endpoint
+│   ├── web/               # small UI (Vite + React)
+│   ├── openapi.yaml       # the spec implementation is allowed to drift from
+│   ├── defects.yaml       # GOLDEN LEDGER — every seeded defect, with expected domain/severity
+│   └── docker-compose.yml
+├── tests/                 # pytest; no API calls except the marked e2e tier
+└── .qaas/                 # runtime: runs/, artifacts/, memory.db, tickets/ (gitignored)
+```
+
+### The five custom MCP servers are in-process, not subprocesses
+
+§5.2 says five servers must be built. All of them are `create_sdk_mcp_server()` servers running inside the orchestrator process — no protocol implementation, no subprocess management, and tool calls land in Python where validation and guardrails already live.
+
+| Server | Tools (per §5.2) | Backing |
+|---|---|---|
+| `envelope` | `emit_envelope`, `get_system_map`, `put_artifact` | Pydantic validation → run store |
+| `test_runner` | `run_suite`, `run_single`, `run_n_times`, `affected_tests`, `get_coverage` | pytest + Playwright, structured JSON |
+| `env_control` | `spin_up`, `seed`, `reset`, `set_flag`, `impersonate`, `tear_down` | Docker Compose against `target-app/` |
+| `defect_memory` | `search_similar`, `fingerprint`, `record`, `get_occurrences`, `mark_resolved` | SQLite + `sqlite-vec` embeddings, structural fingerprint |
+| `contract_diff` | `diff_openapi`, `classify_breaking`, `find_consumers`, `generate_contract_test` | `openapi.yaml` vs. live routes |
+| `tracker` | `create_issue`, `transition`, `link`, `search` | adapter: local JSON tickets or Atlassian |
+
+WebSocket Harness MCP is deferred — PULSE is Phase 2. Off-the-shelf servers (Playwright, Filesystem, GitHub) are declared as stdio configs in `config/agents/*.yaml`, so adding one is a YAML edit.
+
+### Guardrails are code, not prompting
+
+§8.1's matrix becomes a `Policy` per agent, enforced in `can_use_tool` and a `preToolUse` hook — both of which see the tool name and arguments before execution:
+
+- **Path scoping** — Filesystem/Edit/Write calls resolved and checked against the agent's allowed roots. FORGE and MENDER only; everyone else denied.
+- **Branch scoping** — git writes matched against the agent's branch regex (`qa/repro/*`, `fix/*`); `main` and any force-push denied outright.
+- **Ticket rate limit** — `tracker.create_issue` counted per run/project/day; over cap the call is denied with a reason and CONDUCTOR escalates instead of filing (§4.12).
+- **Immutable test** — MENDER (Phase 3) denied any edit to the test path recorded on the envelope (§10).
+
+Denials return `PermissionResultDeny` with a message, so the agent gets feedback and adapts rather than dying. Every denial is written to the run ledger — that log is the audit trail the doc asks for.
+
+### The envelope is the only contract
+
+`envelope.py` is a Pydantic model of §6, and agents cannot emit anything else: their sole write path is `envelope.emit_envelope`, which validates and rejects with field-level errors on failure. Prose never crosses an agent boundary. `confidence < 0.6` routes to a human queue instead of CLERK (§7).
+
+---
+
+## Milestones
+
+Each milestone ends with a check that runs without human judgment.
+
+### M0 — Contract and skeleton ✅ done
+`envelope.py`, `store.py`, config loading, `qaas` CLI (`run`, `validate`, `score`, `replay`). No agents yet.
+**Verify:** `pytest` — 45 tests green: envelope round-trip, rejection of malformed envelopes, fingerprint stability, ledger/artifact/system-map behaviour, and the §5.3 tool-budget and §8.1 permission-matrix rules asserted against the real config. `qaas validate` and `qaas run --dry-run` both clean.
+
+### M1 — Target app and golden ledger ✅ done
+FastAPI + Postgres + React UI + one WS endpoint. Seed ~14 defects spanning the Phase-1 domains, each recorded in `defects.yaml` with expected domain, severity, and location: OpenAPI drift, a missing role check, unbounded list endpoint, inconsistent error shapes, a broken checkout step, an unhandled promise rejection, contrast/label a11y failures, a form that loses input on error, plus 2–3 planted *non-defects* to catch false positives.
+**Verify:** `docker compose up` → app reachable; `pytest tests/target_app` proves each seeded defect is real and each planted non-defect is not.
+
+### M2 — MCP servers and adapters ✅ done
+The six servers above plus local tracker/vcs adapters.
+**Verify:** `pytest tests/mcp` — every tool exercised directly, zero API calls. `defect_memory` proven to dedupe two differently-worded reports of the same defect.
+
+### M3 — Agent runtime + CARTOGRAPHER ✅ done
+`registry.py`, `runner.py`, `guardrails.py`, then the first real agent. CARTOGRAPHER goes first because §4.2 is right that everything downstream gets cheaper once the map exists.
+**Verify:** `qaas run --agent CARTOGRAPHER` writes a versioned `system-map.json` covering the target app's services, routes, schema, and ownership; schema-validated. Guardrail tests assert a write attempt from a read-only agent is denied and logged.
+
+### M4 — Discovery: CONDUIT + SURFACE ✅ done
+CONDUIT gets `contract_diff` and ships a failing contract test as evidence (§4.5). SURFACE runs scripted journeys first, then exploratory from the Cartographer task graph.
+**Verify:** `qaas run --mode pr-check` emits envelopes; `qaas score` reports how many golden defects in those two domains were found and how many findings were not in the ledger.
+
+### M5 — Triage: FORGE + CLERK ✅ done
+FORGE reproduces, minimizes, runs N times for flake rate, and commits a failing test to `qa/repro/*`. CLERK dedupes, scores against the rubric, resolves owner from the map, routes, and files — the only agent holding tracker write.
+**Verify:** full discovery→triage run produces local tickets with real repro steps and attached failing tests; a second run on the same code files **zero** new tickets and increments occurrence counts instead.
+
+### M6 — Close the loop: PROOF + CONDUCTOR run modes ✅ built, live verification in progress
+PROOF re-runs FORGE's test against a patched build and returns `VERIFIED`/`NOT_FIXED`/`REGRESSED`. CONDUCTOR gains all five discovery run modes, budget governor, concurrency caps, and escalation.
+**Verify:** the acceptance test for the whole system — fix one seeded defect by hand on a branch, run `qaas run --mode fix-cycle --ticket <id>`, and PROOF returns `VERIFIED`; revert the fix and it returns `NOT_FIXED`. Then `qaas run --mode nightly && qaas score` prints the §12 scorecard: acceptance rate, duplicate rate, false-positive rate, cost per accepted ticket.
+
+### Skills, hooks and loops ✅ done
+
+**Skills** — 23 under `.claude/skills/<name>/SKILL.md`, carrying the procedure the
+architecture names in §4. Agents declare them in `config/agents/*.yaml`; the
+registry passes `skills=` and sets `setting_sources=["project"]` (project only —
+filesystem skills need it, and project settings live in the repo so a run stays
+reproducible; `user` and `local` stay excluded, with a test asserting it).
+Descriptions carry an explicit TRIGGER/BEFORE/SKIP clause, tested for, because a
+description that merely names a topic is a skill that never fires. Content moved
+out of the prompts rather than being copied — the severity rubric now lives only
+in `severity-rubric`.
+
+**Hooks** — `PreToolUse` re-runs the guardrail `check()` (a second enforcement
+point in case `can_use_tool` is shadowed; both call one decision function so they
+cannot disagree) and counts calls. `PostToolUse` tells an agent immediately when
+an envelope was recorded but held, rather than letting it discover at the end
+that nothing counted. `Stop` blocks an agent that skipped its declared
+deliverable (`must_call` in its config), honouring `stop_hook_active` so a
+genuinely stuck agent cannot loop the budget away.
+
+**Loops** — `_phase_verify` is now a bounded remediation loop: PROOF → NOT_FIXED
+→ MENDER → ARBITER → PROOF, enforcing `max_proof_reopens` and
+`max_mender_arbiter_round_trips` from §8.3. PROOF's verdict is a typed ledger
+entry (`record_verdict`), never parsed from prose. With no MENDER in the Phase 1
+roster a NOT_FIXED escalates immediately instead of re-running PROOF against
+unchanged code. `qaas sweep` is the cron entry point: run, score, and exit
+non-zero below the §11 precision gate.
+
+### M7 — Phase 3: the fix loop (beyond the original plan)
+
+MENDER and ARBITER, with the §8.2 autonomy envelope enforced in `guardrails.py`
+rather than requested in a prompt: a diff budget counted per distinct file, and
+forbidden path classes (migrations, auth, payment, secrets, infrastructure, CI)
+that stop at a human however small the change looks. `record_review` refuses a
+verdict with no actionable reasoning, because a rubber stamp is worse than no
+review. Two new run modes: `fix-cycle` and `full-loop`.
+
+Merge remains impossible by construction: no merge method exists anywhere in the
+codebase, `gh pr merge` is refused, and pull requests open as drafts.
+
+**Verify:** conductor tests prove the bounded loop (PROOF → MENDER → ARBITER →
+PROOF, capped by `max_mender_arbiter_round_trips` and `max_proof_reopens`), and
+guardrail tests prove every forbidden class and the diff budget. Live: a
+`full-loop` run on the demo app that ends in a VERIFIED ticket.
+
+### Adding agents 7–15 afterwards
+A new discovery agent should be a prompt file plus a `config/agents/<NAME>.yaml` naming its allowlist — no changes to conductor, runner, or guardrails. Whether that holds is the real test of M3, so the first Phase-2 agent (VAULT) will be added as a smoke test of the extension path before this build is called done.
+
+---
+
+## Cost and auth
+
+Every run spends real money, and a nightly sweep is the expensive one. Controls, from the start:
+
+- Per-agent and per-run `max_budget_usd` on `ClaudeAgentOptions`; CONDUCTOR aborts the run at the cap and records partial results.
+- `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` and `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` set via `env` — Opus 5 delegates readily, and an unbounded subagent tree is the fastest way to a surprise bill.
+- `--dry-run` renders each agent's exact options and prompt without calling the API; used in unit tests.
+- A cheap CI profile (lower effort, smaller model for the mechanical agents) separate from the full profile.
+- `total_cost_usd` per agent recorded on every run, so §12's cost-per-accepted-ticket is measured rather than guessed.
+
+Auth: no `ANTHROPIC_API_KEY` is set here, but the Claude Code CLI (v2.1.263) is installed and authenticated, and the Agent SDK drives it — so it works as-is. `ANTHROPIC_API_KEY` remains the CI path.
+
+Model default is `claude-opus-5` for judgment-heavy agents (CONDUIT, SURFACE, ARBITER later) and a cheaper model for mechanical ones (CARTOGRAPHER extraction, CLERK composition), set per agent in `config/agents/*.yaml`.
+
+---
+
+## Verification of the whole system
+
+Four tiers, cheapest first:
+
+1. `pytest -m "not llm"` — envelope, guardrails, MCP tools, adapters, scoring. No API calls; runs in CI on every commit.
+2. `qaas run --dry-run --mode nightly` — asserts every agent's assembled options match its §5.3 allowlist and that no agent exceeds six servers.
+3. `pytest -m llm` — one cheap live run per agent against the target app, asserting shape (a valid envelope, a written map) rather than content.
+4. `qaas run --mode nightly && qaas score` — the honest number: precision and recall against `target-app/defects.yaml`. §11 sets the bar at 70% acceptance before adding agents; the scorecard is what decides whether the framework earns Phase 2.
+
+## Risks
+
+- **Hook event names.** The SDK's `HookEvent` literals differ between docs and releases (`preToolUse` vs `PreToolUse`). M3 pins them by introspecting the installed `claude_agent_sdk` rather than trusting the docs, and `can_use_tool` carries the guardrails so a hook-name regression degrades logging, not enforcement.
+- **Exploratory SURFACE is the noisiest agent.** It ships behind the confidence gate and the per-run finding cap from day one; if its false-positive rate is bad in M4, it runs scripted-only until the ledger says otherwise.
+- **Seeded defects are easier than real ones.** The golden ledger measures whether the loop works, not whether it is good at finding hard bugs. Treat 100% recall on `defects.yaml` as a floor, never as evidence the system is ready for a real codebase.

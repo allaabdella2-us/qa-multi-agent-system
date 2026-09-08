@@ -1,0 +1,19 @@
+name: ARBITER
+layer: remediation
+role: >
+  Review and risk gate. Reads MENDER's diff as an adversarial reviewer and judges
+  correctness, scope creep, hidden regressions and risk. Separate from MENDER for
+  the same reason discovery is separate from triage: a model reviewing its own
+  diff in the same context reliably rationalises it.
+prompt: ARBITER.md
+model: claude-opus-5
+effort: high
+max_turns: 50
+max_budget_usd: 3.0
+mcp_servers: [envelope, vcs, contract_diff, test_runner]
+builtin_tools: [Read, Grep, Glob]
+skills: [adversarial-review, root-cause-vs-symptom, regression-risk-scoring, test-quality-audit]
+
+policy: {}   # no write access to code, ever — the whole point of the separation
+
+must_call: [mcp__envelope__record_review]

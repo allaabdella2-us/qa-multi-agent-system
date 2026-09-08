@@ -1,0 +1,37 @@
+- generic [ref=f8e3]:
+  - banner [ref=f8e4]:
+    - generic [ref=f8e5]:
+      - generic [ref=f8e6]: Corvid Orders
+      - navigation "Main" [ref=f8e7]:
+        - link "Orders" [ref=f8e8] [cursor=pointer]:
+          - /url: /orders
+        - link "New order" [ref=f8e9] [cursor=pointer]:
+          - /url: /orders/new
+      - generic [ref=f8e10]:
+        - generic [ref=f8e11]: viewer@northwind.testviewer
+        - button "Sign out" [ref=f8e12] [cursor=pointer]
+  - main [ref=f8e13]:
+    - generic [ref=f8e14]:
+      - heading "New order" [level=1] [ref=f8e16]
+      - generic [ref=f8e17]:
+        - generic [ref=f8e18]:
+          - generic [ref=f8e19]: Reference
+          - textbox "Reference" [ref=f8e20]
+        - heading "Items" [level=2] [ref=f8e21]
+        - generic [ref=f8e22]:
+          - generic [ref=f8e23]:
+            - generic [ref=f8e24]: SKU
+            - textbox "SKU" [ref=f8e25]
+          - generic [ref=f8e26]:
+            - generic [ref=f8e27]: Description
+            - textbox "Description" [ref=f8e28]
+          - generic [ref=f8e29]:
+            - generic [ref=f8e30]: Quantity
+            - spinbutton "Quantity" [ref=f8e31]: "1"
+          - generic [ref=f8e32]:
+            - generic [ref=f8e33]: Unit price
+            - spinbutton "Unit price" [ref=f8e34]
+          - button "Remove item 1" [disabled] [ref=f8e35]: Remove
+        - generic [ref=f8e36]:
+          - button "Add item" [ref=f8e37] [cursor=pointer]
+          - button "Create order" [ref=f8e38] [cursor=pointer]

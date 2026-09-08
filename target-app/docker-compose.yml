@@ -1,0 +1,48 @@
+# The system under test. Env Control MCP drives this: spin_up, seed, reset,
+# tear_down all bottom out in `docker compose` against this file.
+name: corvid
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: corvid
+      POSTGRES_PASSWORD: corvid
+      POSTGRES_DB: corvid
+    ports: ["55432:5432"]
+    volumes:
+      # Mounted as individual files, not as a directory: Postgres runs
+      # everything in initdb.d in filename order, so the numeric prefixes are
+      # what guarantee the schema exists before the fixtures load.
+      - ./api/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ./api/seed/fixtures.sql:/docker-entrypoint-initdb.d/002_fixtures.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U corvid -d corvid"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data   # ephemeral by design: reset() means reset
+
+  api:
+    build: ./api
+    environment:
+      DATABASE_URL: postgresql+psycopg://corvid:corvid@db:5432/corvid
+      JWT_SECRET: dev-only-not-a-real-secret
+      DEBUG: "1"
+    ports: ["8000:8000"]
+    depends_on:
+      db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:8000/v1/health')\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build: ./web
+    environment:
+      VITE_API_BASE: http://localhost:8000
+    ports: ["5173:5173"]
+    depends_on:
+      api: { condition: service_healthy }

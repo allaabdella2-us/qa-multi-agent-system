@@ -1,0 +1,318 @@
+# GOLDEN LEDGER — ground truth for the system under test.
+#
+# Every seeded defect is recorded here with what a correct agent should conclude
+# about it. `qaas score` measures discovery against this file: a finding that
+# matches an entry is a true positive, a finding matching nothing is a false
+# positive, and an entry nobody found is a miss.
+#
+# The `not_defects` section is as important as the defects. It plants things that
+# look wrong to a careless reader but are correct, so precision is measured and
+# not assumed.
+#
+# Keep this file in sync with the code. If you change a seeded defect, change its
+# entry in the same commit — a stale ledger silently corrupts every score.
+
+version: 1
+app: corvid
+
+defects:
+  # -- API surface (CONDUIT) ------------------------------------------------
+
+  - id: API-01
+    domain: api
+    class: bug
+    severity: major
+    title: Orders list accepts a limit parameter and ignores it
+    location:
+      service: orders-api
+      endpoint: GET /v1/orders
+      paths: [api/app/routes/orders.py]
+    detail: >
+      The handler declares a `limit` query parameter and never applies it to the
+      query. Every order in the org is returned regardless. Unbounded result set.
+    keywords: ["limit", "unbounded", "pagination", "ignored", "page size"]
+    phase: 1
+
+  - id: API-02
+    domain: api
+    class: bug
+    severity: blocker
+    title: Order detail is not scoped to the caller's organization
+    location:
+      service: orders-api
+      endpoint: GET /v1/orders/{order_id}
+      paths: [api/app/routes/orders.py]
+    detail: >
+      The lookup filters on order id alone. Any authenticated user can read any
+      order in any organization by guessing or enumerating the id. Cross-tenant
+      data exposure.
+    keywords: ["organization", "org", "tenant", "scope", "idor", "another user", "cross-tenant"]
+    phase: 1
+    security_relevant: true
+
+  - id: API-03
+    domain: api
+    class: bug
+    severity: critical
+    title: Order creation accepts client-supplied status and total
+    location:
+      service: orders-api
+      endpoint: POST /v1/orders
+      paths: [api/app/routes/orders.py, api/app/schemas.py]
+    detail: >
+      The create schema passes the whole request body into the model, so a client
+      can set `status` and `total_cents` directly and create a paid order for
+      zero. Mass assignment.
+    keywords: ["mass assignment", "status", "total", "client-supplied", "overposting", "extra fields"]
+    phase: 1
+
+  - id: API-04
+    domain: api
+    class: bug
+    severity: blocker
+    title: Refund endpoint does not check the caller's role
+    location:
+      service: orders-api
+      endpoint: POST /v1/orders/{order_id}/refund
+      paths: [api/app/routes/orders.py]
+    detail: >
+      The spec and the role matrix restrict refunds to admin. The handler only
+      requires authentication, so a viewer can issue refunds.
+    keywords: ["role", "admin", "refund", "authorization", "permission", "viewer"]
+    phase: 1
+    security_relevant: true
+
+  - id: API-05
+    domain: api
+    class: bug
+    severity: critical
+    title: Unhandled exceptions return a stack trace to the client
+    location:
+      service: orders-api
+      paths: [api/app/main.py, api/app/errors.py]
+    detail: >
+      The 500 handler serialises the traceback into the response body, leaking
+      file paths, library versions and local variable names.
+    keywords: ["stack trace", "traceback", "leak", "500", "internal error", "exception handler"]
+    phase: 1
+    security_relevant: true
+
+  - id: API-06
+    domain: api
+    class: bug
+    severity: major
+    title: Invoice responses omit the currency field the spec declares
+    location:
+      service: orders-api
+      endpoint: GET /v1/invoices
+      paths: [api/app/routes/invoices.py, openapi.yaml]
+    detail: >
+      openapi.yaml declares `currency` as required on Invoice; the response model
+      does not include it. Spec drift that breaks any consumer reading the spec.
+    keywords: ["currency", "spec", "drift", "openapi", "missing field", "required"]
+    phase: 1
+
+  - id: API-07
+    domain: api
+    class: bug
+    severity: minor
+    title: Deleting a missing order returns 200 instead of 404
+    location:
+      service: orders-api
+      endpoint: DELETE /v1/orders/{order_id}
+      paths: [api/app/routes/orders.py]
+    detail: >
+      The handler does not check whether the row existed and always returns 200.
+      The spec declares 404 for an unknown id.
+    keywords: ["404", "not found", "delete", "missing", "200"]
+    phase: 1
+
+  - id: API-08
+    domain: api
+    class: bug
+    severity: minor
+    title: Error response shape is inconsistent across endpoints
+    location:
+      service: orders-api
+      # A cross-cutting defect: the inconsistency is only visible by comparing
+      # two handlers, and which two a report cites is a fair judgement call.
+      # Listing only the orders side scored a correct report as a miss.
+      paths:
+        - api/app/routes/orders.py
+        - api/app/routes/invoices.py
+        - api/app/routes/auth.py
+        - api/app/errors.py
+        - api/app/main.py
+    detail: >
+      Orders endpoints return {"error": {"code", "message"}} while invoices and
+      auth return FastAPI's default {"detail": "..."}. Clients cannot parse
+      errors uniformly.
+    keywords: ["error", "inconsistent", "detail", "shape", "two", "envelope"]
+    phase: 1
+
+  - id: API-09
+    domain: api
+    class: bug
+    severity: minor
+    title: The orders stream WebSocket is absent from the published contract
+    location:
+      service: orders-api
+      endpoint: WEBSOCKET /v1/orders/stream
+      paths: [api/app/routes/stream.py, openapi.yaml]
+    detail: >
+      `/v1/orders/stream` is implemented and reachable but appears nowhere in
+      openapi.yaml, so no consumer reading the contract knows it exists.
+    keywords: ["websocket", "stream", "contract", "spec", "undocumented", "absent"]
+    phase: 1
+    discovered_not_seeded: true
+    note: >
+      Not planted. CONDUIT found this on its first scored run and it is a genuine
+      gap, so it belongs in the ledger. Recorded with its provenance because a
+      defect the system found is weaker evidence than one placed for it to find:
+      the ledger cannot be treated as a complete oracle, only as a floor.
+
+  # -- Frontend (SURFACE) ---------------------------------------------------
+
+  - id: UI-01
+    domain: frontend
+    class: bug
+    severity: critical
+    title: Place order does nothing when the cart holds a single item
+    location:
+      service: web
+      ui_route: /checkout/review
+      paths: [web/src/routes/CheckoutReview.tsx]
+    detail: >
+      The submit handler guards on `items.length > 1`, so a single-item cart —
+      the most common case — silently does nothing on click. Core flow dead end.
+    keywords: ["place order", "button", "does nothing", "single item", "one item", "submit", "dead end"]
+    phase: 1
+
+  - id: UI-02
+    domain: frontend
+    class: bug
+    severity: major
+    title: Orders list raises an unhandled promise rejection when the API fails
+    location:
+      service: web
+      ui_route: /orders
+      paths: [web/src/routes/OrdersList.tsx]
+    detail: >
+      The fetch has no catch and no error state. A 500 from the API produces an
+      unhandled rejection in the console and a permanently blank page.
+    keywords: ["unhandled", "rejection", "catch", "blank", "error state", "500"]
+    phase: 1
+
+  - id: UI-03
+    domain: frontend
+    class: bug
+    severity: major
+    title: New order form discards all input when validation fails
+    location:
+      service: web
+      ui_route: /orders/new
+      paths: [web/src/routes/NewOrder.tsx]
+    detail: >
+      The failed-validation branch resets form state to its initial value, so a
+      user who mistypes one field loses everything they entered.
+    keywords: ["reset", "lost", "cleared", "input", "validation", "form state"]
+    phase: 1
+
+  - id: UI-04
+    domain: frontend
+    class: bug
+    severity: minor
+    title: Orders list has no empty state
+    location:
+      service: web
+      ui_route: /orders
+      paths: [web/src/routes/OrdersList.tsx]
+    detail: >
+      With zero orders the page renders a bare table header and nothing else. No
+      message, no call to action.
+    keywords: ["empty state", "no orders", "empty", "header only"]
+    phase: 1
+
+  - id: UI-05
+    domain: frontend
+    class: bug
+    severity: minor
+    title: Search input has no accessible label
+    location:
+      service: web
+      ui_route: /orders
+      paths: [web/src/components/SearchInput.tsx]
+    detail: >
+      The input has a placeholder and no label, aria-label or associated
+      <label> element. Screen readers announce it as an unlabelled text field.
+    keywords: ["label", "aria-label", "accessib", "screen reader", "unlabelled", "unlabeled"]
+    phase: 1
+    wcag: "1.3.1"
+
+  - id: UI-06
+    domain: frontend
+    class: bug
+    severity: minor
+    title: Secondary button text fails contrast requirements
+    location:
+      service: web
+      ui_route: /orders
+      paths: [web/src/styles.css, web/src/components/Button.tsx]
+    detail: >
+      .btn-secondary renders #9aa0a6 on #f1f3f4, a contrast ratio near 2.3:1,
+      well under the 4.5:1 required for body text.
+    keywords: ["contrast", "wcag", "ratio", "secondary", "color"]
+    phase: 1
+    wcag: "1.4.3"
+
+  - id: UI-07
+    domain: frontend
+    class: bug
+    severity: major
+    title: Checkout reports the order placed while it stays in draft
+    location:
+      service: web
+      ui_route: /checkout/review
+      paths: [web/src/routes/CheckoutReview.tsx, web/src/routes/OrderDetail.tsx]
+    detail: >
+      Completing checkout shows "Order placed." directly above a status badge
+      reading "draft". The API exposes no place/confirm endpoint, so the UI
+      claims a state transition that never happened.
+    keywords: ["placed", "draft", "status", "confirm", "success", "never"]
+    phase: 1
+    discovered_not_seeded: true
+    note: >
+      Not planted. SURFACE found it on its first scored run. It follows from a
+      real gap between the UI and the API contract, which is exactly the kind of
+      defect a seeded ledger tends not to contain.
+
+# Things that look like defects and are not. A finding that matches one of these
+# is a false positive and is scored as such.
+not_defects:
+  - id: NOT-01
+    title: Legacy orders endpoint returns 410 Gone
+    location:
+      endpoint: GET /v1/orders/legacy
+      paths: [api/app/routes/orders.py]
+    why_correct: >
+      Deliberate deprecation. 410 is the correct status for a resource that is
+      intentionally and permanently gone, and the endpoint is documented in
+      openapi.yaml with that status. Flagging it as a broken endpoint is wrong.
+
+  - id: NOT-02
+    title: Development notice logged with console.warn on mount
+    location:
+      paths: [web/src/main.tsx]
+    why_correct: >
+      A warning, not an error, printed only when import.meta.env.DEV is true. It
+      is intentional developer signposting and never reaches production users.
+      Console warnings are not defects.
+
+  - id: NOT-03
+    title: Orders list refetches on window focus
+    location:
+      paths: [web/src/routes/OrdersList.tsx]
+    why_correct: >
+      Looks like a redundant network call but is deliberate: order status changes
+      out of band, so refocusing the tab should show current data. Flagging it as
+      a performance defect misreads the intent.

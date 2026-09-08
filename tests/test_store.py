@@ -1,0 +1,122 @@
+"""M0 verification: run state persists, and the ledger is a real audit trail."""
+
+import pytest
+
+from qaas.envelope import DefectEnvelope, Domain, Severity
+from qaas.store import AgentResult, RunStore, SystemMapStore, list_runs
+
+
+@pytest.fixture
+def store(tmp_path):
+    return RunStore.new(root=tmp_path)
+
+
+def make_env(run_id, **kw):
+    base = dict(
+        run_id=run_id,
+        discovered_by="CONDUIT",
+        domain=Domain.API,
+        **{"class": "bug"},
+        title="Missing role check on the refund endpoint",
+        summary="POST /v1/refunds accepts any authenticated user.",
+        severity=Severity.CRITICAL,
+        confidence=0.85,
+    )
+    base.update(kw)
+    return DefectEnvelope(**base)
+
+
+def test_envelope_persists_and_is_stamped_with_a_fingerprint(store):
+    env = make_env(store.run_id)
+    assert env.dedupe.fingerprint is None
+    store.put_envelope(env)
+
+    loaded = store.get_envelope(env.id)
+    assert loaded is not None
+    assert loaded.dedupe.fingerprint == env.fingerprint()
+    assert [e.id for e in store.envelopes()] == [env.id]
+
+
+def test_ledger_is_append_only_and_filterable(store):
+    store.log("run_started", mode="pr-check")
+    store.put_envelope(make_env(store.run_id))
+    store.log("denial", agent="KEYSTONE", tool="Write", reason="read-only agent")
+
+    kinds = [e.kind for e in store.ledger()]
+    assert kinds == ["run_started", "envelope", "denial"]
+
+    denials = list(store.ledger("denial"))
+    assert len(denials) == 1
+    assert denials[0].agent == "KEYSTONE"
+    assert denials[0].detail["reason"] == "read-only agent"
+
+
+def test_artifacts_round_trip_through_their_uri(store):
+    uri = store.put_artifact("contract-test.txt", "FAILED tests/contract.py::orders")
+    assert uri.startswith(f"artifact://{store.run_id}/")
+    assert "FAILED" in store.resolve_artifact(uri).read_text()
+
+
+def test_artifact_uri_cannot_escape_the_store(store):
+    with pytest.raises(ValueError):
+        store.resolve_artifact(f"artifact://{store.run_id}/../../../etc/passwd")
+
+
+def test_artifact_names_with_slashes_are_flattened_not_nested(store):
+    uri = store.put_artifact("nested/path/shot.png", b"\x89PNG")
+    assert store.resolve_artifact(uri).read_bytes() == b"\x89PNG"
+
+
+def test_costs_accumulate_across_agents(store):
+    store.put_result(AgentResult(agent="CONDUIT", cost_usd=0.42, num_turns=7))
+    store.put_result(AgentResult(agent="SURFACE", cost_usd=1.08, num_turns=12))
+
+    assert store.total_cost_usd() == pytest.approx(1.50)
+    assert {r.agent for r in store.results()} == {"CONDUIT", "SURFACE"}
+    assert [e.kind for e in store.ledger("agent_finished")] == ["agent_finished"] * 2
+
+
+def test_failed_agent_result_records_its_error(store):
+    store.put_result(AgentResult(agent="SURFACE", subtype="failure", error="browser timeout"))
+    entry = next(store.ledger("agent_finished"))
+    assert entry.detail["error"] == "browser timeout"
+
+
+def test_runs_are_discoverable(tmp_path):
+    a = RunStore.new(root=tmp_path)
+    b = RunStore.new(root=tmp_path)
+    assert set(list_runs(tmp_path)) == {a.run_id, b.run_id}
+
+
+# -- system map -------------------------------------------------------------
+
+
+def test_system_map_versions_and_latest_pointer(tmp_path):
+    maps = SystemMapStore(tmp_path)
+    assert maps.get() is None
+
+    v1 = maps.put({"services": ["orders-api"]})
+    v2 = maps.put({"services": ["orders-api", "web"]})
+
+    assert maps.latest_version() == v2
+    assert maps.get()["services"] == ["orders-api", "web"]
+    assert maps.get(v1)["services"] == ["orders-api"], "pinned version stays readable"
+    assert maps.versions() == sorted([v1, v2])
+
+
+def test_repeated_invocations_of_one_agent_all_count(store):
+    """FORGE runs once per finding. A per-agent filename would keep only the last,
+    and the run's recorded cost would then be wrong by everything before it."""
+    for i in range(3):
+        store.put_result(AgentResult(agent="FORGE", cost_usd=1.50, num_turns=5))
+
+    results = store.results()
+    assert len(results) == 3, "each invocation is its own record"
+    assert store.total_cost_usd() == pytest.approx(4.50)
+    assert [e.kind for e in store.ledger("agent_finished")] == ["agent_finished"] * 3
+
+
+def test_different_agents_are_still_distinguishable(store):
+    store.put_result(AgentResult(agent="FORGE", cost_usd=1.0))
+    store.put_result(AgentResult(agent="CLERK", cost_usd=0.5))
+    assert {r.agent for r in store.results()} == {"FORGE", "CLERK"}

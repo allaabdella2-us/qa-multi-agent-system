@@ -1,0 +1,194 @@
+- generic [ref=f3e51]:
+  - banner [ref=f3e52]:
+    - generic [ref=f3e53]:
+      - generic [ref=f3e54]: Corvid Orders
+      - navigation "Main" [ref=f3e55]:
+        - link "Orders" [ref=f3e56] [cursor=pointer]:
+          - /url: /orders
+        - link "New order" [ref=f3e57] [cursor=pointer]:
+          - /url: /orders/new
+      - generic [ref=f3e58]:
+        - generic [ref=f3e59]: viewer@northwind.testviewer
+        - button "Sign out" [ref=f3e60] [cursor=pointer]
+  - main [ref=f3e61]:
+    - generic [ref=f3e62]:
+      - heading "Orders" [level=1] [ref=f3e64]
+      - generic [ref=f3e65]:
+        - searchbox "Search by reference" [ref=f3e66]
+        - generic [ref=f3e67]:
+          - generic [ref=f3e68]: Status
+          - combobox "Status" [ref=f3e69]:
+            - option "All statuses" [selected]
+            - option "draft"
+            - option "placed"
+            - option "paid"
+            - option "refunded"
+            - option "cancelled"
+      - table [ref=f3e70]:
+        - rowgroup [ref=f3e71]:
+          - row [ref=f3e72]:
+            - columnheader "Reference" [ref=f3e73]
+            - columnheader "Status" [ref=f3e74]
+            - columnheader "Total" [ref=f3e75]
+            - columnheader "Created" [ref=f3e76]
+        - rowgroup [ref=f3e77]:
+          - row [ref=f3e78] [cursor=pointer]:
+            - cell "NW-SURFACE-2" [ref=f3e79]
+            - cell "draft" [ref=f3e80]
+            - cell "$15.00" [ref=f3e82]
+            - cell "Sep 6, 2026" [ref=f3e83]
+          - row [ref=f3e84] [cursor=pointer]:
+            - cell "NW-SURFACE-1" [ref=f3e85]
+            - cell "draft" [ref=f3e86]
+            - cell "$25.00" [ref=f3e88]
+            - cell "Sep 6, 2026" [ref=f3e89]
+          - row [ref=f3e90] [cursor=pointer]:
+            - cell "NW-1030" [ref=f3e91]
+            - cell "cancelled" [ref=f3e92]
+            - cell "$116.50" [ref=f3e94]
+            - cell "Jan 26, 2025" [ref=f3e95]
+          - row [ref=f3e96] [cursor=pointer]:
+            - cell "NW-1029" [ref=f3e97]
+            - cell "refunded" [ref=f3e98]
+            - cell "$89.50" [ref=f3e100]
+            - cell "Jan 26, 2025" [ref=f3e101]
+          - row [ref=f3e102] [cursor=pointer]:
+            - cell "NW-1028" [ref=f3e103]
+            - cell "paid" [ref=f3e104]
+            - cell "$21.50" [ref=f3e106]
+            - cell "Jan 25, 2025" [ref=f3e107]
+          - row [ref=f3e108] [cursor=pointer]:
+            - cell "NW-1027" [ref=f3e109]
+            - cell "placed" [ref=f3e110]
+            - cell "$127.00" [ref=f3e112]
+            - cell "Jan 24, 2025" [ref=f3e113]
+          - row [ref=f3e114] [cursor=pointer]:
+            - cell "NW-1026" [ref=f3e115]
+            - cell "draft" [ref=f3e116]
+            - cell "$117.00" [ref=f3e118]
+            - cell "Jan 23, 2025" [ref=f3e119]
+          - row [ref=f3e120] [cursor=pointer]:
+            - cell "NW-1025" [ref=f3e121]
+            - cell "cancelled" [ref=f3e122]
+            - cell "$32.50" [ref=f3e124]
+            - cell "Jan 23, 2025" [ref=f3e125]
+          - row [ref=f3e126] [cursor=pointer]:
+            - cell "NW-1024" [ref=f3e127]
+            - cell "refunded" [ref=f3e128]
+            - cell "$119.00" [ref=f3e130]
+            - cell "Jan 22, 2025" [ref=f3e131]
+          - row [ref=f3e132] [cursor=pointer]:
+            - cell "NW-1023" [ref=f3e133]
+            - cell "paid" [ref=f3e134]
+            - cell "$71.50" [ref=f3e136]
+            - cell "Jan 21, 2025" [ref=f3e137]
+          - row [ref=f3e138] [cursor=pointer]:
+            - cell "NW-1022" [ref=f3e139]
+            - cell "placed" [ref=f3e140]
+            - cell "$63.00" [ref=f3e142]
+            - cell "Jan 21, 2025" [ref=f3e143]
+          - row [ref=f3e144] [cursor=pointer]:
+            - cell "NW-1021" [ref=f3e145]
+            - cell "draft" [ref=f3e146]
+            - cell "$148.50" [ref=f3e148]
+            - cell "Jan 20, 2025" [ref=f3e149]
+          - row [ref=f3e150] [cursor=pointer]:
+            - cell "NW-1020" [ref=f3e151]
+            - cell "cancelled" [ref=f3e152]
+            - cell "$48.00" [ref=f3e154]
+            - cell "Jan 19, 2025" [ref=f3e155]
+          - row [ref=f3e156] [cursor=pointer]:
+            - cell "NW-1019" [ref=f3e157]
+            - cell "refunded" [ref=f3e158]
+            - cell "$63.00" [ref=f3e160]
+            - cell "Jan 18, 2025" [ref=f3e161]
+          - row [ref=f3e162] [cursor=pointer]:
+            - cell "NW-1018" [ref=f3e163]
+            - cell "paid" [ref=f3e164]
+            - cell "$148.50" [ref=f3e166]
+            - cell "Jan 18, 2025" [ref=f3e167]
+          - row [ref=f3e168] [cursor=pointer]:
+            - cell "NW-1017" [ref=f3e169]
+            - cell "placed" [ref=f3e170]
+            - cell "$104.50" [ref=f3e172]
+            - cell "Jan 17, 2025" [ref=f3e173]
+          - row [ref=f3e174] [cursor=pointer]:
+            - cell "NW-1016" [ref=f3e175]
+            - cell "draft" [ref=f3e176]
+            - cell "$20.50" [ref=f3e178]
+            - cell "Jan 16, 2025" [ref=f3e179]
+          - row [ref=f3e180] [cursor=pointer]:
+            - cell "NW-1015" [ref=f3e181]
+            - cell "cancelled" [ref=f3e182]
+            - cell "$120.00" [ref=f3e184]
+            - cell "Jan 16, 2025" [ref=f3e185]
+          - row [ref=f3e186] [cursor=pointer]:
+            - cell "NW-1014" [ref=f3e187]
+            - cell "refunded" [ref=f3e188]
+            - cell "$110.00" [ref=f3e190]
+            - cell "Jan 15, 2025" [ref=f3e191]
+          - row [ref=f3e192] [cursor=pointer]:
+            - cell "NW-1013" [ref=f3e193]
+            - cell "paid" [ref=f3e194]
+            - cell "$30.50" [ref=f3e196]
+            - cell "Jan 14, 2025" [ref=f3e197]
+          - row [ref=f3e198] [cursor=pointer]:
+            - cell "NW-1012" [ref=f3e199]
+            - cell "placed" [ref=f3e200]
+            - cell "$113.00" [ref=f3e202]
+            - cell "Jan 13, 2025" [ref=f3e203]
+          - row [ref=f3e204] [cursor=pointer]:
+            - cell "NW-1011" [ref=f3e205]
+            - cell "draft" [ref=f3e206]
+            - cell "$106.50" [ref=f3e208]
+            - cell "Jan 13, 2025" [ref=f3e209]
+          - row [ref=f3e210] [cursor=pointer]:
+            - cell "NW-1010" [ref=f3e211]
+            - cell "cancelled" [ref=f3e212]
+            - cell "$60.00" [ref=f3e214]
+            - cell "Jan 12, 2025" [ref=f3e215]
+          - row [ref=f3e216] [cursor=pointer]:
+            - cell "NW-1009" [ref=f3e217]
+            - cell "refunded" [ref=f3e218]
+            - cell "$139.50" [ref=f3e220]
+            - cell "Jan 11, 2025" [ref=f3e221]
+          - row [ref=f3e222] [cursor=pointer]:
+            - cell "NW-1008" [ref=f3e223]
+            - cell "paid" [ref=f3e224]
+            - cell "$45.00" [ref=f3e226]
+            - cell "Jan 11, 2025" [ref=f3e227]
+          - row [ref=f3e228] [cursor=pointer]:
+            - cell "NW-1007" [ref=f3e229]
+            - cell "placed" [ref=f3e230]
+            - cell "$59.00" [ref=f3e232]
+            - cell "Jan 10, 2025" [ref=f3e233]
+          - row [ref=f3e234] [cursor=pointer]:
+            - cell "NW-1006" [ref=f3e235]
+            - cell "draft" [ref=f3e236]
+            - cell "$140.50" [ref=f3e238]
+            - cell "Jan 9, 2025" [ref=f3e239]
+          - row [ref=f3e240] [cursor=pointer]:
+            - cell "NW-1005" [ref=f3e241]
+            - cell "cancelled" [ref=f3e242]
+            - cell "$99.50" [ref=f3e244]
+            - cell "Jan 9, 2025" [ref=f3e245]
+          - row [ref=f3e246] [cursor=pointer]:
+            - cell "NW-1004" [ref=f3e247]
+            - cell "refunded" [ref=f3e248]
+            - cell "$19.50" [ref=f3e250]
+            - cell "Jan 8, 2025" [ref=f3e251]
+          - row [ref=f3e252] [cursor=pointer]:
+            - cell "NW-1003" [ref=f3e253]
+            - cell "paid" [ref=f3e254]
+            - cell "$113.00" [ref=f3e256]
+            - cell "Jan 7, 2025" [ref=f3e257]
+          - row [ref=f3e258] [cursor=pointer]:
+            - cell "NW-1002" [ref=f3e259]
+            - cell "placed" [ref=f3e260]
+            - cell "$103.00" [ref=f3e262]
+            - cell "Jan 6, 2025" [ref=f3e263]
+          - row [ref=f3e264] [cursor=pointer]:
+            - cell "NW-1001" [ref=f3e265]
+            - cell "draft" [ref=f3e266]
+            - cell "$28.50" [ref=f3e268]
+            - cell "Jan 6, 2025" [ref=f3e269]

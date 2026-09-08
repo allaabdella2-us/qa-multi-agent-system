@@ -1,0 +1,58 @@
+- generic [ref=f4e3]:
+  - banner [ref=f4e4]:
+    - generic [ref=f4e5]:
+      - generic [ref=f4e6]: Corvid Orders
+      - navigation "Main" [ref=f4e7]:
+        - link "Orders" [ref=f4e8] [cursor=pointer]:
+          - /url: /orders
+        - link "New order" [ref=f4e9] [cursor=pointer]:
+          - /url: /orders/new
+      - generic [ref=f4e10]:
+        - generic [ref=f4e11]: admin@northwind.testadmin
+        - button "Sign out" [ref=f4e12] [cursor=pointer]
+  - main [ref=f4e13]:
+    - generic [ref=f4e14]:
+      - generic [ref=f4e15]:
+        - heading "NW-1030" [level=1] [ref=f4e16]
+        - generic [ref=f4e17]: cancelled
+      - generic [ref=f4e18]:
+        - generic [ref=f4e19]:
+          - generic [ref=f4e20]:
+            - term [ref=f4e21]: Order id
+            - definition [ref=f4e22]: "30"
+          - generic [ref=f4e23]:
+            - term [ref=f4e24]: Created
+            - definition [ref=f4e25]: Jan 26, 2025
+          - generic [ref=f4e26]:
+            - term [ref=f4e27]: Total
+            - definition [ref=f4e28]: $116.50
+        - heading "Items" [level=2] [ref=f4e29]
+        - table [ref=f4e30]:
+          - rowgroup [ref=f4e31]:
+            - row [ref=f4e32]:
+              - columnheader "SKU" [ref=f4e33]
+              - columnheader "Description" [ref=f4e34]
+              - columnheader "Qty" [ref=f4e35]
+              - columnheader "Unit price" [ref=f4e36]
+              - columnheader "Line total" [ref=f4e37]
+          - rowgroup [ref=f4e38]:
+            - row [ref=f4e39]:
+              - cell "SKU-RF-310" [ref=f4e40]
+              - cell "Rook feeder, galvanised" [ref=f4e41]
+              - cell "3" [ref=f4e42]
+              - cell "$15.00" [ref=f4e43]
+              - cell "$45.00" [ref=f4e44]
+            - row [ref=f4e45]:
+              - cell "SKU-JN-323" [ref=f4e46]
+              - cell "Jackdaw nesting box" [ref=f4e47]
+              - cell "4" [ref=f4e48]
+              - cell "$12.75" [ref=f4e49]
+              - cell "$51.00" [ref=f4e50]
+            - row [ref=f4e51]:
+              - cell "SKU-MD-336" [ref=f4e52]
+              - cell "Magpie deterrent kit" [ref=f4e53]
+              - cell "1" [ref=f4e54]
+              - cell "$20.50" [ref=f4e55]
+              - cell "$20.50" [ref=f4e56]
+      - link "Back to orders" [ref=f4e57] [cursor=pointer]:
+        - /url: /orders

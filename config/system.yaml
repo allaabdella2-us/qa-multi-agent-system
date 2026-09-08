@@ -1,0 +1,59 @@
+# System configuration. Run modes follow architecture §9; the Phase 1 roster is
+# the six agents from §11, so modes name only those until Phase 2 lands.
+project: qaas
+target_app: target-app
+tracker: local      # local | jira   -- swap to file against real Jira
+vcs: local          # local | github
+
+thresholds:
+  min_confidence_to_file: 0.6      # §7 confidence gate
+  max_findings_per_agent_run: 25   # §8.3 loop breaker: pause and escalate, don't file
+  max_tickets_per_run: 10          # §4.12 rate limit
+  flake_runs: 5                    # FORGE runs a repro N times to measure flake
+  max_mender_arbiter_round_trips: 2
+  max_proof_reopens: 1
+
+run_modes:
+  pr-check:
+    trigger: pull_request
+    agents: [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]
+    max_budget_usd: 6.0
+    max_wall_clock_s: 900
+    max_concurrency: 2
+
+  nightly:
+    trigger: cron
+    agents: [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]
+    # FORGE runs once per finding, so the deep sweep's budget scales with how
+    # much discovery found, not with the number of agents. Measured: discovery
+    # ~$6, then roughly $1-2 per finding reproduced.
+    max_budget_usd: 40.0
+    max_wall_clock_s: 7200
+    max_concurrency: 3
+
+  incident:
+    trigger: alert
+    agents: [CONDUIT]
+    max_budget_usd: 4.0
+    max_wall_clock_s: 600
+    max_concurrency: 2
+    files_tickets: false          # §9: diagnostic only, read-only, no filing
+
+  # §9: the remediation loop. PROOF verifies first — a ticket whose defect no
+  # longer reproduces needs no fix, and finding that out costs one cheap run
+  # instead of a whole MENDER/ARBITER cycle.
+  fix-cycle:
+    trigger: agent_ready_ticket
+    agents: [PROOF, MENDER, ARBITER]
+    max_budget_usd: 20.0
+    max_wall_clock_s: 3600
+    max_concurrency: 1
+
+  # Everything, end to end: discover, triage, file, fix, review, verify. The most
+  # expensive mode in the system and the only one that closes the loop.
+  full-loop:
+    trigger: on_demand
+    agents: [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK, MENDER, ARBITER, PROOF]
+    max_budget_usd: 60.0
+    max_wall_clock_s: 10800
+    max_concurrency: 3

@@ -1,0 +1,45 @@
+# Target profile. Inspection guessed this; the backend path was corrected by
+# hand because Next.js keeps API route handlers inside the frontend app.
+
+name: cc-training
+root: /private/tmp/claude-501/-Users-allaabdella-qa-multi-agent-system-qa-multi-agent-system/ac6e2dbf-9ecc-4fd0-a8f5-2693c7e1ad34/scratchpad/targets/claude-code-training
+description: "Merchant console \u2014 a Next.js payments dashboard. API route handlers and\
+  \ UI live in one app, which is normal for Next.js and is why inspection did not separate\
+  \ them."
+repo_url: https://github.com/allaabdella2-us/claude-code-training
+default_branch: main
+layout:
+  backend:
+  - build-battle/merchant-console/src/app/api
+  frontend:
+  - build-battle/merchant-console/src/app
+  - build-battle/merchant-console/src/components
+  tests:
+  - build-battle/merchant-console/src
+  migrations: []
+  docs: []
+  exclude:
+  - node_modules
+  - vendor
+  - dist
+  - build
+  - .venv
+  - venv
+  - __pycache__
+  - .git
+  - .next
+  - target
+  - coverage
+  - .pytest_cache
+  - site-packages
+environment:
+  mode: none
+  health_path: /health
+  services: []
+  startup_timeout_s: 180
+auth:
+  mode: none
+  username_field: email
+  password_field: password
+  token_path: access_token
+  roles: {}

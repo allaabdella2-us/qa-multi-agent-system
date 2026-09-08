@@ -1,0 +1,15 @@
+# Ownership drives ticket routing. CLERK resolves component and team from here
+# via the system map; an unmatched path files unassigned rather than guessed.
+
+api/app/routes/orders.py      @corvid/orders-team
+api/app/routes/invoices.py    @corvid/billing-team
+api/app/routes/auth.py        @corvid/platform-team
+api/app/routes/stream.py      @corvid/platform-team
+api/app/errors.py             @corvid/platform-team
+api/app/main.py               @corvid/platform-team
+api/migrations/               @corvid/platform-team
+web/src/routes/Checkout*      @corvid/orders-team
+web/src/routes/Orders*        @corvid/orders-team
+web/src/routes/NewOrder.tsx   @corvid/orders-team
+web/src/components/           @corvid/design-systems
+web/src/styles.css            @corvid/design-systems

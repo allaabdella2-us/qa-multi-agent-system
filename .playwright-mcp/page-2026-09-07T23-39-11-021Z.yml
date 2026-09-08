@@ -1,0 +1,27 @@
+- generic [ref=f3e3]:
+  - banner [ref=f3e4]:
+    - generic [ref=f3e5]:
+      - generic [ref=f3e6]: Corvid Orders
+      - navigation "Main" [ref=f3e7]:
+        - link "Orders" [ref=f3e8] [cursor=pointer]:
+          - /url: /orders
+        - link "New order" [ref=f3e9] [cursor=pointer]:
+          - /url: /orders/new
+      - generic [ref=f3e10]:
+        - generic [ref=f3e11]: admin@northwind.testadmin
+        - button "Sign out" [ref=f3e12] [cursor=pointer]
+  - main [ref=f3e13]:
+    - generic [ref=f3e14]:
+      - heading "Orders" [level=1] [ref=f3e16]
+      - generic [ref=f3e17]:
+        - searchbox "Search by reference" [ref=f3e18]
+        - generic [ref=f3e19]:
+          - generic [ref=f3e20]: Status
+          - combobox "Status" [ref=f3e21]:
+            - option "All statuses" [selected]
+            - option "draft"
+            - option "placed"
+            - option "paid"
+            - option "refunded"
+            - option "cancelled"
+      - status [ref=f3e22]: Loading orders…

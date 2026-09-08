@@ -47,7 +47,7 @@ def list_orders(
 
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = db.scalars(
-        stmt.order_by(Order.created_at.desc(), Order.id.desc()).limit(limit).offset(offset)
+        stmt.order_by(Order.created_at.desc(), Order.id.desc()).offset(offset)
     ).all()
 
     return OrderPage(items=list(rows), total=total, limit=limit, offset=offset)

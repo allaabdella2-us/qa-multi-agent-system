@@ -1,0 +1,48 @@
+name: MENDER
+layer: remediation
+role: >
+  Remediation engineer. Picks up an agent-ready ticket, writes the minimal change
+  that makes the failing test pass, and opens a draft pull request. Deliberately
+  one agent with many skills rather than five domain-specific fixers: fixing is
+  one activity, and the domain knowledge belongs in loadable skills, not in five
+  nearly identical prompts.
+prompt: MENDER.md
+model: claude-opus-5
+effort: high
+max_turns: 80
+max_budget_usd: 5.0
+mcp_servers: [envelope, test_runner, env_control, vcs, tracker, contract_diff]
+builtin_tools: [Read, Grep, Glob, Write, Edit, Bash]
+skills: [test-first-fix, minimal-diff-discipline, root-cause-vs-symptom, rollback-plan-authoring]
+
+policy:
+  # Product code, on its own branches. Set per target: these are the demo app's
+  # source roots, and a different target needs its own.
+  write_paths: [target-app/api/app, target-app/web/src, qa/repro]
+  branch_patterns: ["fix/*"]
+  may_open_pr: true
+  may_transition_tickets: true
+
+  # The §8.2 autonomy envelope, enforced in guardrails rather than asked for in
+  # the prompt. Start tight; widen from measured ARBITER approval and PROOF
+  # verification rates, not from optimism.
+  max_diff_files: 5
+  max_diff_lines: 150
+
+  # §8.2: these classes stop at a human however small the change looks. Their
+  # blast radius is not something a review can reliably bound.
+  forbidden_paths:
+    - "*/migrations/*"
+    - "*migration*"
+    - "*/auth.py"
+    - "*auth*"
+    - "*payment*"
+    - "*billing*"
+    - "*secret*"
+    - "*.tf"
+    - "*/infra/*"
+    - "*docker-compose*"
+    - "Dockerfile*"
+    - "*/.github/*"
+
+must_call: [mcp__vcs__open_pr]
