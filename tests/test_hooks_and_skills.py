@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from support import CONFIG_SEARCH
+
 from qaas.config import load_config
 from qaas.guardrails import ALWAYS_GRANTED, Guardrail
 from qaas.mcp.context import ToolContext
@@ -23,7 +25,7 @@ AGENTS = ["CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK", "PROOF"]
 
 @pytest.fixture(scope="module")
 def cfg():
-    return load_config(REPO / "config")
+    return load_config(search=CONFIG_SEARCH)
 
 
 @pytest.fixture

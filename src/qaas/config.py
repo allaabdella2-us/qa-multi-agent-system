@@ -8,7 +8,7 @@ the runner, or the guardrails — that is the property this module exists to kee
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 import os
 
@@ -143,7 +143,10 @@ class SystemConfig(BaseModel):
     #: Which target profile in config/targets/ this run is pointed at. The
     #: profile is what makes the system portable: without it every prompt and
     #: every environment call is welded to the application it was built beside.
-    target: str = "corvid"
+    #: The active target profile, or None when nothing is configured yet.
+    #: A fresh `pip install` is legitimately in that state; commands that
+    #: need a profile say so rather than crashing during config load.
+    target: str | None = None
 
     #: Repository root of the target, resolved from the profile at load time.
     #: Kept as a plain path because most callers only need that much.
@@ -176,14 +179,42 @@ class SystemConfig(BaseModel):
 #: Environment overrides for the two swappable backends.
 TRACKER_ENV = "QAAS_TRACKER"
 VCS_ENV = "QAAS_VCS"
+#: Which target profile to run against. Useful on its own (`QAAS_TARGET=staging
+#: qaas run`), and it is how this repo's own test suite selects the bundled demo
+#: without putting a demo name in the defaults that ship to everyone else.
+TARGET_ENV = "QAAS_TARGET"
 
 
-def load_config(config_dir: Path | str = "config") -> SystemConfig:
-    """Read config/system.yaml plus every config/agents/*.yaml."""
-    config_dir = Path(config_dir)
-    system_path = config_dir / "system.yaml"
-    if not system_path.exists():
-        raise FileNotFoundError(f"no system config at {system_path}")
+def load_config(
+    config_dir: Path | str | None = None,
+    *,
+    search: Sequence[Path] | None = None,
+) -> SystemConfig:
+    """Read system.yaml plus every agents/*.yaml, layered across search paths.
+
+    Passing `config_dir` positionally means "this directory and nothing else",
+    which is exactly the old behaviour and what every test does. Passing
+    `search` layers several directories: `system.yaml` is taken whole from the
+    first that has one, while `agents/*.yaml` and `targets/*.yaml` are unioned
+    by filename with earlier directories shadowing later ones -- so a user can
+    override one agent without forking all eight and freezing on today's roster.
+
+    With neither argument, the workspace resolver decides (an explicit
+    --config, then the project, then what shipped in the wheel).
+    """
+    if config_dir is not None:
+        dirs: list[Path] = [Path(config_dir)]
+    elif search is not None:
+        dirs = [Path(d) for d in search]
+    else:
+        from qaas.paths import Workspace
+
+        dirs = list(Workspace.resolve().config_dirs)
+
+    system_path = next((d / "system.yaml" for d in dirs if (d / "system.yaml").is_file()), None)
+    if system_path is None:
+        looked = ", ".join(str(d) for d in dirs) or "(nowhere -- no search path)"
+        raise FileNotFoundError(f"no system config at {dirs[0] / 'system.yaml'} (looked in: {looked})")
 
     raw: dict[str, Any] = yaml.safe_load(system_path.read_text()) or {}
 
@@ -196,13 +227,21 @@ def load_config(config_dir: Path | str = "config") -> SystemConfig:
     # have. The house rule is that the default `pytest` run is offline and free,
     # and a committed backend switch silently breaks it -- so the switch belongs
     # in the environment of the person who wants it, not in the repo.
-    for key, var in (("tracker", TRACKER_ENV), ("vcs", VCS_ENV)):
-        override = (os.environ.get(var) or "").strip().lower()
-        if override:
-            raw[key] = override
+    for key, var in (("tracker", TRACKER_ENV), ("vcs", VCS_ENV), ("target", TARGET_ENV)):
+        raw_value = (os.environ.get(var) or "").strip()
+        if raw_value:
+            # Backends are lowercase literals; a target is a profile name.
+            raw[key] = raw_value if key == "target" else raw_value.lower()
+
+    # Agents layer by filename. Walking the search paths in reverse means the
+    # highest-precedence directory writes last and therefore wins.
+    by_stem: dict[str, Path] = {}
+    for d in reversed(dirs):
+        for path in sorted((d / "agents").glob("*.yaml")):
+            by_stem[path.stem] = path
 
     agents: dict[str, Any] = {}
-    for path in sorted((config_dir / "agents").glob("*.yaml")):
+    for path in by_stem.values():
         spec = yaml.safe_load(path.read_text()) or {}
         name = spec.get("name") or path.stem.upper()
         spec["name"] = name
@@ -214,10 +253,16 @@ def load_config(config_dir: Path | str = "config") -> SystemConfig:
 
     config = SystemConfig.model_validate(raw)
 
-    # Resolve the target profile. A missing one is fatal rather than defaulted:
-    # running the wrong application is worse than not running.
-    targets_dir = config_dir / "targets"
-    if targets_dir.exists():
-        profile = load_target(config.target, targets_dir)
-        config = config.model_copy(update={"profile": profile, "target_app": profile.root})
+    # Resolve the target profile if one is named and findable.
+    #
+    # A named-but-missing profile stays fatal -- running the wrong application
+    # is worse than not running. But `target: null` is a legitimate state now:
+    # `pip install qaas-python` gives you a working CLI that is not yet pointed
+    # at anything, and the commands that need a profile say "run qaas init"
+    # rather than dying inside config loading.
+    if config.target:
+        targets_dir = next((d / "targets" for d in dirs if (d / "targets").is_dir()), None)
+        if targets_dir is not None:
+            profile = load_target(config.target, targets_dir)
+            config = config.model_copy(update={"profile": profile, "target_app": profile.root})
     return config

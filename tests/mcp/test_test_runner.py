@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from support import CONFIG_SEARCH, PACKAGED_CONFIG
+
 from qaas.config import load_config
 from qaas.mcp.context import ToolContext, handlers
 from qaas.mcp.test_runner import MAX_FLAKE_RUNS, build_tools
@@ -80,7 +82,7 @@ def project(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def ctx(project: Path, tmp_path: Path) -> ToolContext:
-    config = load_config(REPO / "config")
+    config = load_config(search=CONFIG_SEARCH)
     root = tmp_path / ".qaas"
     return ToolContext(
         store=RunStore("test-runner-run", root=root),

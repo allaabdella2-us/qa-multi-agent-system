@@ -17,13 +17,15 @@ from typing import Any
 
 import pytest
 
+from support import CONFIG_SEARCH
+
 from qaas.config import AgentSpec, SystemConfig, load_config
 from qaas.envelope import DefectEnvelope
 from qaas.mcp.context import ToolContext
 from qaas.store import RunStore, SystemMapStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-_CONFIG = load_config(REPO_ROOT / "config")
+_CONFIG = load_config(search=CONFIG_SEARCH)
 
 
 def is_error(result: dict[str, Any]) -> bool:

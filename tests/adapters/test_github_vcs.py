@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from support import CONFIG_SEARCH, PACKAGED_CONFIG
+
 from qaas.adapters.vcs import (
     AUTOMATION_NOTICE,
     GitHubVcs,
@@ -343,7 +345,7 @@ def test_build_vcs_returns_a_working_github_adapter(clone):
 
 
 def make_ctx(agent: AgentSpec, repo: Path, tmp_path: Path) -> ToolContext:
-    config = load_config(REPO / "config").model_copy(update={"vcs": "github"})
+    config = load_config(search=CONFIG_SEARCH).model_copy(update={"vcs": "github"})
     root = tmp_path / ".qaas"
     return ToolContext(
         store=RunStore(f"gh-{agent.name.lower()}", root=root),
@@ -403,7 +405,7 @@ async def test_mender_may_push_and_open_a_draft_pr(fake_gh, clone, tmp_path):
 @pytest.mark.parametrize("tool_name, args", [("push", {}), ("open_pr", {"title": "t", "body": "b", "ticket": "P-1"})])
 async def test_an_agent_without_may_open_pr_is_refused_and_logged(fake_gh, clone, tmp_path, tool_name, args):
     """FORGE may branch and commit (§8.1) but publishing is not its job."""
-    config_forge = load_config(REPO / "config").agents["FORGE"]
+    config_forge = load_config(search=CONFIG_SEARCH).agents["FORGE"]
     assert not config_forge.policy.may_open_pr
 
     ctx = make_ctx(config_forge, clone, tmp_path)

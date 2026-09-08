@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from qaas import conductor as conductor_mod
+from support import CONFIG_SEARCH
+
 from qaas.conductor import Budget, BudgetExceeded, Conductor
 from qaas.config import load_config
 from qaas.envelope import DefectEnvelope, Domain, Severity
@@ -21,7 +23,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def cfg():
-    return load_config(REPO / "config")
+    return load_config(search=CONFIG_SEARCH)
 
 
 @pytest.fixture

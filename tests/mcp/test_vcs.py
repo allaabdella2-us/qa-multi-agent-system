@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from support import CONFIG_SEARCH, PACKAGED_CONFIG
+
 from qaas.adapters.vcs import GitHubVcs, LocalGit, VcsError, build_vcs
 from qaas.config import load_config
 from qaas.mcp.context import ToolContext, handlers
@@ -46,7 +48,7 @@ def repo(tmp_path: Path) -> Path:
 
 
 def make_ctx(agent_name: str, repo: Path, tmp_path: Path) -> ToolContext:
-    config = load_config(REPO / "config")
+    config = load_config(search=CONFIG_SEARCH)
     root = tmp_path / ".qaas"
     return ToolContext(
         store=RunStore(f"vcs-{agent_name.lower()}", root=root),

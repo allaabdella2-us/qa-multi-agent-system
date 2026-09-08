@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from support import CONFIG_SEARCH
+
 from qaas.config import load_config
 from qaas.guardrails import Guardrail
 from qaas.mcp.context import ToolContext
@@ -18,7 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def guard_for(tmp_path):
-    cfg = load_config(REPO / "config")
+    cfg = load_config(search=CONFIG_SEARCH)
 
     def build(agent_name: str) -> Guardrail:
         ctx = ToolContext(
@@ -140,7 +142,7 @@ def test_ordinary_commands_are_allowed(guard_for):
 
 def test_protected_test_file_cannot_be_rewritten_through_the_shell(tmp_path):
     """§10: the test that defines success must not be editable by the fixer."""
-    cfg = load_config(REPO / "config")
+    cfg = load_config(search=CONFIG_SEARCH)
     spec = cfg.agents["FORGE"].model_copy(deep=True)
     spec.policy.protected_paths = ["qa/repro/test_defining.py"]
     ctx = ToolContext(
@@ -264,7 +266,7 @@ def test_the_registry_wires_the_hook_to_pretooluse(tmp_path):
     from qaas.sdk_compat import PRE_TOOL_USE
     from qaas.store import RunStore, SystemMapStore
 
-    cfg = load_config(REPO / "config")
+    cfg = load_config(search=CONFIG_SEARCH)
     ctx = ToolContext(
         store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
         config=cfg, agent=cfg.agents["FORGE"], repo_root=REPO,
@@ -309,7 +311,7 @@ def test_forbidden_classes_stop_at_a_human(guard_for, path, expected):
 
 def test_the_defining_test_cannot_be_edited_by_the_fixer(tmp_path):
     """§10, symptom fixes: a fixer that edits the test has hidden the defect."""
-    cfg = load_config(REPO / "config")
+    cfg = load_config(search=CONFIG_SEARCH)
     spec = cfg.agents["MENDER"].model_copy(deep=True)
     spec.policy.protected_paths = ["qa/repro/test_orders_limit.py"]
     ctx = ToolContext(

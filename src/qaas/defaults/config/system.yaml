@@ -1,6 +1,12 @@
 # System configuration. Run modes follow architecture §9; the Phase 1 roster is
 # the six agents from §11, so modes name only those until Phase 2 lands.
 project: qaas
+# Which target profile to run against, from <config>/targets/<name>.yaml.
+# Unset means "not pointed at anything yet", which is exactly what a fresh
+# `pip install` is. `qaas init` writes this for you; QAAS_TARGET overrides it.
+target:
+
+# Legacy: superseded by the target profile's `root` whenever a profile loads.
 target_app: target-app
 tracker: local      # local | jira   -- swap to file against real Jira
 vcs: local          # local | github

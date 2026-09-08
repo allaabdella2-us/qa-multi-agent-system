@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from qaas import cli
 
 REPO = Path(__file__).resolve().parents[1]
-CONFIG = str(REPO / "config")
+CONFIG = str(REPO / "src" / "qaas" / "defaults" / "config")
 
 EXPECTED_COMMANDS = {
     "init", "targets", "doctor", "validate",

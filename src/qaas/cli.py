@@ -8,15 +8,76 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from qaas.paths import Workspace
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config
 from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
 
-SKILLS_DIR = Path(__file__).resolve().parents[2] / ".claude" / "skills"
+#: Where skills are found, in precedence order. This used to be
+#: `Path(__file__).resolve().parents[2] / ".claude" / "skills"` -- a climb that
+#: lands on the repo root from a source checkout and on
+#: `site-packages/../..` from an install. So `qaas validate` failed for every
+#: pip user (it checks all 30 skills exist), and agents ran with no skills at
+#: all, silently, because a missing skill is an empty listing rather than an
+#: error. Resolved through the workspace now, which searches the project first
+#: and the packaged copy last.
+def _skill_dirs() -> tuple[Path, ...]:
+    return Workspace.resolve().skill_dirs
+
+
+def _skill_path(name: str) -> Path | None:
+    for d in _skill_dirs():
+        if (d / name / "SKILL.md").is_file():
+            return d / name
+    return None
+
+def _activate_target(system_yaml_text: str, target_name: str) -> str:
+    """Set `target:` in a system.yaml, preserving every comment around it.
+
+    A regex rather than a YAML round-trip because PyYAML discards comments, and
+    this file is more comment than configuration -- the comments are what make
+    it editable by someone who has never read the source.
+    """
+    import re
+
+    if re.search(r"^target:.*$", system_yaml_text, re.M):
+        return re.sub(r"^target:.*$", f"target: {target_name}", system_yaml_text, count=1, flags=re.M)
+    return f"target: {target_name}\n" + system_yaml_text
+
+
+def _system_yaml(config_dir: Path | str | None) -> Path:
+    """The system.yaml actually in force, for messages that name it."""
+    if config_dir is not None:
+        return Path(config_dir) / "system.yaml"
+    ws = Workspace.resolve()
+    found = ws.config_file("system.yaml")
+    return found or (ws.state_root / "config" / "system.yaml")
+
+
+def _targets_dir(config_dir: Path | str | None, *, writable: bool = False) -> Path:
+    """Where target profiles live, honouring --config and the workspace.
+
+    Reads search every config layer -- a user's own profiles shadow the bundled
+    demo. Writes go to the project (`.qaas/config/targets/`), never into an
+    installed package: `qaas init` must not try to write inside site-packages.
+    """
+    if config_dir is not None:
+        return Path(config_dir) / "targets"
+    ws = Workspace.resolve()
+    if writable:
+        return ws.state_root / "config" / "targets"
+    for d in ws.config_dirs:
+        if (d / "targets").is_dir():
+            return d / "targets"
+    return ws.state_root / "config" / "targets"
+
 
 app = typer.Typer(add_completion=False, help="Multi-agent QA & remediation system.")
 console = Console()
 
-ConfigDir = typer.Option("config", "--config", "-c", help="Config directory.")
+#: None means "let the workspace decide" -- an explicit --config, then the
+#: project, then the defaults that shipped in the wheel. A literal "config"
+#: default meant every command outside this repo died on a missing directory.
+ConfigDir = typer.Option(None, "--config", "-c", help="Config directory.")
 Root = typer.Option(DEFAULT_ROOT, "--root", help="Runtime state directory.")
 
 
@@ -27,7 +88,7 @@ def init(
     api_url: str = typer.Option(None, "--api-url", help="Base URL of a running API, if there is one."),
     web_url: str = typer.Option(None, "--web-url", help="Base URL of a running UI, if there is one."),
     clone_to: Path = typer.Option(Path("targets"), "--clone-to", help="Where to clone, for a git URL."),
-    config_dir: Path = ConfigDir,
+    config_dir: Path | None = ConfigDir,
     force: bool = typer.Option(False, "--force", help="Overwrite an existing profile."),
 ) -> None:
     """Point this system at a repository by writing a target profile.
@@ -69,7 +130,7 @@ def init(
     target_name = (name or root.resolve().name).lower()
     target_name = re.sub(r"[^a-z0-9-]+", "-", target_name).strip("-")[:40] or "target"
 
-    out = Path(config_dir) / "targets" / f"{target_name}.yaml"
+    out = _targets_dir(config_dir, writable=True) / f"{target_name}.yaml"
     if out.exists() and not force:
         console.print(f"[red]{out} already exists.[/red] Use --force to overwrite.")
         raise typer.Exit(1)
@@ -99,7 +160,42 @@ def init(
         + _yaml.safe_dump(payload, sort_keys=False, width=88)
     )
 
-    console.print(f"\n[green]wrote {out}[/green]\n")
+    # Activate the profile. This used to be step 3 of a printed checklist --
+    # "set `target: x` in config/system.yaml" -- which was impossible outside
+    # this repo, because there was no system.yaml to edit and no way to make
+    # one. A setup step that ends by asking the human to go and edit a file has
+    # not set anything up.
+    project_config = out.parent.parent
+    system_yaml = project_config / "system.yaml"
+    if not system_yaml.exists():
+        shipped = Workspace.resolve().config_file("system.yaml")
+        base = shipped.read_text() if shipped else "project: qaas\n"
+        system_yaml.write_text(
+            _activate_target(base, target_name)
+            if shipped
+            else f"project: qaas\ntarget: {target_name}\n"
+        )
+        wrote_system = True
+    else:
+        system_yaml.write_text(_activate_target(system_yaml.read_text(), target_name))
+        wrote_system = False
+
+    # `.qaas/` now holds a user's committed config next to their disposable run
+    # state, so the obvious `.gitignore` line for `.qaas/` would drop the
+    # configuration too. Spell out which half is which.
+    gitignore = project_config.parent / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(
+            "# Run state: regenerated every run, never worth committing.\n"
+            "runs/\ntickets/\ngenerated/\nsystem-map/\nmemory.db\nartifacts/\n"
+            "\n# config/ is NOT ignored -- it is yours, and it is the point.\n"
+        )
+
+    console.print(f"\n[green]wrote {out}[/green]")
+    console.print(
+        f"[green]{'wrote' if wrote_system else 'updated'} {system_yaml}[/green]  "
+        f"[dim](target: {target_name})[/dim]\n"
+    )
     table = Table(header_style="bold", show_header=True)
     table.add_column("detected")
     table.add_column("value")
@@ -121,17 +217,16 @@ def init(
         f"\n[bold]next[/bold]\n"
         f"  1. Read {out} and correct anything wrong.\n"
         f"  2. If the app runs somewhere, set environment.mode and the URLs, and fill in auth.\n"
-        f"  3. Set `target: {target_name}` in {config_dir}/system.yaml.\n"
-        f"  4. `qaas doctor` to check readiness, then `qaas run --mode pr-check --dry-run`.\n"
+        f"  3. `qaas doctor` to check readiness, then `qaas run --mode pr-check --dry-run`.\n"
     )
 
 
 @app.command()
-def targets(config_dir: Path = ConfigDir) -> None:
+def targets(config_dir: Path | None = ConfigDir) -> None:
     """List the target profiles this system knows about."""
     from qaas.target import list_targets, load_target
 
-    names = list_targets(Path(config_dir) / "targets")
+    names = list_targets(_targets_dir(config_dir))
     if not names:
         console.print("[dim]no targets yet — run `qaas init <path-to-repo>`[/dim]")
         return
@@ -140,7 +235,7 @@ def targets(config_dir: Path = ConfigDir) -> None:
     for col in ("target", "root", "environment", "scored"):
         table.add_column(col)
     for n in names:
-        p = load_target(n, Path(config_dir) / "targets")
+        p = load_target(n, _targets_dir(config_dir))
         table.add_row(
             f"[bold]{n}[/bold] (active)" if n == active else n,
             p.root,
@@ -152,14 +247,14 @@ def targets(config_dir: Path = ConfigDir) -> None:
 
 @app.command()
 def doctor(
-    config_dir: Path = ConfigDir,
+    config_dir: Path | None = ConfigDir,
     target: str = typer.Option(None, "--target", "-t", help="Check this profile instead of the active one."),
 ) -> None:
     """Check whether a target is ready to run against."""
     from qaas.target import load_target
 
     cfg = load_config(config_dir)
-    profile = load_target(target, Path(config_dir) / "targets") if target else cfg.profile
+    profile = load_target(target, _targets_dir(config_dir)) if target else cfg.profile
     if profile is None:
         console.print("[red]no target profile loaded[/red]")
         raise typer.Exit(1)
@@ -215,7 +310,7 @@ def _agent_usable(spec, caps: dict[str, bool]) -> bool:
 
 
 @app.command()
-def validate(config_dir: Path = ConfigDir) -> None:
+def validate(config_dir: Path | None = ConfigDir) -> None:
     """Check config, prompts, and tool allowlists without calling the API."""
     try:
         cfg = load_config(config_dir)
@@ -223,8 +318,9 @@ def validate(config_dir: Path = ConfigDir) -> None:
         console.print(f"[red]config invalid:[/red] {exc}")
         raise typer.Exit(1)
 
-    prompts_dir = Path(__file__).parent / "prompts"
+    prompts_dir = Workspace.resolve().prompt_dirs[0]
     problems: list[str] = []
+    notes: list[str] = []
     for name, spec in sorted(cfg.agents.items()):
         if not spec.prompt_path(prompts_dir).exists():
             problems.append(f"{name}: missing prompt file {spec.prompt}")
@@ -233,7 +329,7 @@ def validate(config_dir: Path = ConfigDir) -> None:
         if spec.policy.may_create_tickets and spec.policy.max_tickets_per_run <= 0:
             problems.append(f"{name}: may create tickets but has no per-run cap")
         for skill in spec.skills:
-            if not (SKILLS_DIR / skill / "SKILL.md").exists():
+            if _skill_path(skill) is None:
                 problems.append(f"{name}: names skill '{skill}' with no SKILL.md")
         for tool in spec.must_call:
             if tool.startswith("mcp__") and tool.split("__")[1] not in spec.mcp_servers:
@@ -257,10 +353,16 @@ def validate(config_dir: Path = ConfigDir) -> None:
                 f"{missing} and files nothing. Raise max_budget_usd or drop an agent"
             )
 
+    # Skills nobody uses are a note, not a problem. Thirty skills ship in the
+    # wheel; someone running a two-agent roster would otherwise see twenty
+    # "orphans" and a non-zero exit from `qaas validate` on a fresh install --
+    # which is the exact failure this whole exercise exists to remove. An agent
+    # naming a skill that is NOT on disk stays a hard error, above.
     referenced = {s for spec in cfg.agents.values() for s in spec.skills}
-    orphans = {p.parent.name for p in SKILLS_DIR.glob("*/SKILL.md")} - referenced
+    on_disk = {name for d in _skill_dirs() for p in d.glob("*/SKILL.md") for name in [p.parent.name]}
+    orphans = on_disk - referenced
     if orphans:
-        problems.append(f"skills on disk that no agent uses: {', '.join(sorted(orphans))}")
+        notes.append(f"{len(orphans)} skill(s) on disk that no agent in this config uses")
 
     table = Table(title="Agents", header_style="bold")
     for col in ("agent", "layer", "model", "servers", "skills", "must call", "writes"):
@@ -284,6 +386,11 @@ def validate(config_dir: Path = ConfigDir) -> None:
             f"[bold]{mode}[/bold]: {', '.join(rm.agents)}  "
             f"[dim]budget ${rm.max_budget_usd:.2f}, {rm.max_wall_clock_s}s[/dim]{filing}"
         )
+
+    if notes:
+        console.print("\n[dim]notes:[/dim]")
+        for note in notes:
+            console.print(f"  [dim]{note}[/dim]")
 
     if problems:
         console.print("\n[red]problems:[/red]")
@@ -363,7 +470,7 @@ def map(root: Path = Root, version: str | None = None) -> None:
 @app.command()
 def run(
     mode: str = typer.Option(..., "--mode", "-m", help="Run mode from system.yaml."),
-    config_dir: Path = ConfigDir,
+    config_dir: Path | None = ConfigDir,
     root: Path = Root,
     only: list[str] = typer.Option(None, "--only", help="Restrict the run to these agents."),
     target: str = typer.Option(None, "--target", "-t", help="Target profile to run against. Overrides system.yaml."),
@@ -380,7 +487,7 @@ def run(
 
     cfg = load_config(config_dir)
     if target:
-        profile = load_target(target, Path(config_dir) / "targets")
+        profile = load_target(target, _targets_dir(config_dir))
         cfg = cfg.model_copy(update={"target": target, "profile": profile, "target_app": profile.root})
     if cfg.profile:
         problems = cfg.profile.readiness()
@@ -451,7 +558,7 @@ def run(
 @app.command()
 def score(
     run_id: str = typer.Argument(None, help="Run to score. Defaults to the most recent."),
-    config_dir: Path = ConfigDir,
+    config_dir: Path | None = ConfigDir,
     root: Path = Root,
     phase: int = typer.Option(1, help="Score against defects seeded for this phase and earlier."),
     domains: list[str] = typer.Option(
@@ -517,7 +624,7 @@ def score(
 @app.command()
 def sweep(
     mode: str = typer.Option("nightly", "--mode", "-m"),
-    config_dir: Path = ConfigDir,
+    config_dir: Path | None = ConfigDir,
     root: Path = Root,
     min_precision: float = typer.Option(
         0.70, help="Quality gate. §11 stops the rollout below 70% accepted."
@@ -832,7 +939,7 @@ def _tracker_check_jira(dry_run_ticket: bool) -> tuple[list[str], list[str]]:
 
 @app.command("tracker-check")
 def tracker_check(
-    config_dir: Path = ConfigDir,
+    config_dir: Path | None = ConfigDir,
     root: Path = Root,
     dry_run_ticket: bool = typer.Option(
         False, "--dry-run-ticket", help="Also render the JSON that would be POSTed for a sample finding."
@@ -848,7 +955,7 @@ def tracker_check(
     cfg = load_config(config_dir)
     console.print(
         f"[bold]tracker backend[/bold]: {cfg.tracker}   "
-        f"[dim](tracker: in {Path(config_dir) / 'system.yaml'})[/dim]\n"
+        f"[dim](tracker: in {_system_yaml(config_dir)})[/dim]\n"
     )
 
     if cfg.tracker == "local":

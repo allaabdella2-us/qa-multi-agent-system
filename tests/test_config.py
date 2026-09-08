@@ -6,6 +6,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from support import CONFIG_SEARCH
+
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, AgentSpec, SystemConfig, load_config
 
 REPO = Path(__file__).resolve().parents[1]
@@ -18,7 +20,7 @@ ROSTER = PHASE_1 | PHASE_3
 
 @pytest.fixture(scope="module")
 def cfg() -> SystemConfig:
-    return load_config(REPO / "config")
+    return load_config(search=CONFIG_SEARCH)
 
 
 def spec(**kw) -> dict:
@@ -181,25 +183,25 @@ def test_the_committed_tracker_default_is_local():
     """Not a preference -- a constraint. Committing `jira` made 18 tests fail and
     14 error, because the agent fixtures build a real JiraTracker and CI has no
     credentials. The default pytest run must stay offline and free."""
-    assert load_config(REPO / "config").tracker == "local"
+    assert load_config(search=CONFIG_SEARCH).tracker == "local"
 
 
 def test_qaas_tracker_switches_the_backend_without_editing_the_repo(monkeypatch):
     monkeypatch.setenv("QAAS_TRACKER", "jira")
-    assert load_config(REPO / "config").tracker == "jira"
+    assert load_config(search=CONFIG_SEARCH).tracker == "jira"
 
 
 def test_an_empty_override_is_ignored_rather_than_treated_as_a_value(monkeypatch):
     """An unset-but-exported variable is common in shells; it must not blank the
     config into an invalid backend."""
     monkeypatch.setenv("QAAS_TRACKER", "")
-    assert load_config(REPO / "config").tracker == "local"
+    assert load_config(search=CONFIG_SEARCH).tracker == "local"
 
 
 def test_a_nonsense_override_is_rejected_loudly(monkeypatch):
     monkeypatch.setenv("QAAS_TRACKER", "carrier-pigeon")
     with pytest.raises(Exception):
-        load_config(REPO / "config")
+        load_config(search=CONFIG_SEARCH)
 
 
 def test_every_mode_can_afford_the_agents_it_names():
@@ -208,7 +210,7 @@ def test_every_mode_can_afford_the_agents_it_names():
     discovery alone spent $6.09, so FORGE and CLERK never dispatched and the
     mode meant for every pull request could not file a ticket. Nothing errored,
     which is what made it survive."""
-    cfg = load_config(REPO / "config")
+    cfg = load_config(search=CONFIG_SEARCH)
     for name, mode in cfg.run_modes.items():
         needed = sum(cfg.agents[a].max_budget_usd for a in mode.agents if a in cfg.agents)
         assert needed <= mode.max_budget_usd, (

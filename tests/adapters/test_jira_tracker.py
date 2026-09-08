@@ -23,6 +23,8 @@ from typing import Any
 
 import pytest
 
+from support import CONFIG_SEARCH, PACKAGED_CONFIG
+
 from qaas.adapters.tracker import (
     JIRA_API_TOKEN_URL,
     Issue,
@@ -594,7 +596,7 @@ def jira_ctx(stub, tmp_path: Path, monkeypatch, **env_overrides: str) -> ToolCon
     test: leaking JIRA_* into the session would silently change what every
     later test's `build_tracker` does.
     """
-    config = load_config(REPO_ROOT / "config")
+    config = load_config(search=CONFIG_SEARCH)
     for name, value in env_for(stub, **env_overrides).items():
         monkeypatch.setenv(name, value)
     return ToolContext(
@@ -778,7 +780,7 @@ def jira_config(tmp_path) -> Path:
     import shutil
 
     dest = tmp_path / "config"
-    shutil.copytree(REPO_ROOT / "config", dest)
+    shutil.copytree(PACKAGED_CONFIG, dest)
     system = dest / "system.yaml"
     system.write_text(system.read_text().replace("tracker: local", "tracker: jira", 1))
     return dest
@@ -942,7 +944,7 @@ def test_tracker_check_on_the_local_backend_needs_no_credentials(cli_runner, tmp
     from qaas import cli
 
     result = cli_runner.invoke(
-        cli.app, ["tracker-check", "--config", str(REPO_ROOT / "config"), "--root", str(tmp_path)]
+        cli.app, ["tracker-check", "--config", str(PACKAGED_CONFIG), "--root", str(tmp_path)]
     )
     assert result.exit_code == 0, result.output
     assert "local" in result.output and "ready" in result.output
@@ -1016,7 +1018,7 @@ async def test_dry_run_transition_and_link_send_nothing(stub, tmp_path, monkeypa
     ctx = jira_ctx(stub, tmp_path, monkeypatch)
     # PROOF, not CLERK: §8.1 gives the transition right to the agent that
     # verifies a fix, and the dry run must not paper over the policy.
-    ctx.agent = load_config(REPO_ROOT / "config").agents["PROOF"]
+    ctx.agent = load_config(search=CONFIG_SEARCH).agents["PROOF"]
     tools = handlers(build_tools(ctx))
 
     moved = await tools["transition"](

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from support import CONFIG_SEARCH
+
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config
 from qaas.mcp.context import ToolContext
 from qaas.registry import (
@@ -28,7 +30,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(scope="module")
 def cfg():
-    return load_config(REPO / "config")
+    return load_config(search=CONFIG_SEARCH)
 
 
 @pytest.fixture
