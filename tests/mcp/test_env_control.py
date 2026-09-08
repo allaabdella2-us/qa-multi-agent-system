@@ -249,19 +249,35 @@ def test_the_real_fixture_file_parses_into_per_table_counts():
 
 @pytest.mark.docker
 async def test_a_full_environment_round_trip(tools):
-    """Excluded from the default run. Needs Docker and a buildable target app."""
-    up = await tools["spin_up"]({})
-    assert not is_error(up), text_of(up)
-    assert structured(up)["services"]["api"]["state"].startswith("running")
+    """Excluded from the default run. Needs Docker and a buildable target app.
 
-    assert not is_error(await tools["seed"]({"fixture": "default"}))
+    The explicit `seed` here is load-bearing: compose already applies
+    fixtures.sql through initdb, so this is the *second* application of that
+    file within one container's life. It used to die on `duplicate key value
+    violates unique constraint "organizations_pkey"`, which left `status`
+    reporting no fixture and made a reproduction impossible to pin. The fixture
+    truncates first now; this assertion is what keeps it that way.
+    """
+    try:
+        up = await tools["spin_up"]({})
+        assert not is_error(up), text_of(up)
+        assert structured(up)["services"]["api"]["state"].startswith("running")
 
-    token = await tools["impersonate"]({"role": "admin"})
-    assert not is_error(token), text_of(token)
-    assert structured(token)["token"]
+        assert not is_error(await tools["seed"]({"fixture": "default"}))
 
-    state = await tools["status"]({})
-    assert structured(state)["fixture"] == "default"
+        token = await tools["impersonate"]({"role": "admin"})
+        assert not is_error(token), text_of(token)
+        assert structured(token)["token"]
 
-    assert not is_error(await tools["reset"]({}))
-    assert not is_error(await tools["tear_down"]({}))
+        state = await tools["status"]({})
+        assert structured(state)["fixture"] == "default"
+
+        assert not is_error(await tools["reset"]({}))
+        assert not is_error(await tools["tear_down"]({}))
+    finally:
+        # tear_down is the point of the test, but the rest of the `docker` tier
+        # shares one environment and this file sorts ahead of tests/target_app.
+        # Leaving it torn down failed every seeded-defect test behind it with
+        # `Connection refused` -- a collapse that looked like the app, not the
+        # suite. Put back what we removed, pass or fail.
+        await tools["spin_up"]({})
