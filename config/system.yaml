@@ -2,7 +2,7 @@
 # the six agents from §11, so modes name only those until Phase 2 lands.
 project: qaas
 target_app: target-app
-tracker: jira       # local | jira   -- swap to file against real Jira
+tracker: local      # local | jira   -- swap to file against real Jira
 vcs: local          # local | github
 
 thresholds:
@@ -17,7 +17,13 @@ run_modes:
   pr-check:
     trigger: pull_request
     agents: [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]
-    max_budget_usd: 6.0
+    # Was 6.0, which this roster could not complete. Measured on a real run:
+    # CARTOGRAPHER $0.69 + CONDUIT $2.25 + SURFACE $3.16 = $6.09, so the governor
+    # stopped the run before FORGE or CLERK ever dispatched. The mode meant to
+    # run on every pull request could not file a ticket, and it failed silently:
+    # agents ran, findings landed in the ledger, nothing errored. `qaas validate`
+    # now refuses a mode whose agents cannot fit inside its cap.
+    max_budget_usd: 16.0
     max_wall_clock_s: 900
     max_concurrency: 2
 

@@ -172,3 +172,46 @@ def test_duplicate_agent_definition_is_rejected(tmp_path):
 def test_missing_system_config_is_an_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path)
+
+
+# -- backend overrides ------------------------------------------------------
+
+
+def test_the_committed_tracker_default_is_local():
+    """Not a preference -- a constraint. Committing `jira` made 18 tests fail and
+    14 error, because the agent fixtures build a real JiraTracker and CI has no
+    credentials. The default pytest run must stay offline and free."""
+    assert load_config(REPO / "config").tracker == "local"
+
+
+def test_qaas_tracker_switches_the_backend_without_editing_the_repo(monkeypatch):
+    monkeypatch.setenv("QAAS_TRACKER", "jira")
+    assert load_config(REPO / "config").tracker == "jira"
+
+
+def test_an_empty_override_is_ignored_rather_than_treated_as_a_value(monkeypatch):
+    """An unset-but-exported variable is common in shells; it must not blank the
+    config into an invalid backend."""
+    monkeypatch.setenv("QAAS_TRACKER", "")
+    assert load_config(REPO / "config").tracker == "local"
+
+
+def test_a_nonsense_override_is_rejected_loudly(monkeypatch):
+    monkeypatch.setenv("QAAS_TRACKER", "carrier-pigeon")
+    with pytest.raises(Exception):
+        load_config(REPO / "config")
+
+
+def test_every_mode_can_afford_the_agents_it_names():
+    """A mode whose roster outspends its cap stops partway through and looks
+    like it worked. `pr-check` shipped with a $6 cap against a $15 roster:
+    discovery alone spent $6.09, so FORGE and CLERK never dispatched and the
+    mode meant for every pull request could not file a ticket. Nothing errored,
+    which is what made it survive."""
+    cfg = load_config(REPO / "config")
+    for name, mode in cfg.run_modes.items():
+        needed = sum(cfg.agents[a].max_budget_usd for a in mode.agents if a in cfg.agents)
+        assert needed <= mode.max_budget_usd, (
+            f"mode '{name}' names agents that can spend ${needed:.2f} against a "
+            f"${mode.max_budget_usd:.2f} cap; it will stop before the last agent runs"
+        )

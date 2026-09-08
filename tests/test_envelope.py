@@ -133,3 +133,70 @@ def test_not_reproducible_is_not_fileable():
 
 def test_severity_ranks_blocker_above_minor():
     assert Severity.BLOCKER.rank < Severity.MINOR.rank
+
+
+# -- fingerprint stability against real reports -----------------------------
+#
+# These path spellings are verbatim from .qaas/memory.db after three live runs.
+# All three describe ONE defect (the refund endpoint's missing role check) and
+# each produced a DIFFERENT fingerprint, so `occurrence_count` never left 1 and
+# `get_occurrences` could never report a recurrence. Deduplication survived only
+# because CLERK matches on similarity rather than on this hash.
+#
+# Two causes, both invisible to the old unit tests because those used tidy
+# single-line paths: the strip regex did not match a line RANGE (`:112-113`),
+# which is how an agent naturally cites a region, and nothing removed the
+# repo-root prefix.
+
+REFUND_VARIANTS = [
+    ["target-app/api/app/auth.py:112-113", "target-app/api/app/routes/orders.py:115-130"],
+    ["api/app/auth.py:112-113", "api/app/routes/orders.py:115-119"],
+    ["api/app/auth.py", "api/app/routes/orders.py"],
+]
+
+
+def _refund(paths):
+    return DefectEnvelope(
+        run_id="r", discovered_by="CONDUIT", domain=Domain.API, **{"class": "bug"},
+        title="Refund endpoint has no role check",
+        summary="A read-only viewer can refund a paid order.",
+        severity=Severity.CRITICAL, confidence=0.9,
+        location={"endpoint": "POST /v1/orders/{order_id}/refund", "paths": paths},
+    )
+
+
+def test_one_defect_reported_three_ways_hashes_once():
+    prints = {_refund(paths).fingerprint() for paths in REFUND_VARIANTS}
+    assert len(prints) == 1, (
+        f"the same defect produced {len(prints)} identities: {prints}. "
+        "occurrence_count cannot rise above 1 while this is true."
+    )
+
+
+@pytest.mark.parametrize(
+    "cited,plain",
+    [
+        ("api/app/auth.py:112-113", "api/app/auth.py"),   # range -- the one that was missed
+        ("api/app/auth.py:112", "api/app/auth.py"),        # single line
+        ("api/app/auth.py:112:5", "api/app/auth.py"),      # line:column
+        ("target-app/api/app/auth.py", "api/app/auth.py"), # repo-root prefix
+        ("./api/app/auth.py", "api/app/auth.py"),          # leading ./
+    ],
+)
+def test_how_a_path_is_cited_does_not_change_the_identity(cited, plain):
+    assert _refund([cited]).fingerprint() == _refund([plain]).fingerprint()
+
+
+def test_genuinely_different_files_still_hash_differently():
+    """The fix must not over-normalise into hashing everything the same."""
+    a = _refund(["api/app/auth.py"]).fingerprint()
+    b = _refund(["api/app/routes/orders.py"]).fingerprint()
+    assert a != b
+
+
+def test_the_scorer_and_the_fingerprint_agree_on_what_a_path_is():
+    """They were separate implementations and drifted. One function now."""
+    from qaas.envelope import normalize_path
+    from qaas.scorecard import _norm_path
+    for cited in ("target-app/api/app/routes/orders.py:104-112", "./web/src/App.tsx:9:2"):
+        assert _norm_path(cited) == normalize_path(cited)

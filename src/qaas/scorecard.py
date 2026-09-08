@@ -19,7 +19,7 @@ from typing import Any, Iterable
 
 import yaml
 
-from qaas.envelope import DefectEnvelope, Severity
+from qaas.envelope import DefectEnvelope, normalize_path, Severity
 
 MATCH_THRESHOLD = 0.5
 
@@ -134,13 +134,14 @@ def _norm_endpoint(endpoint: str | None) -> str | None:
 
 
 def _norm_path(path: str) -> str:
-    """Compare by tail, so `target-app/api/app/routes/orders.py:88` matches `api/app/routes/orders.py`."""
-    # Agents cite lines as `:88`, `:88:4` and `:104-112`. All three are the file.
-    p = re.sub(r":\d+(?:[-:]\d+)?$", "", path.strip().replace("\\", "/")).lstrip("./")
-    for prefix in ("target-app/", "target_app/"):
-        if p.startswith(prefix):
-            p = p[len(prefix):]
-    return p
+    """Compare by tail, so `target-app/api/app/routes/orders.py:88` matches `api/app/routes/orders.py`.
+
+    Delegates to the envelope's own normalisation rather than restating it. The
+    two were separate implementations and drifted: the scorer handled `:104-112`
+    line ranges and the repo-root prefix, the fingerprint handled neither, so a
+    defect the scorer counted as one thing hashed as three.
+    """
+    return normalize_path(path)
 
 
 def _path_overlap(a: Iterable[str], b: Iterable[str]) -> float:

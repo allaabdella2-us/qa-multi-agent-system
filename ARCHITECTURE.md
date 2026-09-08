@@ -46,6 +46,15 @@ commands you will actually use:
 | `qaas sweep` | run + score + fail below the quality gate — the cron entry | yes |
 | `qaas tracker-check` | Jira auth/permissions preflight, creates nothing | no |
 
+The tracker and vcs backends are `local` in the committed config and must stay
+that way — the offline test suite builds real adapters, and a committed `jira`
+breaks it. Switch per-shell instead:
+
+```bash
+QAAS_TRACKER=jira qaas run --mode nightly     # files to real Jira
+QAAS_TRACKER=jira qaas tracker-check          # preflight only
+```
+
 Start with `qaas validate`, then `qaas run --dry-run`. Neither calls the API.
 
 ---
@@ -83,7 +92,7 @@ Everything else is in service of those.
 agent. It is implemented as an ordinary state machine instead, because *a model
 cannot enforce a budget it is itself spending*. Phase ordering, concurrency,
 retries, escalation and the budget governor are all plain code in
-`conductor.py`. This also makes runs reproducible and cheap to unit-test — 534
+`conductor.py`. This also makes runs reproducible and cheap to unit-test — 547
 tests run offline with no API calls.
 
 **Each agent is its own top-level `query()`.** Not SDK subagents of a shared
@@ -120,7 +129,7 @@ Each phase is a method on `Conductor`: `_phase_map`, `_phase_discover`,
 Which agents run is **config, not code** — `run_modes` in `config/system.yaml`:
 
 ```yaml
-pr-check:   [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]        $6
+pr-check:   [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]        $16
 nightly:    [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]        $40
 fix-cycle:  [PROOF, MENDER, ARBITER]                              $20
 full-loop:  all eight                                             $60
@@ -414,7 +423,7 @@ for a real codebase.
 ## 11. Testing
 
 ```bash
-pytest                    # 534 tests, no API calls, no network, free
+pytest                    # 547 tests, no API calls, no network, free
 pytest -m docker          # 18 tests, needs target-app running
 pytest -m 'llm'           # real API calls — excluded by default
 ```

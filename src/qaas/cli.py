@@ -239,6 +239,24 @@ def validate(config_dir: Path = ConfigDir) -> None:
             if tool.startswith("mcp__") and tool.split("__")[1] not in spec.mcp_servers:
                 problems.append(f"{name}: must_call '{tool}' but lacks that server")
 
+    # A mode whose agents cannot fit inside its cap is a mode that stops
+    # partway through, every time, and looks like it worked: agents run,
+    # findings reach the ledger, nothing errors. `pr-check` shipped that way --
+    # $6 cap against a $15 roster, so discovery spent $6.09 and FORGE and CLERK
+    # never dispatched. The mode meant for every pull request could not file a
+    # ticket. It took a live run to notice; this check makes it free.
+    for mode_name, mode in sorted(cfg.run_modes.items()):
+        needed = sum(
+            cfg.agents[a].max_budget_usd for a in mode.agents if a in cfg.agents
+        )
+        if needed > mode.max_budget_usd:
+            missing = [a for a in mode.agents if a in cfg.agents][-1]
+            problems.append(
+                f"mode '{mode_name}': agents can spend ${needed:.2f} but the cap is "
+                f"${mode.max_budget_usd:.2f}, so the run stops before it reaches "
+                f"{missing} and files nothing. Raise max_budget_usd or drop an agent"
+            )
+
     referenced = {s for spec in cfg.agents.values() for s in spec.skills}
     orphans = {p.parent.name for p in SKILLS_DIR.glob("*/SKILL.md")} - referenced
     if orphans:

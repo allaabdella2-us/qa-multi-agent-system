@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
+import os
+
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -146,6 +148,7 @@ class SystemConfig(BaseModel):
     #: Repository root of the target, resolved from the profile at load time.
     #: Kept as a plain path because most callers only need that much.
     target_app: str = "target-app"
+    #: Overridable with QAAS_TRACKER. Keep the committed value `local`.
     tracker: Literal["local", "jira"] = "local"
     vcs: Literal["local", "github"] = "local"
     thresholds: Thresholds = Field(default_factory=Thresholds)
@@ -170,6 +173,11 @@ class SystemConfig(BaseModel):
         return [self.agents[n] for n in self.run_modes[mode].agents if self.agents[n].enabled]
 
 
+#: Environment overrides for the two swappable backends.
+TRACKER_ENV = "QAAS_TRACKER"
+VCS_ENV = "QAAS_VCS"
+
+
 def load_config(config_dir: Path | str = "config") -> SystemConfig:
     """Read config/system.yaml plus every config/agents/*.yaml."""
     config_dir = Path(config_dir)
@@ -178,6 +186,20 @@ def load_config(config_dir: Path | str = "config") -> SystemConfig:
         raise FileNotFoundError(f"no system config at {system_path}")
 
     raw: dict[str, Any] = yaml.safe_load(system_path.read_text()) or {}
+
+    # Backend overrides from the environment, so pointing a run at a real
+    # tracker or forge is not a committed file change.
+    #
+    # `tracker: local` is the committed default and must stay that way. When
+    # `jira` was committed instead, 18 tests failed and 14 errored: the agent
+    # fixtures build a real JiraTracker, which demands credentials CI does not
+    # have. The house rule is that the default `pytest` run is offline and free,
+    # and a committed backend switch silently breaks it -- so the switch belongs
+    # in the environment of the person who wants it, not in the repo.
+    for key, var in (("tracker", TRACKER_ENV), ("vcs", VCS_ENV)):
+        override = (os.environ.get(var) or "").strip().lower()
+        if override:
+            raw[key] = override
 
     agents: dict[str, Any] = {}
     for path in sorted((config_dir / "agents").glob("*.yaml")):

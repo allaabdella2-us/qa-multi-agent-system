@@ -1,0 +1,11 @@
+- generic [ref=e4]:
+  - heading "Sign in to Corvid" [level=1] [ref=e5]
+  - paragraph [ref=e6]: Order and invoice management for your organization.
+  - alert [ref=e14]: That email and password combination was not recognised.
+  - generic [ref=e7]:
+    - generic [ref=e8]: Email address
+    - textbox "Email address" [ref=e9]: admin@northwind.test
+  - generic [ref=e10]:
+    - generic [ref=e11]: Password
+    - textbox "Password" [ref=e12]: wrongpassword
+  - button "Sign in" [ref=e13] [cursor=pointer]

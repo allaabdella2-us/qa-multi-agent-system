@@ -232,7 +232,7 @@ class DefectEnvelope(Strict):
         timestamps: the same defect reported by two agents in different words,
         or found again after the file moved a few lines, must hash the same.
         """
-        paths = sorted(_strip_line_number(p) for p in self.location.paths)
+        paths = sorted(normalize_path(p) for p in self.location.paths)
         parts = [
             self.domain.value,
             self.defect_class.value,
@@ -258,6 +258,33 @@ class DefectEnvelope(Strict):
         return cls.model_validate_json(raw)
 
 
-def _strip_line_number(path: str) -> str:
-    """`src/ws/session.ts:142` -> `src/ws/session.ts`."""
-    return re.sub(r":\d+(?::\d+)?$", "", path.strip())
+def normalize_path(path: str) -> str:
+    r"""Reduce a cited path to the file it names, so the same file hashes alike.
+
+    `target-app/api/app/auth.py:112-113` -> `api/app/auth.py`
+
+    Two things defeated the old version, and both were found in live data rather
+    than reasoned about. Its regex was `:\d+(?::\d+)?$`, which matched `:142`
+    and `:142:5` but NOT `:112-113` -- and a line *range* is how an agent
+    naturally cites a region, so the strip almost never fired. And nothing
+    removed the repo-root prefix, so `target-app/api/app/auth.py` and
+    `api/app/auth.py` were different files as far as the hash was concerned.
+
+    The visible damage was that `occurrence_count` never left 1: the same defect
+    reported across three runs produced three identities, so `get_occurrences`
+    could never say a defect was recurring. Deduplication itself survived only
+    because CLERK matches on similarity rather than on this hash.
+
+    `scorecard._norm_path` delegates here. They must not drift: a scorer that
+    considers two paths equal while the fingerprint considers them distinct is
+    two answers to one question.
+    """
+    p = re.sub(r":\d+(?:[-:]\d+)?$", "", path.strip().replace("\\", "/")).lstrip("./")
+    for prefix in ("target-app/", "target_app/"):
+        if p.startswith(prefix):
+            p = p[len(prefix):]
+    return p
+
+
+#: Kept as the old name so nothing importing it breaks; it always meant this.
+_strip_line_number = normalize_path
