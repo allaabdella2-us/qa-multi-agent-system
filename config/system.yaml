@@ -2,7 +2,7 @@
 # the six agents from §11, so modes name only those until Phase 2 lands.
 project: qaas
 target_app: target-app
-tracker: local      # local | jira   -- swap to file against real Jira
+tracker: jira       # local | jira   -- swap to file against real Jira
 vcs: local          # local | github
 
 thresholds:
