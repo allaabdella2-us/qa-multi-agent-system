@@ -9,15 +9,29 @@
 # look wrong to a careless reader but are correct, so precision is measured and
 # not assumed.
 #
-# Keep this file in sync with the code. If you change a seeded defect, change its
-# entry in the same commit — a stale ledger silently corrupts every score.
+# THIS FILE IS NOT WRITABLE BY THE AGENTS IT SCORES, AND THAT IS DELIBERATE.
+# It is the answer key. An agent that could retire an entry here could raise its
+# own recall without fixing anything, so no agent's sandbox includes this path —
+# see `write_paths` in config/agents/*.yaml. Maintaining it is a human job.
 #
-# To repair a seeded defect, set `fixed_in: <ref>` on its entry in the same
-# commit as the fix. The entry is then retired: it leaves the recall denominator
-# instead of becoming a phantom miss on every future run, and a finding that
-# still matches it counts as neither a find nor a false positive (correct on any
-# tree the fix has not reached). Do not delete the entry — the severity and
-# domain expectations here are what make a past score reproducible.
+# Keep this file in sync with the code. If *you*, a human, change a seeded
+# defect, change its entry in the same commit — a stale ledger silently corrupts
+# every score. This obligation lands at merge, on the person merging; it is not
+# an obligation on MENDER, and a review must never block a fix on it. MENDER
+# cannot write this file, so requiring the change of it deadlocks the fix loop:
+# ARBITER demanded it, the guardrail refused it, and CORVID-7 escalated twice
+# before anyone noticed the two rules contradicted each other.
+#
+# To retire a repaired defect, set `fixed_in: <ref>` on its entry when the fix
+# merges. The entry then leaves the recall denominator instead of becoming a
+# phantom miss on every future run, and a finding that still matches it counts as
+# neither a find nor a false positive (correct on any tree the fix has not
+# reached). Do not delete the entry — the severity and domain expectations here
+# are what make a past score reproducible.
+#
+# The guard that catches a forgotten retirement is tests/target_app/
+# test_seeded_defects.py: it asserts each seeded defect still reproduces, so a
+# defect repaired without a `fixed_in` turns `pytest -m docker` red at merge.
 
 version: 1
 app: corvid

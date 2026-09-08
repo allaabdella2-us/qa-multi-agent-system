@@ -6,6 +6,15 @@ measured against a lie — so it runs against the real containers, not a mock.
 
     docker compose -f target-app/docker-compose.yml up -d
     pytest tests/target_app -m docker
+
+THIS FILE IS THE MERGE-TIME GUARD FOR A FORGOTTEN RETIREMENT. A seeded defect
+test that starts failing means the defect is gone — someone repaired it. That is
+allowed, but it is only half the change: set `fixed_in: <ref>` on the entry in
+`defects.yaml` and rewrite the test below to assert the *fixed* behaviour, in the
+same commit. Skip that and the entry becomes a phantom miss that quietly
+understates recall on every future run. Retiring the entry is a human's job at
+merge — no agent's sandbox includes the ledger, deliberately, because an agent
+that can retire an entry can raise its own recall without fixing anything.
 """
 
 from __future__ import annotations
@@ -86,7 +95,12 @@ def test_api_01_limit_is_declared_and_ignored(tokens):
     status, body = call("GET", "/v1/orders?limit=5", tokens["member"])
     assert status == 200
     assert body["limit"] == 5, "the response claims the limit was honoured"
-    assert len(body["items"]) > 5, "but every row came back — unbounded result set"
+    assert len(body["items"]) > 5, (
+        "but every row came back — unbounded result set. "
+        "If this now returns <= 5, API-01 has been repaired: set `fixed_in: <ref>` "
+        "on its entry in defects.yaml and rewrite this test to assert the bound, "
+        "in the same commit. See this module's docstring."
+    )
 
 
 def test_api_02_order_detail_leaks_across_organizations(tokens):
@@ -211,5 +225,23 @@ def test_every_phase_1_defect_in_the_ledger_has_a_test_here(ledger):
         for name in globals()
         if name.startswith("test_api_") or name.startswith("test_ui_")
     }
-    api_defects = {d["id"] for d in ledger["defects"] if d["domain"] == "api" and d["phase"] == 1}
+    # A retired defect no longer needs a test that reproduces it -- there is
+    # nothing left to reproduce. It keeps its entry so past scores stay
+    # reproducible, but it drops out of this obligation.
+    api_defects = {
+        d["id"] for d in ledger["defects"]
+        if d["domain"] == "api" and d["phase"] == 1 and not d.get("fixed_in")
+    }
     assert api_defects <= covered, f"unverified seeded defects: {api_defects - covered}"
+
+
+def test_a_retired_defect_names_the_ref_that_repaired_it(ledger):
+    """`fixed_in: true` or an empty string would retire an entry while recording
+    nothing about why, which is how a ledger stops being an audit trail."""
+    for d in ledger["defects"]:
+        ref = d.get("fixed_in")
+        if ref is None:
+            continue
+        assert isinstance(ref, str) and ref.strip(), (
+            f"{d['id']} is retired but `fixed_in` names no ref"
+        )

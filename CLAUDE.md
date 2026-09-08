@@ -148,8 +148,20 @@ cannot half-propagate. Evidence is referenced by `artifact://<run>/<name>` uris;
 is the golden ledger. `scorecard.py` measures recall, precision, false-positive
 rate and severity agreement against it. **If you change a seeded defect, change
 its ledger entry in the same commit** — a stale ledger silently corrupts every
-score. The ledger's `not_defects` section plants correct-but-suspicious code so
-precision is measured, not assumed.
+score. Retire a repaired defect with `fixed_in: <ref>`; never delete the entry,
+because its severity and domain expectations are what make a past score
+reproducible. The ledger's `not_defects` section plants correct-but-suspicious
+code so precision is measured, not assumed.
+
+**That obligation is a human's, and lands at merge.** No agent's `write_paths`
+include the ledger, deliberately: an agent that can retire an entry can raise its
+own recall without fixing anything. So a review must never block a fix on the
+ledger being updated — MENDER is not permitted to make that change, and demanding
+it deadlocks the fix loop. That is not hypothetical; CORVID-7 escalated twice,
+ARBITER requiring the edit and the guardrail refusing it, before the contradiction
+was visible. The general rule this taught, now in `adversarial-review`: **never
+request a change the author is not permitted to make** — route it as separate
+human work instead.
 
 Run `qaas score` after changing any prompt, threshold or model. It is the only
 way to know whether a change helped.

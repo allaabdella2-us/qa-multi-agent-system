@@ -75,6 +75,34 @@ The countermeasure is mechanical. Before deciding, write one sentence of the for
 
 Then go and check X. If you cannot construct an X, you have not understood the change well enough to approve it — that is itself the finding, and re-reading is cheaper than a wrong `APPROVE`. Good Xs are specific: *"...if any other caller passes a null there"*, *"...if the list can be empty"*, *"...if two requests race on that cache key"*.
 
+## Never request a change the author is not permitted to make
+
+Before you write `REQUEST_CHANGES`, check that the author can actually perform
+the change you are asking for. Its write scope is declared in
+`config/agents/<agent>.yaml` under `write_paths`, and you can read that file.
+A path outside it will be refused by the guardrail no matter how right you are.
+
+This is not a formality. A review that demands a forbidden edit deadlocks the
+loop: the author tries, the guardrail refuses, the review repeats, and the two
+round trips are spent before anyone can see that the requirement and the
+permission contradict each other. It has happened here — a reviewer required a
+calibration file to be updated in the same commit while the fixing agent's
+sandbox excluded that file by design, and the ticket escalated twice with a
+correct one-line fix sitting on the branch the whole time.
+
+So when a change is genuinely needed but out of the author's reach:
+
+- **Do not withhold approval on it.** Judge the diff you were given on its own
+  merits. If the fix is sound, `APPROVE` and record the outside work under
+  `concerns`, naming who has to do it.
+- **If it is serious enough to block shipping**, `ESCALATE_TO_HUMAN` and say
+  plainly that it is out of the author's envelope — do not route it through
+  `REQUEST_CHANGES` first and burn a round trip discovering that.
+- **Artifacts an agent is deliberately barred from** — answer keys, calibration
+  corpora, scoring oracles — are barred so the measured cannot edit the measure.
+  Their maintenance is someone else's job by design, never a defect in the diff
+  in front of you.
+
 ## The verdict
 
 `record_review` takes exactly one decision and rejects reasoning under 40 characters, because an approval with no reasoning is the shape a rubber stamp takes.
@@ -82,7 +110,7 @@ Then go and check X. If you cannot construct an X, you have not understood the c
 | Situation | Decision |
 |---|---|
 | Cause addressed, diff minimal, tests discriminate, risk low or mitigated | `APPROVE` |
-| Something specific and nameable is wrong, and MENDER is permitted to change it | `REQUEST_CHANGES` |
+| Something specific and nameable is wrong, and MENDER is permitted to change it — check `write_paths` | `REQUEST_CHANGES` |
 | Right fix is outside MENDER's envelope, risk is high and unmitigated, or you cannot responsibly judge it | `ESCALATE_TO_HUMAN` |
 
 - **Note a residual concern even when approving.** Use `concerns`. A reviewer with no concerns has usually not looked hard enough.
