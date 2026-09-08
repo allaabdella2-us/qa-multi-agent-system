@@ -117,7 +117,7 @@ CONDUIT gets `contract_diff` and ships a failing contract test as evidence (§4.
 FORGE reproduces, minimizes, runs N times for flake rate, and commits a failing test to `qa/repro/*`. CLERK dedupes, scores against the rubric, resolves owner from the map, routes, and files — the only agent holding tracker write.
 **Verify:** full discovery→triage run produces local tickets with real repro steps and attached failing tests; a second run on the same code files **zero** new tickets and increments occurrence counts instead.
 
-### M6 — Close the loop: PROOF + CONDUCTOR run modes ✅ built, live verification in progress
+### M6 — Close the loop: PROOF + CONDUCTOR run modes ✅ built, live verification blocked on the host
 PROOF re-runs FORGE's test against a patched build and returns `VERIFIED`/`NOT_FIXED`/`REGRESSED`. CONDUCTOR gains all five discovery run modes, budget governor, concurrency caps, and escalation.
 **Verify:** the acceptance test for the whole system — fix one seeded defect by hand on a branch, run `qaas run --mode fix-cycle --ticket <id>`, and PROOF returns `VERIFIED`; revert the fix and it returns `NOT_FIXED`. Then `qaas run --mode nightly && qaas score` prints the §12 scorecard: acceptance rate, duplicate rate, false-positive rate, cost per accepted ticket.
 
@@ -165,6 +165,27 @@ codebase, `gh pr merge` is refused, and pull requests open as drafts.
 PROOF, capped by `max_mender_arbiter_round_trips` and `max_proof_reopens`), and
 guardrail tests prove every forbidden class and the diff budget. Live: a
 `full-loop` run on the demo app that ends in a VERIFIED ticket.
+
+**What the first live run found.** It ended NOT_FIXED, and reading the verdict
+turned up two defects in this system rather than one in the target:
+
+1. `fixtures.sql` was not idempotent. Compose mounts it into
+   `docker-entrypoint-initdb.d`, so any explicit `env_control.seed()`/`reset()`
+   was its *second* application and died on a duplicate key — leaving `status`
+   reporting no fixture and no way to pin a reproduction's environment. It
+   truncates first now.
+2. `_verify_loop` re-read the branch off the envelope on every pass. That is the
+   *repro* branch, written before a fix exists, so PROOF was sent back to the
+   unfixed branch it had just failed on. VERIFIED was unreachable by
+   construction. The loop now reads MENDER's branch out of the ledger, scoped to
+   the entries one remediation round appended.
+
+Both are the point of running the thing live: neither was visible to 528 offline
+tests, and (2) meant no `full-loop` run could ever have closed.
+
+**Still open.** The live `fix-cycle` re-run. It is blocked on the host, not the
+code: Docker Desktop's containerd store is returning `input/output error` with
+the machine at 99% disk.
 
 ### Adding agents 7–15 afterwards
 A new discovery agent should be a prompt file plus a `config/agents/<NAME>.yaml` naming its allowlist — no changes to conductor, runner, or guardrails. Whether that holds is the real test of M3, so the first Phase-2 agent (VAULT) will be added as a smoke test of the extension path before this build is called done.
