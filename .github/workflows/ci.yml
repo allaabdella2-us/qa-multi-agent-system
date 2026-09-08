@@ -20,13 +20,18 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv venv && uv pip install -e ".[dev]"
+      # No `uv venv`: setup-uv with `python-version` has already made one and
+      # exported VIRTUAL_ENV, so creating a second fails with "a virtual
+      # environment already exists". And the binaries are invoked from .venv
+      # directly rather than through `uv run`, which would re-resolve against
+      # uv.lock and can disagree with what was just installed.
+      - run: uv pip install -e ".[dev]"
       - name: Tests
-        run: uv run pytest -q
+        run: .venv/bin/pytest -q
       - name: Config, prompts and allowlists are coherent
-        run: uv run qaas validate
+        run: .venv/bin/qaas validate
       - name: Every agent's options assemble without calling the API
-        run: uv run qaas run --mode pr-check --dry-run
+        run: .venv/bin/qaas run --mode pr-check --dry-run
 
   build:
     runs-on: ubuntu-latest
