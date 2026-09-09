@@ -134,3 +134,27 @@ def test_system_yaml_is_taken_whole_from_the_first_layer(tmp_path):
 def test_the_target_can_be_selected_from_the_environment(monkeypatch, var):
     monkeypatch.setenv(var, "corvid")
     assert load_config(search=CONFIG_SEARCH).target == "corvid"
+
+
+def test_a_lone_target_is_used_without_being_named(tmp_path, monkeypatch):
+    """Choosing between two profiles would be guessing; with one there is
+    nothing to guess at. This is also what keeps a source checkout working now
+    that the packaged `system.yaml` names no target."""
+    monkeypatch.delenv("QAAS_TARGET", raising=False)
+    cfgdir = tmp_path / "config"
+    (cfgdir / "targets").mkdir(parents=True)
+    (cfgdir / "targets" / "only.yaml").write_text("name: only\nroot: .\n")
+    cfg = load_config(search=(cfgdir, PACKAGED_CONFIG))
+    assert cfg.target == "only"
+    assert cfg.profile is not None and cfg.profile.name == "only"
+
+
+def test_two_targets_and_no_name_stays_unresolved(tmp_path, monkeypatch):
+    """Running the wrong application is worse than not running."""
+    monkeypatch.delenv("QAAS_TARGET", raising=False)
+    cfgdir = tmp_path / "config"
+    (cfgdir / "targets").mkdir(parents=True)
+    (cfgdir / "targets" / "a.yaml").write_text("name: a\nroot: .\n")
+    (cfgdir / "targets" / "b.yaml").write_text("name: b\nroot: .\n")
+    cfg = load_config(search=(cfgdir, PACKAGED_CONFIG))
+    assert cfg.target is None and cfg.profile is None

@@ -20,7 +20,8 @@ CONFIG_SEARCH: tuple[Path, ...] = (
     REPO / "src" / "qaas" / "defaults" / "config",
 )
 
-PACKAGED_SKILLS = REPO / "src" / "qaas" / "skills"
+PACKAGED_PLUGIN = REPO / "src" / "qaas" / "plugin"
+PACKAGED_SKILLS = PACKAGED_PLUGIN / "skills"
 PACKAGED_PROMPTS = REPO / "src" / "qaas" / "prompts"
 
 #: A single directory containing a complete config, for tests that copy or

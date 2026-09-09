@@ -81,8 +81,46 @@ def packaged_prompts() -> Path:
     return package_root() / "prompts"
 
 
+def packaged_plugin() -> Path:
+    """The skills plugin that ships in the wheel.
+
+    Skills reach an agent as a Claude Code *plugin* (`--plugin-dir`), not through
+    filesystem settings, so they travel in the package instead of depending on a
+    `.claude/skills/` directory in whatever repository the user happens to be in.
+
+    The layout is not optional and was established by testing the CLI rather
+    than by reading about it. A directory of bare `<skill>/SKILL.md` folders
+    loads NOTHING -- silently. A directory containing `skills/<name>/SKILL.md`
+    loads, but takes its namespace from the directory name. Only
+    `.claude-plugin/plugin.json` + `skills/<name>/SKILL.md` gives a stable
+    namespace, and it comes from the manifest's `name`.
+    """
+    return package_root() / "plugin"
+
+
+def plugin_name(plugin_dir: Path) -> str:
+    """A plugin's namespace: its manifest name, else its directory name.
+
+    Skills load as `<plugin>:<skill>`, and that prefix is not cosmetic -- the
+    SDK matches skill names down two channels with different rules, so the name
+    used here has to be the one the CLI will actually register.
+    """
+    manifest = plugin_dir / ".claude-plugin" / "plugin.json"
+    if manifest.is_file():
+        try:
+            import json
+
+            declared = json.loads(manifest.read_text()).get("name")
+            if declared:
+                return str(declared)
+        except Exception:  # noqa: BLE001 - a broken manifest falls back, not crashes
+            pass
+    return plugin_dir.name
+
+
 def packaged_skills() -> Path:
-    return package_root() / "skills"
+    """The skills themselves, inside the plugin."""
+    return packaged_plugin() / "skills"
 
 
 def find_project(start: Path | None = None) -> Path | None:
@@ -134,6 +172,9 @@ class Workspace:
     project: Path | None
     config_dirs: tuple[Path, ...]
     prompt_dirs: tuple[Path, ...]
+    #: Plugin roots, as handed to `--plugin-dir`.
+    plugin_dirs: tuple[Path, ...]
+    #: The `skills/` inside each plugin, in the same order.
     skill_dirs: tuple[Path, ...]
     state_root: Path
 
@@ -173,13 +214,14 @@ class Workspace:
             proj_state / "prompts" if proj_state else None,
             packaged_prompts(),
         )
-        skill_dirs = _existing(
-            home_path / "skills" if home_path else None,
-            proj_state / "skills" if proj_state else None,
-            # This repo's own skills live where Claude Code expects them.
-            project / ".claude" / "skills" if project else None,
-            packaged_skills(),
+        # Plugin directories, highest precedence first. A project's own plugin
+        # shadows the packaged one for any skill it provides.
+        plugin_dirs = _existing(
+            home_path / "plugin" if home_path else None,
+            proj_state / "plugin" if proj_state else None,
+            packaged_plugin(),
         )
+        skill_dirs = _existing(*(d / "skills" for d in plugin_dirs))
 
         if state_root is not None:
             state = Path(state_root).resolve()
@@ -192,6 +234,7 @@ class Workspace:
             project=project,
             config_dirs=config_dirs,
             prompt_dirs=prompt_dirs,
+            plugin_dirs=plugin_dirs,
             skill_dirs=skill_dirs,
             state_root=state,
         )
@@ -237,6 +280,15 @@ class Workspace:
             for skill in sorted(d.glob("*/SKILL.md")):
                 found[skill.parent.name] = skill.parent
         return found
+
+    def qualify(self, skill: str) -> str | None:
+        """`severity-rubric` -> `qaas:severity-rubric`, from whichever plugin
+        provides it. None when nothing does -- which is a configuration error
+        worth reporting, not a name to pass on and hope."""
+        for plugin_dir in self.plugin_dirs:
+            if (plugin_dir / "skills" / skill / "SKILL.md").is_file():
+                return f"{plugin_name(plugin_dir)}:{skill}"
+        return None
 
     def describe(self) -> str:
         """One line per search path, for `qaas doctor` and error messages."""

@@ -15,6 +15,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolUseBlock,
     query,
@@ -37,6 +38,41 @@ class RunOutcome:
     @property
     def ok(self) -> bool:
         return self.result.subtype == "success" and self.result.error is None
+
+
+def _check_skills_loaded(spec: AgentSpec, ctx: ToolContext, message: Any, emit) -> None:
+    """Say something when the skills an agent declared did not load.
+
+    This exists because the failure has no symptom. Skills used to be found
+    through `setting_sources=["project"]`, resolved against the agent's cwd, so
+    a user whose repository had no `.claude/skills/` got none of them -- no
+    error, no warning, findings still produced, every procedure missing. It was
+    invisible for the life of the project and only surfaced when someone tried
+    to install the package.
+
+    The CLI's init message lists what it loaded. Comparing it against what was
+    asked for costs nothing and makes the next regression loud. A mismatch is
+    recorded and reported rather than raised: an agent with three of its four
+    skills is degraded, not broken, and killing the run would lose the work.
+    """
+    declared = list(spec.skills)
+    if not declared:
+        return
+    data = getattr(message, "data", None) or {}
+    loaded = {str(n) for n in (data.get("slash_commands") or [])}
+    if not loaded:
+        return  # nothing reported; do not cry wolf about a shape we do not know
+    missing = [
+        name for name in declared
+        if not any(c == name or c.endswith(f":{name}") for c in loaded)
+    ]
+    if not missing:
+        return
+    ctx.store.log(
+        "skills_missing", agent=spec.name, declared=declared, missing=missing,
+        cwd=str(data.get("cwd") or ""),
+    )
+    emit("skills_missing", agent=spec.name, missing=missing)
 
 
 async def run_agent(
@@ -74,7 +110,9 @@ async def run_agent(
 
     try:
         async for message in query(prompt=task, options=options):
-            if isinstance(message, AssistantMessage):
+            if isinstance(message, SystemMessage) and message.subtype == "init":
+                _check_skills_loaded(spec, ctx, message, emit)
+            elif isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         final_text = block.text

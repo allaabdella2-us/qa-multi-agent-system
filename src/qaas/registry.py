@@ -218,6 +218,41 @@ def _field(payload: Any, name: str) -> Any:
     return getattr(payload, name, None)
 
 
+def skill_plugins(ctx: ToolContext) -> list[dict[str, str]]:
+    """The plugin directories to hand the CLI, project first.
+
+    Absolute paths: `--plugin-dir` takes the value verbatim, so a relative one
+    would resolve against the agent's cwd -- the target repository -- and find
+    nothing.
+    """
+    from qaas.paths import Workspace
+
+    ws = getattr(ctx, "workspace", None) or Workspace.resolve()
+    return [{"type": "local", "path": str(d.resolve())} for d in ws.plugin_dirs]
+
+
+def qualified_skills(spec: AgentSpec, ctx: ToolContext) -> list[str]:
+    """This agent's skills, namespaced by the plugin that provides each.
+
+    The qualification is load-bearing. A skill name travels to the CLI down two
+    channels that match differently: the SDK turns each into a `Skill(<name>)`
+    entry on `--allowedTools`, matched **literally** against whatever the model
+    invokes, while the `initialize` request filters system-prompt content with
+    `name === entry || name.endsWith(":" + entry)`. Plugin skills register as
+    `qaas:severity-rubric`, so a bare `severity-rubric` satisfies the second
+    channel and not the first -- the skill loads, and its allow rule never
+    matches. Passing the qualified name makes both agree.
+
+    A skill no plugin provides is dropped rather than passed through. The Stop
+    hook and `qaas validate` both report the real problem; inventing a name that
+    can never resolve just moves the failure somewhere quieter.
+    """
+    from qaas.paths import Workspace
+
+    ws = getattr(ctx, "workspace", None) or Workspace.resolve()
+    return [q for q in (ws.qualify(name) for name in spec.skills) if q]
+
+
 def build_options(
     spec: AgentSpec,
     ctx: ToolContext,
@@ -245,15 +280,28 @@ def build_options(
         allowed_tools=build_allowed_tools(spec),
         can_use_tool=guard.can_use_tool,
         hooks=build_hooks(guard, ctx),
-        skills=list(spec.skills),
+        # Skills arrive as a plugin, not through filesystem settings, and the
+        # names are qualified because the SDK matches them down two channels
+        # with different rules -- see `skill_plugins` and `qualified_skills`.
+        plugins=skill_plugins(ctx),
+        skills=qualified_skills(spec, ctx),
         cwd=str(ctx.repo_root),
         env=env,
-        # "project" only, and deliberately not "user" or "local". Filesystem
-        # skills are discoverable only through project settings, and project
-        # settings live in the repo, so they travel with it and a run stays
-        # reproducible on another machine. It is `~/.claude` that would poison a
-        # run with one operator's local configuration.
-        setting_sources=["project"],
+        # Load NOTHING from the filesystem. This was `["project"]`, defended on
+        # reproducibility grounds -- project settings live in the repo, so they
+        # travel with it. That reasoning held only while `cwd` was *our* repo.
+        #
+        # `cwd` is the target now, and with `qaas run --repo <url>` it can be a
+        # repository cloned seconds earlier from a URL someone pasted. "project"
+        # means: load that repository's `.claude/settings.json`, its hooks, its
+        # permission rules and its MCP servers, into a process holding Anthropic
+        # credentials, JIRA_API_TOKEN and GitHub auth. A QA tool that executes
+        # the configuration of the code it is inspecting is a supply-chain hole.
+        #
+        # It must be an explicit `[]`, not None: `_apply_skills_defaults` in the
+        # SDK substitutes ["user", "project"] whenever setting_sources is None
+        # and skills is a list.
+        setting_sources=[],
         permission_mode="default",
     )
 

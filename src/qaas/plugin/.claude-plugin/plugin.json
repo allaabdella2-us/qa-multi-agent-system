@@ -1,0 +1,9 @@
+{
+  "name": "qaas",
+  "description": "Procedures for the qaas QA agents: how to triage, reproduce, review and verify.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Alla Abdella"
+  },
+  "homepage": "https://github.com/allaabdella2-us/qa-multi-agent-system"
+}

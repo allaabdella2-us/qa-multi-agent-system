@@ -19,7 +19,9 @@ from qaas.sdk_compat import POST_TOOL_USE, PRE_TOOL_USE, STOP
 from qaas.store import RunStore, SystemMapStore
 
 REPO = Path(__file__).resolve().parents[1]
-SKILLS_DIR = REPO / ".claude" / "skills"
+#: Skills ship inside the plugin now, not in a `.claude/skills/` directory
+#: that only existed in this checkout.
+SKILLS_DIR = REPO / "src" / "qaas" / "plugin" / "skills"
 AGENTS = ["CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK", "PROOF"]
 
 
@@ -162,7 +164,12 @@ def test_every_configured_skill_exists_on_disk(cfg, agent):
 @pytest.mark.parametrize("agent", AGENTS)
 def test_skills_reach_the_agents_options(wire, cfg, agent):
     ctx, _, _ = wire(agent)
-    assert build_options(cfg.agents[agent], ctx).skills == cfg.agents[agent].skills
+    # Names reach the SDK qualified by the plugin that provides them. Bare
+    # names satisfy the initialize filter but not the `Skill(<name>)` allow
+    # rule, which matches literally -- so the skill would load with a rule that
+    # never fires.
+    got = build_options(cfg.agents[agent], ctx).skills
+    assert got == [f"qaas:{s}" for s in cfg.agents[agent].skills]
 
 
 def test_every_skill_on_disk_is_used_by_someone(cfg):

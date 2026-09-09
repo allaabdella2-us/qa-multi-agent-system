@@ -181,15 +181,37 @@ async def test_spin_up_refuses_to_pretend_it_is_on_another_branch(tools, fake_do
 
 async def test_impersonate_reports_an_unreachable_api_rather_than_hanging(tools, monkeypatch):
     monkeypatch.setenv("QAAS_TARGET_BASE_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("CORVID_PASSWORD", "password123")
     result = await tools["impersonate"]({"role": "admin"})
     assert is_error(result)
     assert "spin_up" in text_of(result)
 
 
-async def test_impersonate_refuses_a_role_that_is_not_seeded(tools):
+async def test_impersonate_refuses_before_connecting_when_the_password_is_unset(
+    tools, monkeypatch
+):
+    """A missing credential is reported as a missing credential.
+
+    It used to be impossible to reach this: the password was the hardcoded
+    literal `password123`, so impersonation always had one -- and pointing qaas
+    at a real application meant POSTing that string at its login endpoint. Now
+    the profile names an environment variable, and an unset one stops here
+    rather than surfacing later as an unexplained 401.
+    """
+    monkeypatch.delenv("CORVID_PASSWORD", raising=False)
+    result = await tools["impersonate"]({"role": "admin"})
+    assert is_error(result)
+    assert "CORVID_PASSWORD" in text_of(result), "the error must name the variable to set"
+
+
+async def test_impersonate_refuses_a_role_the_target_does_not_declare(tools):
+    """The roles offered come from the profile, not from a fixed demo list --
+    corvid declares four, including `other_org` for cross-tenant checks."""
     result = await tools["impersonate"]({"role": "root"})
     assert is_error(result)
-    assert "admin, member, viewer" in text_of(result)
+    text = text_of(result)
+    assert "admin" in text and "other_org" in text
+    assert "root" in text
 
 
 # -- pure helpers ----------------------------------------------------------
@@ -248,7 +270,7 @@ def test_the_real_fixture_file_parses_into_per_table_counts():
 
 
 @pytest.mark.docker
-async def test_a_full_environment_round_trip(tools):
+async def test_a_full_environment_round_trip(tools, monkeypatch):
     """Excluded from the default run. Needs Docker and a buildable target app.
 
     The explicit `seed` here is load-bearing: compose already applies
@@ -258,6 +280,10 @@ async def test_a_full_environment_round_trip(tools):
     reporting no fixture and made a reproduction impossible to pin. The fixture
     truncates first now; this assertion is what keeps it that way.
     """
+    # The demo's fixture password is public -- it is in fixtures.sql, and the
+    # accounts exist only inside a throwaway container. It still comes from the
+    # environment, because the profile names a variable and never a literal.
+    monkeypatch.setenv("CORVID_PASSWORD", "password123")
     try:
         up = await tools["spin_up"]({})
         assert not is_error(up), text_of(up)

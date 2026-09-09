@@ -156,16 +156,20 @@ def test_options_assemble_with_the_agents_own_limits(ctx_for, cfg, agent):
 
 @pytest.mark.parametrize("agent", AGENTS)
 def test_local_machine_settings_never_leak_into_a_run(ctx_for, cfg, agent):
-    """A run must not depend on one operator's ~/.claude.
+    """A run must load NOTHING from the filesystem.
 
-    "project" is required — filesystem skills are only discoverable through it —
-    and is safe because project settings live in the repo and travel with it.
-    "user" and "local" are the ones that would make a run unreproducible.
+    This asserted `["project"]` while `cwd` was our own repository, defended on
+    reproducibility grounds. `cwd` is the target now, and with `qaas run --repo`
+    it can be a repository cloned moments ago from a URL a user pasted --
+    "project" would load that repository's settings, hooks, permission rules and
+    MCP servers into a process holding Anthropic credentials and a Jira token.
+
+    It must be `[]` and not None: the SDK substitutes ["user", "project"]
+    whenever setting_sources is None and skills is a list.
     """
     sources = build_options(cfg.agents[agent], ctx_for(agent)).setting_sources
-    assert "user" not in sources
-    assert "local" not in sources
-    assert sources == ["project"]
+    assert sources == [], f"{agent} would load settings from disk: {sources}"
+    assert sources is not None, "None is not empty -- the SDK would substitute user+project"
 
 
 @pytest.mark.parametrize("agent", AGENTS)

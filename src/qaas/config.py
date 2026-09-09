@@ -260,9 +260,23 @@ def load_config(
     # `pip install qaas-python` gives you a working CLI that is not yet pointed
     # at anything, and the commands that need a profile say "run qaas init"
     # rather than dying inside config loading.
-    if config.target:
-        targets_dir = next((d / "targets" for d in dirs if (d / "targets").is_dir()), None)
-        if targets_dir is not None:
-            profile = load_target(config.target, targets_dir)
-            config = config.model_copy(update={"profile": profile, "target_app": profile.root})
+    targets_dir = next((d / "targets" for d in dirs if (d / "targets").is_dir()), None)
+    chosen = config.target
+
+    # No target named, but exactly one profile on disk: use it. Choosing between
+    # two would be guessing, and running the wrong application is worse than not
+    # running -- but with one candidate there is nothing to guess at, and making
+    # the user restate it is ceremony. This is also what keeps this repository
+    # working: its `system.yaml` ships in the package and names no target,
+    # because a demo name has no business in the defaults everyone installs.
+    if not chosen and targets_dir is not None:
+        available = sorted(p.stem for p in targets_dir.glob("*.yaml"))
+        if len(available) == 1:
+            chosen = available[0]
+
+    if chosen and targets_dir is not None:
+        profile = load_target(chosen, targets_dir)
+        config = config.model_copy(
+            update={"target": chosen, "profile": profile, "target_app": profile.root}
+        )
     return config
