@@ -280,32 +280,28 @@ the refusal and adapts.
 
 ---
 
-## 📈 Benchmarks, honestly
+## 📈 How you know it works
 
-Against the bundled demo app and its golden ledger:
+`qaas` ships with a **deliberately buggy demo app** and a golden ledger recording
+every defect seeded into it — plus **planted non-defects**: correct-but-suspicious
+code that a careless reader would report.
 
-Two runs against the demo app, scored automatically:
+```bash
+cd target-app && docker compose up -d
+qaas run --mode nightly && qaas score
+```
 
-| metric | run A (full loop) | run B (discovery only) |
-|---|--:|--:|
-| 🎯 recall | **81%** — 13 of 16 | **69%** — 11 of 16 |
-| 🔇 precision | **100%** — 0 FP | **92%** — 1 FP |
-| 🏷️ severity agreement | **100%** | **100%** |
-
-**Both numbers are shown on purpose.** A single figure would be the flattering
-one, and it would not survive contact with a second run. These are stochastic
-agents: the two runs did not find the same 11–13 defects — run B caught a
-contrast failure run A missed, and missed three run A found. Expect variance of
-this order.
-
-The ledger's `not_defects` section plants **correct-but-suspicious** code, so
-precision is measured rather than assumed.
+`qaas score` reports recall, precision and severity agreement against that
+ledger. That matters more than any number this page could print: it means a
+change to a prompt, a threshold or a model has **a measurement attached** rather
+than an opinion.
 
 > [!CAUTION]
-> **Treat this as a floor, not a proof.** Seeded defects are easier than real
-> ones and the system was calibrated against them. Two runs is not a sample.
-> These numbers show the loop works end to end and does not spray false
-> positives — not that it will find the hard bug in your codebase.
+> **Seeded defects are easier than real ones**, and this system was calibrated
+> against them. A benchmark shows the loop works end to end and does not spray
+> false positives. It does not show that it will find the hard bug in your
+> codebase. Run it on something you know well and judge it on what it finds
+> there.
 
 ---
 
