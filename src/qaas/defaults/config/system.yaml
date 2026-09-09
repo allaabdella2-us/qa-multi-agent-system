@@ -25,13 +25,17 @@ thresholds:
 run_modes:
   pr-check:
     trigger: pull_request
-    agents: [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]
+    # KEYSTONE joins the PR sweep because it is pure static analysis and needs
+    # no running app. USHER, GAUGE and CHRONICLE do not: the design says GAUGE is
+    # "nightly and pre-release only -- too expensive and too noisy per-PR", and
+    # the same argument holds for a UX walk and a report about the week.
+    agents: [CARTOGRAPHER, KEYSTONE, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK]
     max_wall_clock_s: 900
     max_concurrency: 2
 
   nightly:
     trigger: cron
-    agents: [CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK]
+    agents: [CARTOGRAPHER, KEYSTONE, CONDUIT, SURFACE, VAULT, WARDEN, PULSE, USHER, GAUGE, FORGE, CLERK, CHRONICLE]
     max_wall_clock_s: 7200
     max_concurrency: 3
 
@@ -55,6 +59,6 @@ run_modes:
   # expensive mode in the system and the only one that closes the loop.
   full-loop:
     trigger: on_demand
-    agents: [CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK, MENDER, ARBITER, PROOF]
+    agents: [CARTOGRAPHER, KEYSTONE, CONDUIT, SURFACE, VAULT, WARDEN, PULSE, USHER, GAUGE, FORGE, CLERK, MENDER, ARBITER, PROOF, CHRONICLE]
     max_wall_clock_s: 10800
     max_concurrency: 3

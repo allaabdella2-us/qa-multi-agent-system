@@ -261,6 +261,40 @@ comes back as an occurrence rather than a new finding.
 Mode: {mode}."""
 
 
+def report(config: SystemConfig, mode: str) -> str:
+    """The task for a reporting agent.
+
+    Its subject is the run, not the application. Every other agent is pointed at
+    the target and asked what is wrong with it; a reporting agent is pointed at
+    what just happened and asked what it means. So this task names no routes, no
+    schema and no layout -- only the run's own record.
+    """
+    p = _profile(config)
+    return f"""Summarise this run of {p.name}.
+
+Your input is the run itself: the envelopes emitted, the verdicts recorded, the
+denials, the escalations, and what each agent cost in turns. Read them with
+`list_envelopes` and the run's own ledger. You are not auditing the application
+-- the other agents did that -- you are auditing what this run learned.
+
+Report:
+
+- What was found, grouped by severity and domain, and which findings were held
+  rather than filed and why.
+- Recurrence: which of these the system has seen before, and how often. A defect
+  reported for the fourth time is a different problem from a new one.
+- Where agents were refused or escalated, and whether the refusal looks correct.
+- What the run could NOT do -- surfaces nothing reached, agents that had no
+  capability to work with. A gap in coverage is worth as much as a finding, and
+  nobody else reports it.
+
+Be specific and short. A report that restates every envelope is a worse version
+of `qaas show`. The value here is the pattern across them, and the honest
+account of what was not looked at.
+
+Mode: {mode}."""
+
+
 def forge(envelope: DefectEnvelope, config: SystemConfig, flake_runs: int) -> str:
     p = _profile(config)
     evidence = "\n".join(f"  - {e.type.value}: {e.uri} {e.note}".rstrip() for e in envelope.evidence)

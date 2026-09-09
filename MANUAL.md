@@ -143,10 +143,10 @@ auth:
 | mode | agents | when |
 |---|---|---|
 | `incident` | CONDUIT | diagnose one thing, file nothing |
-| `pr-check` | CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK | on a pull request |
-| `nightly` | same seven | the scheduled sweep |
+| `pr-check` | CARTOGRAPHER, KEYSTONE, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK | on a pull request |
+| `nightly` | those eight plus PULSE, USHER, GAUGE, CHRONICLE | the scheduled sweep |
 | `fix-cycle` | PROOF, MENDER, ARBITER | take a filed ticket and fix it |
-| `full-loop` | all ten | discover → file → fix → verify |
+| `full-loop` | all fifteen | discover → file → fix → verify → report |
 
 Every mode is bounded by a **wall clock** and each agent by **`max_turns`** —
 both model-agnostic, so they mean the same thing against a local model as against
