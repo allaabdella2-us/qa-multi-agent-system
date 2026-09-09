@@ -10,3 +10,6 @@ node_modules/
 # Run debris — agents write these while exploring; they are not source.
 .playwright-mcp/
 /*.png
+
+# Agent worktrees — real git worktrees, never repo content.
+.claude/worktrees/

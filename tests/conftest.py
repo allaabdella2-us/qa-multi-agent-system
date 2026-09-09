@@ -28,19 +28,12 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-
-#: Highest precedence first, exactly as `Workspace.resolve()` orders them.
-CONFIG_SEARCH: tuple[Path, ...] = (
-    REPO / "config",
-    REPO / "src" / "qaas" / "defaults" / "config",
-)
-
-#: Where the skills that ship in the wheel live.
-PACKAGED_SKILLS = REPO / "src" / "qaas" / "skills"
-
-#: Where the prompts that ship in the wheel live.
-PACKAGED_PROMPTS = REPO / "src" / "qaas" / "prompts"
+# Constants live in `tests/support.py`, not here. There are two conftest files --
+# this one and `tests/mcp/conftest.py` -- and `from conftest import ...` resolves
+# to whichever lands on sys.path first, which is the nested one. Duplicating them
+# here left `PACKAGED_SKILLS` pointing at `src/qaas/skills` after skills moved
+# into the plugin, so the copy silently named a directory that no longer exists:
+# the exact failure shape `paths.py` was written to eliminate.
 
 
 @pytest.fixture(scope="session", autouse=True)
