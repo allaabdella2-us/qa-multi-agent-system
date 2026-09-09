@@ -208,3 +208,23 @@ qaas run --mode nightly --dry-run
 
 Adding an agent is a prompt in `src/qaas/prompts/` plus a file in
 `config/agents/`. No changes to the conductor, runner or guardrails.
+
+### Changing a prompt
+
+Prompts ship inside the package, and editing them there is invisible to git and
+gone on the next upgrade. Override them from your project instead:
+
+```bash
+qaas prompts list                # which prompt file each agent is given, and from where
+qaas prompts eject CONDUIT       # copy it to .qaas/prompts/CONDUIT.md, then edit
+qaas prompts diff                # your local edits against the bytes that shipped
+```
+
+`.qaas/prompts/` beats the packaged copy, file by file: overriding `CONDUIT.md`
+keeps the house `_shared.md`, and replacing `_shared.md` keeps all eight agent
+prompts.
+
+To add a few lines rather than fork a whole file, drop a
+`.qaas/prompts/<AGENT>.append.md` beside it. It is inserted between the agent's
+prompt and the shared house rules, and the packaged prompt keeps tracking the
+package — so the next release's improvements to it still reach you.

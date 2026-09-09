@@ -11,8 +11,8 @@ from __future__ import annotations
 import importlib
 import os
 import re
-from pathlib import Path
-from typing import Any, Callable
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Sequence
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
@@ -23,6 +23,12 @@ from qaas.sdk_compat import POST_TOOL_USE, PRE_TOOL_USE, STOP, mcp_server_wildca
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SHARED_PROMPT = "_shared.md"
+
+#: `CONDUIT.md` -> `CONDUIT.append.md`. The suffix exists because the only other
+#: way to add three house lines to a shipped prompt is to fork the whole file,
+#: and a forked prompt stops receiving the next release's improvements to it --
+#: silently, and in the one part of the system where silence is most expensive.
+APPEND_SUFFIX = ".append.md"
 
 # name in config/agents/*.yaml -> the module providing `build(ctx)`.
 # Off-the-shelf servers (playwright) are stdio subprocesses, handled separately.
@@ -49,17 +55,84 @@ class UnknownServer(KeyError):
     """A config names an MCP server nothing provides."""
 
 
-def build_system_prompt(spec: AgentSpec, prompts_dir: Path = PROMPTS_DIR) -> str:
-    """The agent's prompt, plus the house rules every agent shares.
+def resolve_prompt_dirs(ctx: ToolContext | None = None) -> tuple[Path, ...]:
+    """The prompt search path: overrides first, packaged last.
 
-    Kept as two files so a change to the shared rules reaches every agent at
-    once, rather than being copy-pasted into six prompts that then drift.
+    Same shape as `skill_plugins` -- a ToolContext may carry a workspace, and
+    anything without one asks the resolver. Prompts used to be read from
+    `PROMPTS_DIR` unconditionally, which meant a `pip install` user could not
+    change a single line of any prompt without editing site-packages.
     """
-    own = spec.prompt_path(prompts_dir)
-    if not own.exists():
-        raise FileNotFoundError(f"{spec.name} has no prompt at {own}")
-    shared = (prompts_dir / SHARED_PROMPT).read_text()
-    return f"{own.read_text().rstrip()}\n\n{shared.strip()}\n"
+    from qaas.paths import Workspace
+
+    ws = getattr(ctx, "workspace", None) or Workspace.resolve()
+    return tuple(ws.prompt_dirs)
+
+
+def _first_hit(dirs: Sequence[Path], relative: str) -> Path | None:
+    for d in dirs:
+        candidate = Path(d) / relative
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def append_name(prompt: str) -> str:
+    """`CONDUIT.md` -> `CONDUIT.append.md`, keeping any subdirectory."""
+    return str(PurePosixPath(prompt).with_suffix("")) + APPEND_SUFFIX
+
+
+def append_paths(dirs: Sequence[Path], prompt: str) -> list[Path]:
+    """Every `<AGENT>.append.md` on the search path, broadest layer first.
+
+    Not first-hit-wins: appends accumulate rather than shadow, so an
+    organisation-wide `QAAS_HOME` addendum and a project's own both apply. They
+    are ordered lowest-precedence first so the nearest layer speaks last, which
+    is both how a reader expects the specific to follow the general and how a
+    model weights the end of a block.
+    """
+    name = append_name(prompt)
+    found: list[Path] = []
+    for d in reversed(list(dirs)):
+        candidate = Path(d) / name
+        if candidate.is_file():
+            found.append(candidate)
+    return found
+
+
+def build_system_prompt(
+    spec: AgentSpec, prompt_dirs: Sequence[Path] | None = None
+) -> str:
+    """The agent's prompt, its local addenda, and the house rules every agent shares.
+
+    Kept as separate files so a change to the shared rules reaches every agent at
+    once, rather than being copy-pasted into six prompts that then drift.
+
+    Each file is resolved first-hit-wins **independently**: overriding
+    `CONDUIT.md` keeps the house `_shared.md`, and replacing `_shared.md` keeps
+    all eight agent prompts. Resolving the pair from one winning directory would
+    make either override drag the other along.
+
+    Order is agent, then addenda, then shared: the house rules are the last word,
+    and an addendum that could displace them would be an enforcement hole opened
+    from a text file.
+    """
+    dirs = tuple(prompt_dirs) if prompt_dirs is not None else resolve_prompt_dirs()
+    own = _first_hit(dirs, spec.prompt)
+    if own is None:
+        where = ", ".join(str(d) for d in dirs) or "(no prompt directories)"
+        raise FileNotFoundError(f"{spec.name} has no prompt '{spec.prompt}' in: {where}")
+    shared = _first_hit(dirs, SHARED_PROMPT)
+    if shared is None:
+        where = ", ".join(str(d) for d in dirs) or "(no prompt directories)"
+        raise FileNotFoundError(f"no {SHARED_PROMPT} in: {where}")
+
+    blocks = [own.read_text().rstrip()]
+    # An empty addendum contributes nothing rather than a stray blank block --
+    # `touch CONDUIT.append.md` must not change a single byte of the prompt.
+    blocks += [t for p in append_paths(dirs, spec.prompt) if (t := p.read_text().strip())]
+    blocks.append(shared.read_text().strip())
+    return "\n\n".join(blocks) + "\n"
 
 
 class MissingServerEnv(RuntimeError):
@@ -330,7 +403,10 @@ def build_options(
     env.update(extra_env or {})
 
     return ClaudeAgentOptions(
-        system_prompt=build_system_prompt(spec),
+        # Through the workspace, not `PROMPTS_DIR`: a user's `.qaas/prompts/`
+        # override has to reach the agent that actually runs, not just the one
+        # `qaas prompts list` describes.
+        system_prompt=build_system_prompt(spec, resolve_prompt_dirs(ctx)),
         model=spec.model,
         effort=spec.effort,
         max_turns=spec.max_turns,
@@ -365,8 +441,15 @@ def build_options(
     )
 
 
-def describe(spec: AgentSpec) -> dict[str, Any]:
-    """A dry-run view of what this agent would be given. No API call."""
+def describe(
+    spec: AgentSpec, prompt_dirs: Sequence[Path] | None = None
+) -> dict[str, Any]:
+    """A dry-run view of what this agent would be given. No API call.
+
+    `prompt_dirs` so the dry run counts the prompt the real run would send. A
+    dry run that silently reports the packaged prompt while the run sends an
+    overridden one is worse than no dry run.
+    """
     return {
         "agent": spec.name,
         "model": spec.model,
@@ -375,7 +458,7 @@ def describe(spec: AgentSpec) -> dict[str, Any]:
         "max_budget_usd": spec.max_budget_usd,
         "mcp_servers": list(spec.mcp_servers),
         "allowed_tools": build_allowed_tools(spec),
-        "prompt_chars": len(build_system_prompt(spec)),
+        "prompt_chars": len(build_system_prompt(spec, prompt_dirs)),
         "skills": list(spec.skills),
         "must_call": list(spec.must_call),
         "policy": spec.policy.model_dump(),

@@ -8,7 +8,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from qaas.paths import Workspace
+from qaas.paths import Workspace, package_root, packaged_prompts
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config
 from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
 
@@ -336,11 +336,19 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
         console.print(f"[red]config invalid:[/red] {exc}")
         raise typer.Exit(1)
 
-    prompts_dir = Workspace.resolve().prompt_dirs[0]
+    # Every prompt layer, not just the first. This used to check `prompt_dirs[0]`
+    # alone, so a project that overrode one prompt -- putting a `.qaas/prompts/`
+    # directory at the head of the search path -- made `qaas validate` report the
+    # other seven as missing, when they resolve perfectly well from the package.
+    from qaas.registry import SHARED_PROMPT
+
+    ws = Workspace.resolve()
     problems: list[str] = []
     notes: list[str] = []
+    if ws.prompt_file(SHARED_PROMPT) is None:
+        problems.append(f"no {SHARED_PROMPT} on the prompt search path")
     for name, spec in sorted(cfg.agents.items()):
-        if not spec.prompt_path(prompts_dir).exists():
+        if ws.prompt_file(spec.prompt) is None:
             problems.append(f"{name}: missing prompt file {spec.prompt}")
         if not spec.mcp_servers and not spec.builtin_tools:
             problems.append(f"{name}: has no tools at all")
@@ -458,6 +466,234 @@ def _describe_writes(spec) -> str:
     return " ".join(bits)
 
 
+# -- prompts ----------------------------------------------------------------
+#
+# A prompt is where an agent's judgement is set, and it is the first thing a
+# real user wants to change. Before this group the only way to do that after a
+# `pip install` was to edit site-packages: invisible to git, lost on the next
+# upgrade, and impossible to diff. These three commands make the same edit a
+# file in the project, and `diff` makes an upgrade's divergence visible instead
+# of silent.
+
+prompts_app = typer.Typer(
+    add_completion=False,
+    help="Inspect and override the agent prompts.",
+    no_args_is_help=True,
+)
+app.add_typer(prompts_app, name="prompts")
+
+#: The name `_shared.md` answers to on the command line.
+SHARED_LABEL = "_shared"
+
+
+def _prompt_origin(path: Path, ws: Workspace) -> str:
+    """Which layer a resolved prompt came from, for a human reading a table."""
+    parent = path.resolve().parent
+    if parent.is_relative_to(package_root()):
+        return "packaged"
+    if ws.project and parent.is_relative_to(ws.project.resolve()):
+        return "project"
+    return "override"
+
+
+def _eject_dir(ws: Workspace) -> Path:
+    """Where `eject` writes. Never inside the installed package.
+
+    Enforcement, not advice. `state_root` comes from QAAS_HOME, the project, or
+    the cwd, and nothing else stops one of those from landing in site-packages
+    -- where an edit would survive exactly until the next `pip install
+    --upgrade` and then vanish with no trace of ever having been made.
+    """
+    dest = (ws.state_root / "prompts").resolve()
+    if dest.is_relative_to(package_root()):
+        console.print(
+            f"[red]refusing to write inside the installed package:[/red] {dest}\n"
+            "[dim]run this from your project, or set QAAS_HOME.[/dim]"
+        )
+        raise typer.Exit(1)
+    return dest
+
+
+def _prompt_index(cfg) -> dict[str, str]:
+    """Name -> prompt filename, for every agent plus the shared house rules."""
+    index = {name: spec.prompt for name, spec in sorted(cfg.agents.items())}
+    from qaas.registry import SHARED_PROMPT
+
+    index[SHARED_LABEL] = SHARED_PROMPT
+    return index
+
+
+def _select_prompts(cfg, agent: str | None) -> list[tuple[str, str]]:
+    """Resolve a command-line name to (label, filename) pairs. Everything if None."""
+    index = _prompt_index(cfg)
+    if agent is None:
+        return list(index.items())
+    wanted = agent[:-3] if agent.endswith(".md") else agent
+    for label, filename in index.items():
+        if label.lower() == wanted.lower():
+            return [(label, filename)]
+    console.print(
+        f"[red]unknown prompt '{agent}'[/red] — known: {', '.join(index)}"
+    )
+    raise typer.Exit(1)
+
+
+@prompts_app.command("list")
+def prompts_list(config_dir: Path | None = ConfigDir) -> None:
+    """Show which prompt file each agent is actually given, and from where."""
+    from qaas.registry import SHARED_PROMPT, append_name, append_paths, build_system_prompt
+
+    cfg = load_config(config_dir)
+    ws = Workspace.resolve()
+
+    table = Table(title="Prompts in force", header_style="bold")
+    for col in ("agent", "file", "source", "appended", "total chars"):
+        table.add_column(col)
+    for name, spec in sorted(cfg.agents.items()):
+        found = ws.prompt_file(spec.prompt)
+        if found is None:
+            table.add_row(name, spec.prompt, "[red]missing[/red]", "-", "-")
+            continue
+        appends = append_paths(ws.prompt_dirs, spec.prompt)
+        table.add_row(
+            name,
+            spec.prompt,
+            _prompt_origin(found, ws),
+            append_name(spec.prompt) if appends else "-",
+            str(len(build_system_prompt(spec, ws.prompt_dirs))),
+        )
+    shared = ws.prompt_file(SHARED_PROMPT)
+    table.add_row(
+        "[dim]every agent[/dim]",
+        SHARED_PROMPT,
+        _prompt_origin(shared, ws) if shared else "[red]missing[/red]",
+        "-",
+        str(len(shared.read_text())) if shared else "-",
+    )
+    console.print(table)
+
+    for i, d in enumerate(ws.prompt_dirs):
+        console.print(f"[dim]{'*' if i == 0 else ' '} {d}[/dim]")
+    console.print(
+        "\n[dim]`qaas prompts eject <AGENT>` to edit one outright, or drop a "
+        "`<AGENT>.append.md` beside it to add lines without forking the file.[/dim]"
+    )
+
+
+@prompts_app.command("eject")
+def prompts_eject(
+    agent: str = typer.Argument(None, help=f"Agent name, or {SHARED_LABEL}. Omit with --all."),
+    all_prompts: bool = typer.Option(False, "--all", help="Eject every prompt."),
+    force: bool = typer.Option(False, "--force", help="Overwrite a file already there."),
+    config_dir: Path | None = ConfigDir,
+) -> None:
+    """Copy a packaged prompt into the project so it can be edited."""
+    if agent is None and not all_prompts:
+        console.print("[red]name an agent, or pass --all[/red]")
+        raise typer.Exit(1)
+    if agent is not None and all_prompts:
+        console.print("[red]name an agent or pass --all, not both[/red]")
+        raise typer.Exit(1)
+
+    cfg = load_config(config_dir)
+    ws = Workspace.resolve()
+    dest_dir = _eject_dir(ws)
+    selected = _select_prompts(cfg, agent)
+
+    written: list[Path] = []
+    skipped: list[Path] = []
+    for _label, filename in selected:
+        # The *packaged* bytes, deliberately: eject means "give me the house
+        # version to edit". Copying whatever already won the search would make
+        # a second eject a no-op that looks like it did something.
+        src = packaged_prompts() / filename
+        if not src.is_file():
+            console.print(f"[red]nothing to eject: {src} does not exist[/red]")
+            raise typer.Exit(1)
+        dest = dest_dir / filename
+        if dest.exists() and not force:
+            skipped.append(dest)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(src.read_text())
+        written.append(dest)
+
+    for path in written:
+        console.print(f"[green]wrote[/green] {path}")
+    for path in skipped:
+        console.print(f"[yellow]exists, left alone:[/yellow] {path}")
+
+    if skipped and not written:
+        console.print("[dim]use --force to overwrite.[/dim]")
+    # One named prompt that was refused is a failed command; --all skipping the
+    # files you already ejected is the normal, successful case.
+    if skipped and agent is not None:
+        raise typer.Exit(1)
+    if written:
+        console.print(
+            "\n[dim]edit them, then `qaas prompts diff` to see what you changed.[/dim]"
+        )
+
+
+@prompts_app.command("diff")
+def prompts_diff(
+    agent: str = typer.Argument(None, help="Agent name, or omit for all of them."),
+    config_dir: Path | None = ConfigDir,
+) -> None:
+    """Show local prompt edits against the bytes that shipped.
+
+    Run it after an upgrade: a forked prompt does not conflict, it just quietly
+    stops tracking the package, and this is the only place that shows it.
+    """
+    import difflib
+
+    from qaas.registry import append_name, append_paths
+
+    cfg = load_config(config_dir)
+    ws = Workspace.resolve()
+    changed = 0
+
+    for label, filename in _select_prompts(cfg, agent):
+        in_force = ws.prompt_file(filename)
+        packaged = packaged_prompts() / filename
+        # Only agent prompts take an addendum; `_shared.append.md` is composed
+        # by nothing, so reporting one would describe a file that has no effect.
+        appends = [] if label == SHARED_LABEL else append_paths(ws.prompt_dirs, filename)
+
+        if in_force is not None and packaged.is_file() and in_force != packaged.resolve():
+            diff = list(
+                difflib.unified_diff(
+                    packaged.read_text().splitlines(),
+                    in_force.read_text().splitlines(),
+                    fromfile=f"packaged/{filename}",
+                    tofile=str(in_force),
+                    lineterm="",
+                )
+            )
+            if diff:
+                changed += 1
+                console.print(f"\n[bold]{label}[/bold]")
+                for line in diff:
+                    style = None
+                    if line.startswith("+") and not line.startswith("+++"):
+                        style = "green"
+                    elif line.startswith("-") and not line.startswith("---"):
+                        style = "red"
+                    elif line.startswith("@@"):
+                        style = "cyan"
+                    console.print(line, style=style, markup=False, highlight=False)
+
+        for path in appends:
+            changed += 1
+            console.print(f"\n[bold]{label}[/bold] [dim]+ {append_name(filename)}[/dim]")
+            console.print(f"--- {path}", markup=False, highlight=False)
+            for line in path.read_text().splitlines():
+                console.print(f"+{line}", style="green", markup=False, highlight=False)
+
+    if not changed:
+        console.print("[dim]no local prompt edits — every prompt is the packaged one[/dim]")
+
+
 @app.command()
 def runs(root: Path = Root, limit: int = 10) -> None:
     """List recent runs with their cost and finding count."""
@@ -568,8 +804,11 @@ def run(
     )
 
     if dry_run:
+        # The same search path the run itself would use, so `prompt: N chars`
+        # counts any override rather than always reporting the packaged bytes.
+        prompt_dirs = Workspace.resolve().prompt_dirs
         for spec in specs:
-            d = describe(spec)
+            d = describe(spec, prompt_dirs)
             console.print(
                 f"  [bold]{spec.name:14s}[/bold] {spec.model:18s} effort={spec.effort:7s} "
                 f"turns<={spec.max_turns:<3d} ${spec.max_budget_usd:.2f}"
