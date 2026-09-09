@@ -1586,9 +1586,17 @@ def _ensure_board(cfg, *, create: bool = True):
     because of a board has thrown the findings away.
     """
     from qaas.adapters.tracker import JiraTracker, TrackerError, repo_label
+    from qaas.mcp.tracker import dry_run_enabled
 
     if cfg.tracker != "jira" or not cfg.target:
         return None
+
+    # The rehearsal rail sends nothing. A board is a container rather than a
+    # ticket, but "QAAS_TRACKER_DRY_RUN=1 wrote to my Jira" is exactly the
+    # sentence that rail exists to make impossible.
+    if create and dry_run_enabled():
+        console.print("[dim]dry run: no board was created[/dim]")
+        create = False
 
     label = repo_label(cfg.target)
     if label is None:

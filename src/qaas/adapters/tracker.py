@@ -1000,17 +1000,13 @@ class JiraTracker(TrackerAdapter):
         `filter/search` returns other people's filters too, and adopting a
         stranger's filter as the run's board would silently repoint it.
         """
-        data = self._request(
-            "GET",
-            "/filter/search",
-            params={
-                "filterName": name,
-                "accountId": self._account_id() or "",
-                "expand": "jql,viewUrl,searchUrl",
-                "maxResults": "50",
-            },
-            retry_on_429=True,
-        )
+        params = {"filterName": name, "expand": "jql", "maxResults": "50"}
+        account = self._account_id()
+        if account:
+            # Omitted rather than sent empty: Jira answers an empty accountId
+            # with a 400, which would read as "the filter API is broken".
+            params["accountId"] = account
+        data = self._request("GET", "/filter/search", params=params, retry_on_429=True)
         for entry in data.get("values") or []:
             if str(entry.get("name") or "").strip() == name:
                 return entry

@@ -1146,3 +1146,31 @@ async def test_every_filed_ticket_carries_its_repository_label(stub, tmp_path, m
 
     assert not result.get("isError"), result
     assert "repo-claude-code-training" in stub.calls("POST", f"{API}/issue")[0].fields["labels"]
+
+
+def test_the_rehearsal_rail_creates_no_board(cli_runner, jira_config, stub, monkeypatch, clean_jira_env):
+    """`QAAS_TRACKER_DRY_RUN=1` sends nothing. A board is a container rather
+    than a ticket, but "the dry run wrote to my Jira" is the sentence that rail
+    exists to make impossible."""
+    from qaas import cli
+
+    for name, value in env_for(stub).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("QAAS_TRACKER_DRY_RUN", "1")
+    route_no_existing_board(stub)
+
+    result = cli_runner.invoke(cli.app, ["board", "--config", str(jira_config)])
+
+    assert result.exit_code == 0, result.output
+    assert "dry run" in result.output
+    assert [r for r in stub.requests if r.method == "POST"] == []
+
+
+def test_an_account_id_that_could_not_be_read_is_omitted_rather_than_sent_empty(tracker, stub):
+    """Jira answers an empty accountId with a 400, which reads as "the filter
+    API is broken" rather than "/myself did not answer"."""
+    stub.route("GET", f"{API}/myself", (500, {"errorMessages": ["boom"]}))
+    stub.route("GET", f"{API}/filter/search", (200, {"values": []}))
+
+    assert tracker.find_filter("anything") is None
+    assert "accountId" not in stub.calls("GET", f"{API}/filter/search")[0].query
