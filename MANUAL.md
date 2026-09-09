@@ -299,32 +299,45 @@ stale `.env` cannot silently redirect a run. `QAAS_ENV_FILE=/path/to/file` names
 a different one; `QAAS_ENV_FILE=` turns the whole mechanism off, which is what
 CI should do.
 
-### A board per repository
+### A view per repository
 
-Every ticket the system files carries `repo-<target>`. At the top of a
-Jira-backed run it finds or creates a board over exactly that label, so each
-repository you point it at gets its own board without a Jira project of its own:
+Every ticket the system files carries `repo-<target>`, stamped in code rather
+than asked of an agent. At the top of a Jira-backed run, a saved filter over
+exactly that label is found or created — so each repository you point it at gets
+its own view without a Jira project of its own:
 
 ```console
 $ QAAS_TRACKER=jira qaas run --repo https://github.com/acme/checkout.git --mode nightly
-board created — https://you.atlassian.net/jira/software/projects/QA/boards/42
+filter created — https://you.atlassian.net/issues/?filter=10001
 every ticket from this run carries the label repo-checkout
 ```
 
 ```bash
-qaas board                # find or create the board for the configured target
+qaas board                # find or create the view for the configured target
 qaas board --no-create    # show the label and the JQL, touch nothing
 qaas board -t other-repo  # a different target
 ```
 
-A board rather than a project, deliberately: creating a Jira project needs
-administrator rights a bot account rarely has, and a project per repository is
-unmanageable by the tenth one. Creating a saved filter needs no special grant.
+**Whether you also get a board depends on your project type.**
 
-If Jira refuses to create the board — team-managed projects own their boards, and
-some accounts lack "Create shared objects" — the **filter is still created**, the
-tickets still carry the label, and the URL printed opens the filter instead. A
-run is never failed over a board; losing the findings would be the larger failure.
+| Your project | What you get | Why |
+|---|---|---|
+| Company-managed (classic) | A filter **and** a board over it | Boards can be built over an arbitrary filter |
+| Team-managed (next-gen) | The filter alone | The project owns its board and cannot have a second |
+
+Jira's API will create a board on a team-managed project and give it **no page in
+the UI** — both `/jira/software/boards/<id>` and
+`/jira/software/c/projects/<KEY>/boards/<id>` answer 404. So the project's style
+is checked first and the attempt is skipped, rather than printing a link that
+opens an error page. The filter is a good view either way: named, starred in your
+sidebar, scoped to exactly one repository's defects.
+
+A project per repository is not the design, deliberately: creating one needs
+administrator rights a bot account rarely has, and it is unmanageable by the
+tenth repo. Creating a saved filter needs no special grant.
+
+A run is never failed over any of this — including "no Jira credentials at all".
+Losing the findings would be the larger failure.
 
 > [!TIP]
 > Keep the committed backend `local` and switch per shell with `QAAS_TRACKER=jira`.

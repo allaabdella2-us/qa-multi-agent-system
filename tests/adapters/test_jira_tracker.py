@@ -1067,12 +1067,19 @@ def test_a_target_name_becomes_a_label_and_an_unusable_one_becomes_nothing():
     assert repo_label(None) is None
 
 
-def route_no_existing_board(stub: JiraStub) -> None:
+def route_no_existing_board(stub: JiraStub, *, style: str = "classic") -> None:
     stub.route("GET", f"{API}/myself", (200, {"accountId": "acct-1", "displayName": "QA bot"}))
+    stub.route("GET", f"{API}/project/CORVID", (200, {"key": "CORVID", "style": style}))
     stub.route("GET", f"{API}/filter/search", (200, {"values": []}))
     stub.route("POST", f"{API}/filter", (200, {"id": "10100", "name": "x"}))
     stub.route("GET", f"{AGILE}/board", (200, {"values": []}))
     stub.route("POST", f"{AGILE}/board", (200, {"id": 42, "name": "x"}))
+    # A board the UI can render: it has a project location. Without one there
+    # is no page for it anywhere in Jira.
+    stub.route(
+        "GET", f"{AGILE}/board/42",
+        (200, {"id": 42, "name": "x", "location": {"projectKey": "CORVID"}}),
+    )
 
 
 def test_ensure_repo_board_creates_a_shared_filter_and_a_board_over_it(tracker, stub):
@@ -1083,7 +1090,8 @@ def test_ensure_repo_board_creates_a_shared_filter_and_a_board_over_it(tracker, 
     assert info.label == "repo-claude-code-training"
     assert info.filter_id == 10100 and info.created_filter
     assert info.board_id == 42 and info.created_board
-    assert info.url.endswith("/boards/42")
+    assert "rapidView=42" in info.url        # the stub does not redirect
+    assert "filter=10100" in info.filter_url
 
     body = stub.calls("POST", f"{API}/filter")[0].body
     assert 'labels = "repo-claude-code-training"' in body["jql"]
@@ -1098,6 +1106,11 @@ def test_a_second_run_against_the_same_repo_reuses_the_board(tracker, stub):
     """Idempotence is the whole requirement: this is called at the top of every
     run, and the second run must not produce `repo QA (2)`."""
     stub.route("GET", f"{API}/myself", (200, {"accountId": "acct-1"}))
+    stub.route("GET", f"{API}/project/CORVID", (200, {"key": "CORVID", "style": "classic"}))
+    stub.route(
+        "GET", f"{AGILE}/board/42",
+        (200, {"id": 42, "location": {"projectKey": "CORVID"}}),
+    )
     name = "claude-code-training — QA (qaas)"
     stub.route("GET", f"{API}/filter/search", (200, {"values": [{"id": "10100", "name": name}]}))
     stub.route("GET", f"{AGILE}/board", (200, {"values": [{"id": 42, "name": name}]}))
@@ -1114,6 +1127,7 @@ def test_a_refused_board_still_returns_a_usable_filter(tracker, stub):
     """Team-managed projects own their boards and reject this. The run's job is
     to find defects; losing them over a board would be the larger failure."""
     stub.route("GET", f"{API}/myself", (200, {"accountId": "acct-1"}))
+    stub.route("GET", f"{API}/project/CORVID", (200, {"key": "CORVID", "style": "classic"}))
     stub.route("GET", f"{API}/filter/search", (200, {"values": []}))
     stub.route("POST", f"{API}/filter", (200, {"id": "10100"}))
     stub.route("GET", f"{AGILE}/board", (200, {"values": []}))
@@ -1174,3 +1188,66 @@ def test_an_account_id_that_could_not_be_read_is_omitted_rather_than_sent_empty(
 
     assert tracker.find_filter("anything") is None
     assert "accountId" not in stub.calls("GET", f"{API}/filter/search")[0].query
+
+
+def test_a_board_link_is_resolved_by_jira_rather_than_assembled(tracker, stub, monkeypatch):
+    """Assembling it by hand produced a link that opened Jira's error page: the
+    guess omitted the `/c/` that a company-managed project's board URL carries.
+    Jira knows which form its own site uses; ask it."""
+    canonical = f"{tracker.base_url}/jira/software/c/projects/CORVID/boards/42"
+    monkeypatch.setattr(JiraTracker, "_resolve_url", lambda self, url: canonical)
+
+    assert tracker.board_url(42) == canonical
+
+
+def test_a_board_link_falls_back_to_the_redirecting_form(tracker, monkeypatch):
+    """It works everywhere; it just reads like an internal URL. A link that
+    works and looks odd beats no link."""
+    monkeypatch.setattr(JiraTracker, "_resolve_url", lambda self, url: None)
+
+    assert tracker.board_url(42) == f"{tracker.base_url}/secure/RapidBoard.jspa?rapidView=42"
+
+
+def test_resolving_a_url_never_raises(tracker):
+    """A UI page that 500s, times out, or is behind a proxy must not fail a run
+    that has already created the board."""
+    assert tracker._resolve_url("http://127.0.0.1:1/nothing-listens-here") is None
+
+
+def test_a_team_managed_project_gets_the_filter_and_no_board_attempt(tracker, stub):
+    """The POST would succeed and produce a board with no `location` — which the
+    Jira UI has no page for. Both /jira/software/boards/<id> and
+    /jira/software/c/projects/<KEY>/boards/<id> answer 404, so the link handed
+    to a human is broken. Ask the project's style first, and make only the
+    filter, which works and is a good view in its own right."""
+    route_no_existing_board(stub, style="next-gen")
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.filter_id == 10100 and info.created_filter
+    assert info.board_id is None
+    assert "filter=10100" in info.url
+    assert info.note and "team-managed" in info.note
+    assert stub.calls("POST", f"{AGILE}/board") == []
+
+
+def test_a_board_with_no_location_is_not_offered_as_a_link(tracker, stub):
+    """Belt and braces for a Jira that is not team-managed and still hands back
+    an unrenderable board. A 404 reads as "this tool is broken"."""
+    route_no_existing_board(stub)
+    stub.route("GET", f"{AGILE}/board/42", (200, {"id": 42, "name": "x"}))   # no location
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.board_id == 42 and not info.created_board
+    assert "filter=10100" in info.url
+    assert info.note and "no project location" in info.note
+
+
+def test_an_unreadable_project_style_does_not_stop_the_board_attempt(tracker, stub):
+    """Unknown is not "team-managed". Refusing to try on a 500 would silently
+    downgrade every company-managed Jira that hiccuped once."""
+    route_no_existing_board(stub)
+    stub.route("GET", f"{API}/project/CORVID", (500, {"errorMessages": ["boom"]}))
+
+    assert tracker.ensure_repo_board("claude-code-training").board_id == 42

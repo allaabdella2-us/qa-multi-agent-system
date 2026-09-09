@@ -1627,11 +1627,12 @@ def _ensure_board(cfg, *, create: bool = True):
         console.print(f"[yellow]could not provision a board:[/yellow] {exc}")
         return None
 
+    what = "board" if info.board_id and info.url != info.filter_url else "filter"
     verb = "created" if (info.created_board or info.created_filter) else "reused"
-    console.print(f"[bold]board {verb}[/bold] — {info.url}")
+    console.print(f"[bold]{what} {verb}[/bold] — {info.url}")
     console.print(f"[dim]every ticket from this run carries the label {info.label}[/dim]")
     if info.note:
-        console.print(f"[yellow]note:[/yellow] {info.note}")
+        console.print(f"[dim]{info.note}[/dim]")
     return info
 
 
@@ -1677,6 +1678,8 @@ def board(
     table.add_row("board", str(info.board_id or "not created"))
     table.add_row("url", info.url or "-")
     console.print(table)
+    if info.note:
+        console.print(f"\n[dim]{info.note}[/dim]")
 
 
 @app.command("tracker-check")

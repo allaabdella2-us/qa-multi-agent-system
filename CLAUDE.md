@@ -141,14 +141,23 @@ one stdio subprocess, declared in `registry.STDIO_SERVERS`.
 Tool results use `ok()`/`err()` from `mcp/context.py`: errors are **returned, not
 raised**, so the agent reads the reason and corrects itself.
 
-### One Jira board per repository, not one project
+### One Jira view per repository, not one project
 
 Every ticket carries `repo-<target>`, stamped by `mcp/tracker.py` rather than
 asked of CLERK. `JiraTracker.ensure_repo_board` finds-or-creates a saved filter
-over exactly that label and a board over the filter; `cli._ensure_board` calls it
-at the top of every Jira-backed run. A *project* per repo would need admin rights
-a bot account rarely has; a filter needs none. Board creation failing is not run
-failure — the filter still exists and the label still routes.
+over exactly that label, plus a board over the filter **only where one can
+render**; `cli._ensure_board` calls it at the top of every Jira-backed run. A
+*project* per repo would need admin rights a bot account rarely has; a filter
+needs none.
+
+**A 200 from the board API is not a working board.** Team-managed (next-gen)
+projects own their board; `POST /rest/agile/1.0/board` over a filter still
+returns 201, and the resulting board has no `location` and therefore no page in
+the UI — every candidate URL 404s. So `is_team_managed` skips the attempt, and
+`_board_is_reachable` re-checks anything that was created. `board_url` never
+assembles a URL either: `/secure/RapidBoard.jspa?rapidView=<id>` is followed and
+whatever Jira resolves it to is the answer. None of this can fail a run — the
+filter is always the fallback, and the findings matter more than the view.
 
 ### Targets make it portable
 

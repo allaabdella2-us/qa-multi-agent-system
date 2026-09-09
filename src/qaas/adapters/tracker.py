@@ -586,7 +586,12 @@ class BoardInfo:
     filter_name: str = ""
     board_id: int | None = None
     board_name: str = ""
+    #: A link that opens. The board when there is a usable one, the filter
+    #: otherwise — never a constructed guess, because a link that 404s is worse
+    #: than no link: it reads as "the tool is broken" rather than "your Jira
+    #: does not do that".
     url: str = ""
+    filter_url: str = ""
     created_filter: bool = False
     created_board: bool = False
     note: str | None = None
@@ -1031,6 +1036,23 @@ class JiraTracker(TrackerAdapter):
             },
         )
 
+    def is_team_managed(self, key: str) -> bool:
+        """Whether `key` is a team-managed (next-gen) project.
+
+        Team-managed projects own their boards. The Agile API will still accept
+        `POST /board` over a filter and hand back an id — and the resulting
+        board has no `location`, which means the Jira UI has no page for it:
+        both `/jira/software/boards/<id>` and
+        `/jira/software/c/projects/<KEY>/boards/<id>` answer 404. So the board
+        exists, is unreachable, and the link handed to a human is broken. Ask
+        first, and make only the filter.
+        """
+        try:
+            info = self.project_info(key)
+        except TrackerError:
+            return False  # unknown: try, and fall back on the answer
+        return str(info.get("style") or "").lower() == "next-gen" or bool(info.get("simplified"))
+
     def find_board(self, name: str) -> dict[str, Any] | None:
         """A board with exactly this name, or None. Agile API."""
         data = self._request(
@@ -1053,8 +1075,40 @@ class JiraTracker(TrackerAdapter):
             api_base=JIRA_AGILE_BASE,
         )
 
+    #: The one board URL that is never wrong. Jira redirects it to whichever
+    #: canonical form this site actually uses — `/jira/software/c/projects/...`
+    #: for a company-managed project, `/jira/software/projects/...` for a
+    #: team-managed one, and neither for a board with no project location at
+    #: all. Constructing the canonical form by hand produced a link that
+    #: returned Jira's generic error page, because the guess omitted the `/c/`.
+    BOARD_PATH = "/secure/RapidBoard.jspa?rapidView={id}"
+
     def board_url(self, board_id: int) -> str:
-        return f"{self.base_url}/jira/software/projects/{self._project}/boards/{board_id}"
+        """A link to the board. Resolved with Jira rather than assembled.
+
+        Falls back to the redirecting form, which works everywhere but reads
+        like an internal URL — worth one HTTP call to avoid handing someone a
+        link they will not recognise.
+        """
+        redirecting = f"{self.base_url}{self.BOARD_PATH.format(id=board_id)}"
+        return self._resolve_url(redirecting) or redirecting
+
+    def _resolve_url(self, url: str) -> str | None:
+        """Where a browser would land, following Jira's own redirect. None on failure.
+
+        Deliberately not `_request`: this asks for a UI page, not JSON, and its
+        answer is the final URL rather than the body. A failure here is never
+        fatal — the caller keeps the redirecting URL, which works.
+        """
+        request = urllib.request.Request(
+            url, method="GET", headers={**self._headers(), "Accept": "text/html"}
+        )
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                resolved = response.geturl()
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return None
+        return resolved if resolved and resolved != url else None
 
     def filter_url(self, filter_id: int) -> str:
         return f"{self.base_url}/issues/?filter={filter_id}"
@@ -1116,39 +1170,77 @@ class JiraTracker(TrackerAdapter):
         else:
             info = replace(info, filter_id=int(existing["id"]), filter_name=name)
 
-        info = replace(info, url=self.filter_url(info.filter_id))
+        filter_link = self.filter_url(info.filter_id)
+        info = replace(info, url=filter_link, filter_url=filter_link)
+
+        if self.is_team_managed(key):
+            # Not a failure and not worth attempting: the POST would succeed and
+            # produce a board with no UI page. The filter is the deliverable
+            # here, and it is a good one — named, starred, scoped to the label.
+            return replace(
+                info,
+                note=(
+                    f"'{key}' is a team-managed project, which owns its own board and "
+                    "cannot have a second one built over a filter. The saved filter "
+                    f"'{name}' is the per-repository view instead: every ticket carries "
+                    f"{label}, and the link above opens exactly this repository's defects."
+                ),
+            )
 
         board = self.find_board(name)
         if board is not None:
-            return replace(
-                info,
-                board_id=int(board["id"]),
-                board_name=name,
-                url=self.board_url(int(board["id"])),
-            )
+            return self._with_board(info, int(board["id"]), name, created=False)
 
         try:
             made = self.create_board(name=name, filter_id=int(info.filter_id))
         except TrackerError as exc:
-            # Team-managed projects own their boards and reject this; so does an
-            # account without "Create shared objects". Both leave the filter
-            # usable, which is why this returns rather than raises.
+            # An account without "Create shared objects" lands here. The filter
+            # is still usable, which is why this returns rather than raises.
             return replace(
                 info,
                 note=(
                     f"Jira would not create a board over the filter ({exc}). The filter "
-                    f"exists and every ticket carries {label}, so open the filter link "
-                    "above, or create a board from it by hand in Jira."
+                    f"exists and every ticket carries {label}, so open the link above, or "
+                    "create a board from it by hand in Jira."
                 ),
             )
-        board_id = int(made["id"])
+        return self._with_board(info, int(made["id"]), name, created=True)
+
+    def _with_board(self, info: BoardInfo, board_id: int, name: str, *, created: bool) -> BoardInfo:
+        """Attach a board to the result — but only if the UI can actually show it.
+
+        A board with no `location` is renderable nowhere. Handing out its URL
+        produced a 404 page that reads as "this tool is broken" rather than
+        "your Jira does not work that way", so the filter link stands instead.
+        """
+        if not self._board_is_reachable(board_id):
+            return replace(
+                info,
+                board_id=board_id,
+                board_name=name,
+                note=(
+                    f"Jira created board {board_id} but gave it no project location, so it "
+                    "has no page in the Jira UI. The saved filter above is the working "
+                    "per-repository view."
+                ),
+            )
         return replace(
             info,
             board_id=board_id,
             board_name=name,
             url=self.board_url(board_id),
-            created_board=True,
+            created_board=created,
         )
+
+    def _board_is_reachable(self, board_id: int) -> bool:
+        """Whether this board has a project location, and therefore a UI page."""
+        try:
+            board = self._request(
+                "GET", f"/board/{board_id}", retry_on_429=True, api_base=JIRA_AGILE_BASE
+            )
+        except TrackerError:
+            return False
+        return bool(board.get("location"))
 
     # -- operations -------------------------------------------------------
 

@@ -171,33 +171,43 @@ the file**, so a stale `.env` can never redirect a run.
 > `.qaas/tickets/` so you can read what *would* be filed. Switch per shell with
 > `QAAS_TRACKER=jira`.
 
-### 📌 A board per repository, made for you
+### 📌 A view per repository, made for you
 
-Point it at a new repository and it provisions that repository's own Jira board
+Point it at a new repository and it provisions that repository's own Jira view
 before the first agent starts — so there is something to watch *during* the run,
 not a report afterwards.
 
 ```console
 $ QAAS_TRACKER=jira qaas run --repo https://github.com/acme/checkout.git --mode nightly
 target: checkout (none)
-board created — https://you.atlassian.net/jira/software/projects/QA/boards/42
+filter created — https://you.atlassian.net/issues/?filter=10001
 every ticket from this run carries the label repo-checkout
 ```
 
-It is **a board, not a project**: a saved filter over the label `repo-<target>`,
-which the system stamps on every ticket it files. That matters — creating a Jira
-*project* needs administrator rights a bot account rarely has, and a project per
-repository is unmanageable by the tenth repo. A filter needs no special grant.
+Every ticket the system files carries `repo-<target>`, stamped in code rather
+than asked of an agent. A **saved filter** over exactly that label is the
+per-repository view, and on a company-managed project a **board** is built over
+the filter too.
 
 ```bash
-qaas board                  # show or create this target's board
+qaas board                  # find or create this target's view
 qaas board --no-create      # show the label and JQL, touch nothing
 ```
 
-Run it twice on the same repository and it **reuses** the board. If your Jira
-refuses to create one — team-managed projects own their boards — the filter is
-still made, the tickets still carry the label, and the URL still opens something
-useful. A run is never failed over a board.
+> [!NOTE]
+> **Not a project per repository.** Creating a Jira project needs administrator
+> rights a bot account rarely has, and a project per repository is unmanageable
+> by the tenth one. A filter needs no special grant.
+>
+> **Not always a board, either.** Team-managed (next-gen) projects own their own
+> board and cannot have a second one built over a filter — Jira's API will
+> happily create one and give it no page in the UI. So the project's style is
+> checked first, and on a team-managed project you get the filter alone. You are
+> told which you got, and the link always opens.
+
+Run it twice on the same repository and it **reuses** what is there. A run is
+never failed over this: a run that found nine defects and could not make a view
+has still done its job.
 
 ---
 
