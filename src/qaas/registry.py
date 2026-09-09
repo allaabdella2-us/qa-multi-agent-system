@@ -14,7 +14,28 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Sequence
 
+import warnings
+
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+
+# The SDK warns that an `allowed_tools` entry auto-approves a tool before
+# `can_use_tool` is consulted. That warning is correct and this codebase acted
+# on it long ago: enforcement lives in the PreToolUse hook, which sees every
+# call, and `can_use_tool` is kept only as a second layer for calls the
+# allowlist did not auto-approve. See the module docstring in `guardrails.py` --
+# an early version really did have that bug, and FORGE's sandbox check was dead
+# code because of it.
+#
+# So the warning describes a hazard we already removed, and it fired on every
+# single agent dispatch: eight lines of alarming red before a run that is
+# working correctly. Silenced here, next to the reason, rather than by the
+# caller -- a user should not have to learn which of our warnings to ignore.
+try:  # pragma: no cover - depends on the installed SDK exposing the class
+    from claude_agent_sdk.types import CanUseToolShadowedWarning
+
+    warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
+except ImportError:  # the SDK renamed or dropped it; nothing to silence
+    pass
 
 from qaas.config import AgentSpec
 from qaas.guardrails import ALWAYS_GRANTED, Guardrail

@@ -185,3 +185,30 @@ def test_describe_is_a_pure_dry_run(cfg):
     assert d["agent"] == "FORGE"
     assert "mcp__test_runner" in d["allowed_tools"]
     assert d["policy"]["branch_patterns"] == ["qa/repro/*"]
+
+
+def test_the_shadowing_warning_is_silenced_because_we_acted_on_it():
+    """The SDK warns that `allowed_tools` auto-approves before `can_use_tool`.
+
+    That warning is correct, and this codebase already did what it advises:
+    enforcement is in the PreToolUse hook, which sees every call. The warning
+    therefore described a hazard we had removed while firing on every single
+    agent dispatch -- eight red lines before a run that was working.
+
+    This asserts the filter is installed, and by extension that someone reading
+    a clean run is not being told something is wrong when it is not.
+    """
+    import warnings
+
+    try:
+        from claude_agent_sdk.types import CanUseToolShadowedWarning
+    except ImportError:
+        pytest.skip("installed SDK does not define the warning")
+
+    import qaas.registry  # noqa: F401 - importing installs the filter
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
+        warnings.warn("shadowed", CanUseToolShadowedWarning)
+    assert not seen, "the shadowing warning still reaches the user"
