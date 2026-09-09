@@ -19,7 +19,7 @@ CONFIG = str(REPO / "src" / "qaas" / "defaults" / "config")
 
 EXPECTED_COMMANDS = {
     "init", "targets", "doctor", "validate",
-    "runs", "show", "map", "run", "score", "sweep", "tracker-check",
+    "runs", "show", "trace", "map", "run", "score", "sweep", "tracker-check",
 }
 
 

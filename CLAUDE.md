@@ -27,6 +27,7 @@ qaas doctor --target corvid              # what a target makes possible
 qaas run --mode pr-check --dry-run       # renders each agent's options, no API call
 qaas run --mode nightly --only CONDUIT   # real run, costs money
 qaas runs / qaas show <run-id> / qaas map
+qaas trace <run-id> [--agent NAME] [--kind KIND] [--json]   # the ledger, readably
 qaas score [<run-id>]                    # recall/precision against the golden ledger
 qaas sweep                               # run + score + fail below the precision gate
 
@@ -146,6 +147,14 @@ every tool call, denial and escalation), `envelopes/`, `artifacts/`, `results/`;
 plus a versioned `system-map/` shared across runs and pinned per run so a bad map
 cannot half-propagate. Evidence is referenced by `artifact://<run>/<name>` uris;
 `resolve_artifact` rejects paths escaping the store.
+
+The ledger's `kind` is a closed set (`store.LedgerKind`) — **add a member, never
+repurpose one**: the conductor reads `verdict`, `review` and `vcs` back for
+control flow (`_latest_verdict`, `_latest_review`, `_branch_written_since`), so
+these are a wire format, not labels. `trace.py` is the read side (`qaas trace`,
+`qaas show`); it reads the file once and filters in memory, because
+`store.ledger(kind)` is a full-file scan of a file that runs to tens of thousands
+of lines.
 
 ### Calibration is the point
 
