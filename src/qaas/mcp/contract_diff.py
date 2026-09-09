@@ -116,13 +116,13 @@ def _fetch_spec(url: str) -> tuple[dict[str, Any] | None, str | None]:
     return (doc, None) if isinstance(doc, dict) else (None, f"{url} did not return an object")
 
 
-def _read_spec(ref: str, repo_root: Path) -> tuple[dict[str, Any] | None, str | None]:
+def _read_spec(ref: str, target_root: Path) -> tuple[dict[str, Any] | None, str | None]:
     """Load a spec from a URL or a path. Returns (doc, error)."""
     if _is_url(ref):
         return _fetch_spec(ref)
     path = Path(ref)
     if not path.is_absolute():
-        path = repo_root / path
+        path = target_root / path
     if not path.exists():
         return None, f"no such spec file: {path}"
     try:
@@ -685,7 +685,7 @@ def build_tools(ctx: ToolContext) -> list:
     # it, so every target was assumed to keep an `openapi.yaml` at its root.
     _profile = getattr(ctx.config, "profile", None)
     _declared_spec = getattr(getattr(_profile, "layout", None), "spec", None) if _profile else None
-    default_spec = ctx.target_app / (_declared_spec or DEFAULT_SPEC_FILE)
+    default_spec = ctx.target_root / (_declared_spec or DEFAULT_SPEC_FILE)
     _spec_label = str(_declared_spec or DEFAULT_SPEC_FILE)
 
     @tool(
@@ -708,10 +708,10 @@ def build_tools(ctx: ToolContext) -> list:
         live_default = f"{live_default.rstrip('/')}/openapi.json" if live_default else DEFAULT_LIVE_SPEC_URL
         ref_b = str(args.get("spec_b") or live_default)
 
-        doc_a, problem = _read_spec(ref_a, ctx.repo_root)
+        doc_a, problem = _read_spec(ref_a, ctx.target_root)
         if problem:
             return err(f"Could not load spec_a: {problem}")
-        doc_b, problem = _read_spec(ref_b, ctx.repo_root)
+        doc_b, problem = _read_spec(ref_b, ctx.target_root)
         if problem:
             hint = (
                 " The target app does not appear to be running. Start it with env_control.spin_up, "
@@ -804,10 +804,10 @@ def build_tools(ctx: ToolContext) -> list:
         if not path.startswith("/"):
             return err(f"'{args['endpoint']}' does not name a path. Use 'GET /v1/orders' or '/v1/orders'.")
 
-        root = ctx.repo_root
+        root = ctx.target_root
         if args.get("root"):
-            candidate = (ctx.repo_root / str(args["root"])).resolve()
-            if not candidate.is_relative_to(ctx.repo_root.resolve()):
+            candidate = (ctx.target_root / str(args["root"])).resolve()
+            if not candidate.is_relative_to(ctx.target_root.resolve()):
                 return err("root must stay inside the repository.")
             if not candidate.exists():
                 return err(f"No such directory: {candidate}.")
@@ -825,7 +825,7 @@ def build_tools(ctx: ToolContext) -> list:
             for number, line in enumerate(text.splitlines(), start=1):
                 if any(term in line for term in terms):
                     hits.append({
-                        "file": str(file.relative_to(ctx.repo_root)) if file.is_relative_to(ctx.repo_root) else str(file),
+                        "file": str(file.relative_to(ctx.target_root)) if file.is_relative_to(ctx.target_root) else str(file),
                         "line": number,
                         "text": line.strip()[:200],
                     })
@@ -864,7 +864,7 @@ def build_tools(ctx: ToolContext) -> list:
     )
     async def generate_contract_test(args: dict[str, Any]) -> dict[str, Any]:
         ref = str(args.get("spec") or default_spec)
-        doc, problem = _read_spec(ref, ctx.repo_root)
+        doc, problem = _read_spec(ref, ctx.target_root)
         if problem:
             return err(f"Could not load the spec: {problem}")
         assert doc is not None

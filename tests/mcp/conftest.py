@@ -27,6 +27,12 @@ from qaas.store import RunStore, SystemMapStore
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONFIG = load_config(search=CONFIG_SEARCH)
 
+#: The application under test, which is what a ToolContext is anchored on. Not
+#: the qaas checkout: `ToolContext.target_root` means the target, and pointing
+#: it at REPO_ROOT here would let the whole suite pass while every write-path
+#: sandbox resolved one directory too high.
+TARGET_ROOT = _CONFIG.target_root(base=REPO_ROOT)
+
 
 def is_error(result: dict[str, Any]) -> bool:
     """Whether a tool result is a refusal. Tools return errors, never raise."""
@@ -49,14 +55,14 @@ def make_ctx(tmp_path):
     """Build a ToolContext.
 
     Call it as `make_ctx("CLERK")` for a real configured agent, or with
-    `repo_root=` / `agent=` for a synthetic one. `root=` shares a store root
+    `target_root=` / `agent=` for a synthetic one. `root=` shares a store root
     between two contexts, which is how the cross-run persistence tests work.
     """
 
     def _make(
         agent: str = "CONDUIT",
         *,
-        repo_root: Path = REPO_ROOT,
+        target_root: Path = TARGET_ROOT,
         root: Path | None = None,
         config: SystemConfig | None = None,
     ) -> ToolContext:
@@ -69,7 +75,7 @@ def make_ctx(tmp_path):
             maps=SystemMapStore(root=store_root),
             config=config or _CONFIG,
             agent=spec,
-            repo_root=repo_root,
+            target_root=target_root,
         )
 
     return _make

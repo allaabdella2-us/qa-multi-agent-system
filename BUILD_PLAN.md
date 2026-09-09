@@ -245,6 +245,30 @@ scripted conductor, offline. Includes an AST sweep asserting every literal passe
 to `store.log()` anywhere in `src/qaas/**` is a `LedgerKind` member, so the next
 kind added cannot go missing from the readers.
 
+### Phase E — the qaas project and the target are two different roots ✅ done
+
+`Path.cwd()` was doing duty as both "where qaas lives" and "the application under
+test", through `ToolContext.repo_root` and `SystemConfig.target_app`. That is
+true of exactly one target — the bundled demo, which happens to sit inside this
+checkout — and false for every other. `ToolContext.target_root` now comes from
+`profile.root_path()`, `SystemConfig.target_app` is gone, and MENDER's
+`write_paths` are target-relative (`api/app`, not `target-app/api/app`).
+
+`qaas run --repo <path-or-url>` follows from the split: it clones into
+`.qaas/targets/<slug>`, provisions a profile through the same code path as `qaas
+init`, and then runs. It is sugar over `--target`, reuses an existing profile
+unless `--force`, and does not repoint `system.yaml`.
+
+**Verify:** `pytest` — the write-path allowlist, the SDK subprocess `cwd` and the
+forbidden-path classes are asserted against a target elsewhere on disk, with the
+process cwd deliberately somewhere else; `qaas run --repo <url> --dry-run` clones
+and renders without an API call. Two defects the split exposed and fixed:
+`forbidden_paths` globs were written `*/x/*`, so a repository's own root-level
+`.github/` matched nothing once the `target-app/` prefix went away; and target
+profiles were read from the *first* config layer with a `targets/` directory
+rather than layered by filename, so the first generated profile hid every
+hand-written one.
+
 ### Adding agents 7–15 afterwards
 A new discovery agent should be a prompt file plus a `config/agents/<NAME>.yaml` naming its allowlist — no changes to conductor, runner, or guardrails. Whether that holds is the real test of M3, so the first Phase-2 agent (VAULT) will be added as a smoke test of the extension path before this build is called done.
 

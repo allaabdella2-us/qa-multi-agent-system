@@ -25,6 +25,18 @@ def _profile(config: SystemConfig) -> TargetProfile:
     return config.profile
 
 
+def _where(config: SystemConfig) -> str:
+    """How to name the application under test to an agent.
+
+    The resolved path, not `profile.root`. An agent's process cwd *is* the
+    target root, and `root:` is spelled relative to the qaas project -- so
+    telling a run "the application at `target-app`" sent it looking for
+    `<target>/target-app`, a directory that does not exist. Resolved, the
+    sentence is true from wherever the agent happens to be standing.
+    """
+    return str(config.target_root())
+
+
 def _environment_brief(profile: TargetProfile) -> str:
     """What an agent can and cannot do to the running application."""
     env = profile.environment
@@ -97,7 +109,7 @@ def cartographer(config: SystemConfig) -> str:
         "a team from a directory name — a misrouted ticket is worse than an "
         "unassigned one."
     )
-    return f"""Map the application at `{p.root}`.
+    return f"""Map the application at `{_where(config)}` — your working directory.
 
 {p.description.strip() or "No description was supplied; work it out from the code."}
 
@@ -142,7 +154,7 @@ def conduit(config: SystemConfig, mode: str) -> str:
         if mode == "incident"
         else "Findings that survive reproduction become tickets. Hold yourself to that bar."
     )
-    return f"""Audit the API of the application at `{p.root}`.
+    return f"""Audit the API of the application at `{_where(config)}` — your working directory.
 
 Start with `get_system_map` for the route inventory. Do not rediscover it.
 
@@ -169,7 +181,7 @@ file that disagree with each other are where the defects are.
 def surface(config: SystemConfig, mode: str) -> str:
     p = _profile(config)
     if not p.environment.is_reachable or not p.environment.web_url:
-        return f"""There is no running UI for the application at `{p.root}`, so there is
+        return f"""There is no running UI for the application at `{_where(config)}`, so there is
 nothing for you to explore.
 
 Report that in your final message and stop. Do not substitute reading the
@@ -229,7 +241,7 @@ def forge(envelope: DefectEnvelope, config: SystemConfig, flake_runs: int) -> st
   evidence:
 {evidence or "  (none attached)"}
 
-The application is at `{p.root}`. {pinning}
+The application is at `{_where(config)}`, which is your working directory. {pinning}
 
 Find the shortest path that makes the defect appear. Write a failing test for it
 under `qa/repro/` on a `qa/repro/*` branch, and run it {flake_runs} times with
@@ -305,7 +317,7 @@ def mender(
     config: SystemConfig | None = None,
 ) -> str:
     """The fix task. MENDER is Phase 3; the conductor's loop calls this once it exists."""
-    where = f"the application at `{config.profile.root}`" if config and config.profile else "the target application"
+    where = f"the application at `{_where(config)}`" if config and config.profile else "the target application"
     detail = ""
     if envelope:
         steps = "\n".join(f"    {i}. {s}" for i, s in enumerate(envelope.reproduction.steps, 1))

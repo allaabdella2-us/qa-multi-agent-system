@@ -53,9 +53,9 @@ def _profile(**over) -> TargetProfile:
 class _Ctx:
     """The two attributes these resolvers touch."""
 
-    def __init__(self, profile, target_app=Path("/srv/acme")):
-        self.config = type("Cfg", (), {"profile": profile, "target_app": str(target_app)})()
-        self.target_app = target_app
+    def __init__(self, profile, target_root=Path("/srv/acme")):
+        self.config = type("Cfg", (), {"profile": profile})()
+        self.target_root = target_root
 
 
 # -- environment ------------------------------------------------------------
@@ -136,7 +136,7 @@ def test_the_spec_path_comes_from_layout_spec(tmp_path):
     """contract_diff hardcoded `<target>/openapi.yaml` while `layout.spec`
     existed and was ignored."""
     src = (Path(contract_diff.__file__)).read_text()
-    assert 'ctx.target_app / (_declared_spec or DEFAULT_SPEC_FILE)' in src, (
+    assert 'ctx.target_root / (_declared_spec or DEFAULT_SPEC_FILE)' in src, (
         "contract_diff no longer resolves its spec through the profile"
     )
 

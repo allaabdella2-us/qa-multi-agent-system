@@ -352,7 +352,7 @@ def make_ctx(agent: AgentSpec, repo: Path, tmp_path: Path) -> ToolContext:
         maps=SystemMapStore(root),
         config=config,
         agent=agent,
-        repo_root=repo,
+        target_root=repo,
     )
 
 

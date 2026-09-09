@@ -299,7 +299,7 @@ def _context(tmp_path, cfg, name="FORGE") -> ToolContext:
 
     store = RunStore("run-task-0001", tmp_path)
     return ToolContext(store=store, maps=SystemMapStore(tmp_path), config=cfg,
-                       agent=cfg.agents[name], repo_root=REPO)
+                       agent=cfg.agents[name], target_root=REPO)
 
 
 def test_the_task_an_agent_received_is_recoverable(tmp_path):
@@ -362,10 +362,11 @@ def test_run_started_pins_the_run_to_a_commit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(conductor_mod, "run_agent", fake_run_agent)
     cfg = load_config(search=CONFIG_SEARCH)
-    report = asyncio.run(Conductor(cfg, repo_root=REPO, root=tmp_path).run("pr-check"))
+    report = asyncio.run(Conductor(cfg, target_root=REPO, root=tmp_path).run("pr-check"))
 
     started = next(iter(RunStore(report.run_id, tmp_path).ledger("run_started")))
-    assert started.detail["target_root"].endswith(cfg.target_app)
+    # `cfg.target_app` is gone: the target root is the profile's, resolved once.
+    assert Path(started.detail["target_root"]) == Path(REPO)
     assert started.detail["target_sha"] == _git(REPO, "rev-parse", "HEAD").strip()
     assert started.detail["target_dirty"] in (True, False)
 

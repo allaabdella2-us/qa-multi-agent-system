@@ -83,7 +83,7 @@ def test_the_server_exposes_the_tools_architecture_5_2_names(make_ctx):
 @pytest.mark.parametrize("name", sorted(ALL_CALLS))
 async def test_every_tool_refuses_cleanly_when_there_is_no_compose_file(make_ctx, tmp_path, name):
     """An empty repo root: no target-app, therefore no environment to control."""
-    tools = handlers(build_tools(make_ctx("SURFACE", repo_root=tmp_path)))
+    tools = handlers(build_tools(make_ctx("SURFACE", target_root=tmp_path)))
     result = await tools[name](ALL_CALLS[name])
     assert is_error(result)
     assert "compose" in text_of(result)

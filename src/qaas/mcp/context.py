@@ -24,17 +24,21 @@ class ToolContext:
     maps: SystemMapStore
     config: SystemConfig
     agent: AgentSpec
-    repo_root: Path
+
+    #: The application under test, on disk. Named `repo_root` once, and that
+    #: name was the bug: it read as "the qaas checkout", it was filled with
+    #: `Path.cwd()`, and every consumer -- the write-path allowlist, the test
+    #: runner's cwd, the vcs sandbox, the SDK subprocess cwd -- actually wanted
+    #: the target. That only coincided while the target sat inside the qaas
+    #: checkout, which is true of the bundled demo and of nothing else.
+    #: Comes from `SystemConfig.target_root()`, i.e. the profile.
+    target_root: Path
     map_version: str | None = None
     counters: dict[str, int] = field(default_factory=dict)
 
     #: Files this agent has modified in this invocation. Backs the §8.2 diff
     #: budget, which is counted per distinct file rather than per tool call.
     touched_files: set[str] = field(default_factory=set)
-
-    @property
-    def target_app(self) -> Path:
-        return self.repo_root / self.config.target_app
 
     def bump(self, key: str) -> int:
         self.counters[key] = self.counters.get(key, 0) + 1

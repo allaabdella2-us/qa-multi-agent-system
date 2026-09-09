@@ -35,7 +35,7 @@ def wire(cfg, tmp_path):
     def build(agent_name: str):
         ctx = ToolContext(
             store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
-            config=cfg, agent=cfg.agents[agent_name], repo_root=REPO,
+            config=cfg, agent=cfg.agents[agent_name], target_root=REPO,
         )
         record = TurnRecord()
         return ctx, record, build_hooks(Guardrail(ctx), ctx, record)

@@ -154,14 +154,17 @@ class Conductor:
     def __init__(
         self,
         config: SystemConfig,
-        repo_root: Path,
+        target_root: Path | None = None,
         *,
         root: Path | str = ".qaas",
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         tickets: list[str] | None = None,
     ):
         self.config = config
-        self.repo_root = repo_root
+        #: The application under test. Defaults to whatever the active profile
+        #: says, which is the answer every caller wants; an explicit path is for
+        #: tests and for a run pointed at a clone that has no profile yet.
+        self.target_root = Path(target_root) if target_root is not None else config.target_root()
         self.maps = SystemMapStore(root)
         self.root = Path(root)
         self.on_event = on_event
@@ -173,14 +176,14 @@ class Conductor:
     def _target_root(self) -> Path | None:
         """The checkout under examination, or None when nothing is configured.
 
-        Deliberately the same expression `ToolContext.target_app` uses, so the
-        commit recorded in the ledger is the commit the agents' tools were
-        pointed at. `config.target_app` is `profile.root`, and `Path.__truediv__`
-        keeps an absolute right-hand side, so both spellings of `root` land in
-        the same place.
+        Deliberately the same value the agents' tools are pointed at, so the
+        commit recorded in the ledger is the commit they actually read. This
+        used to compute `self.repo_root / config.target_app`; both of those are
+        gone -- `repo_root` conflated the qaas project with the target, and
+        `target_app` was the demo-shaped default that made the conflation look
+        like it worked.
         """
-        target = getattr(self.config, "target_app", None)
-        return self.repo_root / target if target else None
+        return self.target_root
 
     def _emit(self, kind: str, **detail: Any) -> None:
         if self.on_event:
@@ -192,7 +195,7 @@ class Conductor:
             maps=self.maps,
             config=self.config,
             agent=spec,
-            repo_root=self.repo_root,
+            target_root=self.target_root,
             map_version=map_version,
         )
 
@@ -521,4 +524,4 @@ class Conductor:
 
 def build(config_dir: Path | str = "config", root: Path | str = ".qaas") -> Conductor:
     config = load_config(config_dir)
-    return Conductor(config, repo_root=Path.cwd(), root=root)
+    return Conductor(config, root=root)

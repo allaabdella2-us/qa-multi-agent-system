@@ -17,6 +17,13 @@ from qaas.store import RunStore, SystemMapStore
 
 REPO = Path(__file__).resolve().parents[1]
 
+#: What a guardrail is anchored on: the application under test, never the qaas
+#: checkout. These used to pass `REPO` and paths like
+#: `target-app/api/app/routes/orders.py`, which held only because the demo lives
+#: inside this repository. Every path below is now target-relative, which is
+#: what an agent actually types and what a policy's `write_paths` mean.
+TARGET = REPO / "target-app"
+
 
 @pytest.fixture
 def guard_for(tmp_path):
@@ -28,7 +35,7 @@ def guard_for(tmp_path):
             maps=SystemMapStore(tmp_path),
             config=cfg,
             agent=cfg.agents[agent_name],
-            repo_root=REPO,
+            target_root=TARGET,
         )
         return Guardrail(ctx)
 
@@ -52,7 +59,7 @@ def test_every_agent_may_read_what_it_declared(guard_for, agent):
 @pytest.mark.parametrize("agent", ["CARTOGRAPHER", "CONDUIT", "SURFACE"])
 def test_discovery_agents_cannot_write_anywhere(guard_for, agent):
     g = guard_for(agent)
-    d = g.check("Write", {"file_path": "target-app/api/app/routes/orders.py", "content": "x"})
+    d = g.check("Write", {"file_path": "api/app/routes/orders.py", "content": "x"})
     assert not d.allowed
 
 
@@ -72,7 +79,7 @@ def test_forge_may_write_inside_its_sandbox(guard_for):
 
 def test_forge_may_not_write_to_product_code(guard_for):
     d = guard_for("FORGE").check(
-        "Write", {"file_path": "target-app/api/app/routes/orders.py", "content": "..."}
+        "Write", {"file_path": "api/app/routes/orders.py", "content": "..."}
     )
     assert not d.allowed and "outside" in d.reason
 
@@ -147,7 +154,7 @@ def test_protected_test_file_cannot_be_rewritten_through_the_shell(tmp_path):
     spec.policy.protected_paths = ["qa/repro/test_defining.py"]
     ctx = ToolContext(
         store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
-        config=cfg, agent=spec, repo_root=REPO,
+        config=cfg, agent=spec, target_root=TARGET,
     )
     g = Guardrail(ctx)
     assert not g.check("Bash", {"command": "echo pass > qa/repro/test_defining.py"}).allowed
@@ -269,7 +276,7 @@ def test_the_registry_wires_the_hook_to_pretooluse(tmp_path):
     cfg = load_config(search=CONFIG_SEARCH)
     ctx = ToolContext(
         store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
-        config=cfg, agent=cfg.agents["FORGE"], repo_root=REPO,
+        config=cfg, agent=cfg.agents["FORGE"], target_root=TARGET,
     )
     guard = Guardrail(ctx)
     hooks = build_hooks(guard, ctx)
@@ -285,19 +292,19 @@ def test_the_registry_wires_the_hook_to_pretooluse(tmp_path):
 
 def test_mender_may_fix_ordinary_product_code(guard_for):
     assert guard_for("MENDER").check(
-        "Write", {"file_path": "target-app/api/app/routes/orders.py", "content": "..."}
+        "Write", {"file_path": "api/app/routes/orders.py", "content": "..."}
     ).allowed
 
 
 @pytest.mark.parametrize(
     "path,expected",
     [
-        ("target-app/api/migrations/002_add_index.sql", "migration"),
-        ("target-app/api/app/auth.py", "authentication"),
-        ("target-app/api/app/routes/payments.py", "payment"),
-        ("target-app/infra/main.tf", "infrastructure"),
-        ("target-app/docker-compose.yml", "container"),
-        ("target-app/.github/workflows/ci.yml", "CI"),
+        ("api/migrations/002_add_index.sql", "migration"),
+        ("api/app/auth.py", "authentication"),
+        ("api/app/routes/payments.py", "payment"),
+        ("infra/main.tf", "infrastructure"),
+        ("docker-compose.yml", "container"),
+        (".github/workflows/ci.yml", "CI"),
     ],
 )
 def test_forbidden_classes_stop_at_a_human(guard_for, path, expected):
@@ -316,7 +323,7 @@ def test_the_defining_test_cannot_be_edited_by_the_fixer(tmp_path):
     spec.policy.protected_paths = ["qa/repro/test_orders_limit.py"]
     ctx = ToolContext(
         store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
-        config=cfg, agent=spec, repo_root=REPO,
+        config=cfg, agent=spec, target_root=TARGET,
     )
     d = Guardrail(ctx).check(
         "Write", {"file_path": "qa/repro/test_orders_limit.py", "content": "assert True"}
@@ -331,7 +338,7 @@ def test_the_diff_budget_is_counted_per_file_not_per_edit(guard_for):
     g = guard_for("MENDER")
     for _ in range(6):
         assert g.check(
-            "Edit", {"file_path": "target-app/api/app/routes/orders.py",
+            "Edit", {"file_path": "api/app/routes/orders.py",
                      "old_string": "a", "new_string": "b"}
         ).allowed
 
@@ -343,10 +350,10 @@ def test_a_fix_wider_than_the_envelope_is_refused_with_what_it_touched(guard_for
 
     for i in range(limit):
         assert g.check(
-            "Write", {"file_path": f"target-app/api/app/mod_{i}.py", "content": "..."}
+            "Write", {"file_path": f"api/app/mod_{i}.py", "content": "..."}
         ).allowed, f"file {i} should be within budget"
 
-    d = g.check("Write", {"file_path": "target-app/api/app/one_too_many.py", "content": "..."})
+    d = g.check("Write", {"file_path": "api/app/one_too_many.py", "content": "..."})
     assert not d.allowed
     assert str(limit) in d.reason
     assert "mod_0.py" in d.reason, "the refusal should say what it already touched"
@@ -355,7 +362,7 @@ def test_a_fix_wider_than_the_envelope_is_refused_with_what_it_touched(guard_for
 def test_arbiter_cannot_write_anything_at_all(guard_for):
     """The reviewer having no write access is the whole point of the separation."""
     g = guard_for("ARBITER")
-    assert not g.check("Write", {"file_path": "target-app/api/app/routes/orders.py"}).allowed
+    assert not g.check("Write", {"file_path": "api/app/routes/orders.py"}).allowed
     assert not g.check("Bash", {"command": "git commit -m x"}).allowed
 
 
@@ -372,3 +379,117 @@ def test_nothing_in_the_system_can_merge(guard_for):
         g = guard_for(agent)
         assert not g.check("Bash", {"command": "git merge fix/x"}).allowed
         assert not g.check("Bash", {"command": "gh pr merge 42 --squash"}).allowed
+
+
+# -- the sandbox is anchored on the target, not on the cwd -------------------
+#
+# Phase E split "where qaas lives" from "the application under test". Before it,
+# `ToolContext.repo_root` was filled with `Path.cwd()` and served as both, so an
+# allowlist entry like `api/app` silently meant `<the qaas checkout>/api/app`.
+# With `qaas run --repo <url>` the target is a clone under `.qaas/targets/`, and
+# an allowlist anchored on the cwd would both deny every legitimate write and
+# permit a sandbox sitting inside qaas's own source. These fail loudly if that
+# coupling ever comes back.
+
+
+def _mender_guard(tmp_path: Path, target_root: Path) -> Guardrail:
+    cfg = load_config(search=CONFIG_SEARCH)
+    return Guardrail(
+        ToolContext(
+            store=RunStore.new(root=tmp_path / "state"),
+            maps=SystemMapStore(tmp_path / "state"),
+            config=cfg,
+            agent=cfg.agents["MENDER"],
+            target_root=target_root,
+        )
+    )
+
+
+def test_the_write_sandbox_follows_the_target_not_the_process_cwd(tmp_path, monkeypatch):
+    """One policy, two targets: each sandbox resolves under its own target."""
+    one, two = tmp_path / "clone-one", tmp_path / "clone-two"
+    for root in (one, two):
+        (root / "api" / "app").mkdir(parents=True)
+
+    monkeypatch.chdir(tmp_path)  # a cwd that is neither target
+    g_one, g_two = _mender_guard(tmp_path, one), _mender_guard(tmp_path, two)
+
+    assert (g_one.root, g_two.root) == (one.resolve(), two.resolve())
+    assert g_one.check("Write", {"file_path": "api/app/x.py", "content": "..."}).allowed
+    assert g_two.check("Write", {"file_path": "api/app/x.py", "content": "..."}).allowed
+
+    # An absolute path into the *other* target is outside this agent's sandbox,
+    # even though the relative spelling is identical.
+    d = g_one.check("Write", {"file_path": str(two / "api" / "app" / "x.py"), "content": "..."})
+    assert not d.allowed and "outside" in d.reason
+
+
+def test_an_agent_cannot_write_into_the_qaas_checkout(tmp_path, monkeypatch):
+    """The sharp edge: qaas's own source must not be reachable from a run.
+
+    A target elsewhere on disk puts the qaas project outside the sandbox by
+    construction. If `target_root` went back to being the cwd, `src/qaas/` would
+    be one relative path away from the one agent that may write product code.
+    """
+    target = tmp_path / "clone"
+    (target / "api" / "app").mkdir(parents=True)
+    monkeypatch.chdir(REPO)
+
+    g = _mender_guard(tmp_path, target)
+
+    # Directly on the anchoring, not only on its consequences: every sandbox
+    # this agent has must live under the target, and none of them anywhere near
+    # the qaas checkout the process is standing in.
+    assert g.root == target.resolve()
+    assert g._allowed_roots, "MENDER must have somewhere to write"
+    for sandbox in g._allowed_roots:
+        assert sandbox.is_relative_to(target.resolve()), sandbox
+        assert not sandbox.is_relative_to(REPO), f"{sandbox} is inside the qaas checkout"
+
+    for path in (
+        str(REPO / "src" / "qaas" / "guardrails.py"),
+        str(REPO / "src" / "qaas" / "defaults" / "config" / "agents" / "mender.yaml"),
+        "../../src/qaas/guardrails.py",
+    ):
+        assert not g.check("Write", {"file_path": path, "content": "..."}).allowed, (
+            f"{path} was writable from a run against {target}"
+        )
+
+
+def test_a_forbidden_class_at_the_root_of_a_target_is_still_refused(tmp_path):
+    """`.github/` sits at a repository's root, which is exactly where these globs
+    used to miss it: paths arrived prefixed with `target-app/`, so `*/.github/*`
+    matched, and the day the prefix went away it silently stopped matching."""
+    target = tmp_path / "clone"
+    target.mkdir()
+    g = _mender_guard(tmp_path, target)
+    for path in (
+        ".github/workflows/ci.yml",
+        "migrations/001_add_index.sql",
+        "infra/main.tf",
+        "docker-compose.yml",
+    ):
+        d = g.check("Write", {"file_path": path, "content": "..."})
+        assert not d.allowed, f"{path} was not caught by a forbidden class"
+        assert "escalate" in d.reason.lower(), f"{path}: a refusal must say what to do instead"
+
+
+def test_the_sdk_subprocess_is_started_in_the_target(tmp_path):
+    """`registry` hands `cwd` to the SDK. It is the target, and it travels with
+    `setting_sources=[]` -- a cloned repository's `.claude/settings.json` must
+    never load into a process holding this system's credentials."""
+    from qaas.registry import build_options
+
+    cfg = load_config(search=CONFIG_SEARCH)
+    target = tmp_path / "clone"
+    target.mkdir()
+    ctx = ToolContext(
+        store=RunStore.new(root=tmp_path / "state"),
+        maps=SystemMapStore(tmp_path / "state"),
+        config=cfg,
+        agent=cfg.agents["CONDUIT"],
+        target_root=target,
+    )
+    options = build_options(cfg.agents["CONDUIT"], ctx)
+    assert options.cwd == str(target)
+    assert options.setting_sources == []

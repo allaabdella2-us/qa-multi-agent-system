@@ -89,7 +89,7 @@ def ctx(project: Path, tmp_path: Path) -> ToolContext:
         maps=SystemMapStore(root),
         config=config,
         agent=config.agents["FORGE"],
-        repo_root=project,
+        target_root=project,
     )
 
 
