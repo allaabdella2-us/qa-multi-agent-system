@@ -1,243 +1,350 @@
-# Multi-Agent QA & Remediation System
+<div align="center">
 
-Agents that read your application, find real defects, reproduce them, and file
-tickets an engineer is glad to receive. Built to the design in
-[`qa-agent-system-architecture.md`](qa-agent-system-architecture.md).
+# 🐦‍⬛ qaas
 
-Two loops meet at the ticket tracker. A **discovery loop** finds defects across
-the API and UI surfaces and files them. A **remediation loop** picks them up,
-fixes them, and proves the fix. Nothing crosses between the loops except through
-a ticket, which is also the audit trail.
+### A multi-agent QA system that finds real defects — and proves it
 
-```
-CARTOGRAPHER ──▶ CONDUIT ─┐
-  (system map)   SURFACE ──┴──▶ FORGE ──▶ CLERK ──▶ [ticket] ──▶ PROOF
-                  (discover)   (repro)   (file)                (verify)
-```
+**Reads your application → finds defects → reproduces each with a failing test → files the ticket → fixes it → reviews the fix → verifies it.**
+
+[![PyPI](https://img.shields.io/pypi/v/qaas-python?color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/qaas-python/)
+[![Python](https://img.shields.io/pypi/pyversions/qaas-python?color=3776AB&logo=python&logoColor=white)](https://pypi.org/project/qaas-python/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![CI](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml/badge.svg)](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-649%20offline-success)](#-contributing)
+[![Built on](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-D97757)](https://docs.claude.com/en/api/agent-sdk/overview)
+
+[Quickstart](#-quickstart-in-60-seconds) · [What it costs](#-what-it-costs) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Architecture](ARCHITECTURE.md)
+
+</div>
 
 ---
 
-## Running it on your own repository
+Most "AI QA" tools generate tests. **This one behaves like a QA team.**
 
-### 1. Install
+Eight agents, each with its own context, tool allowlist and budget, coordinated by
+a state machine that is ordinary Python — because a model cannot enforce a budget
+it is itself spending.
 
-```bash
-uv venv && uv pip install -e .
-npx playwright install chromium                       # only if you want UI checks
-npx @playwright/mcp@latest install-browser chrome-for-testing
+```
+      DISCOVERY LOOP                                   REMEDIATION LOOP
+ ┌──────────────────────────────────────┐        ┌───────────────────────────┐
+ │  CARTOGRAPHER ─▶ CONDUIT ─┐          │        │   MENDER ─▶ ARBITER       │
+ │   (system map)   SURFACE ─┴─▶ FORGE ─┼─▶ CLERK│    (fix)     (review)     │
+ │                 (discover)   (repro) │  (file)│                           │
+ └──────────────────────────────┬───────┘        └──────────┬────────────────┘
+                                │                           │
+                                ▼                           ▼
+                           [ TICKET ] ◀──────────────  PROOF (verify)
 ```
 
-Authentication comes from the Claude Code CLI if you are logged in
-(`claude` in your PATH), or from `ANTHROPIC_API_KEY`.
+Nothing crosses between the loops except a ticket — which is also the audit trail.
 
-### 2. Point it at your repository
+---
+
+## ✨ Why this one is different
+
+| | |
+|---|---|
+| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `conductor.py`. That is also why **649 tests run offline, free, with no API key.** |
+| 🧱 **Every agent is its own `query()`** | Not subagents of a shared parent. Each gets a real context boundary, an enforceable tool allowlist, and its own cost number. |
+| 🔬 **Evidence or it did not happen** | `has_evidence()` and `is_fileable()` are methods on the envelope model, not requests in a prompt. An agent cannot talk its way past them. |
+| 📊 **Measured, not asserted** | A deliberately buggy demo app ships with a golden ledger of **16 seeded defects + 4 planted non-defects**. `qaas score` reports recall *and* precision, so a prompt change has a number attached. |
+| 🔒 **Merge is impossible by construction** | No merge method exists anywhere. `gh pr merge` is refused. Pull requests open as drafts. Shipping stays a human decision. |
+| 🔍 **Every action is on the record** | 28 kinds of ledger event — every tool call, denial, verdict and escalation. `qaas trace` reads it back as a timeline. |
+
+---
+
+## 🚀 Quickstart in 60 seconds
 
 ```bash
-qaas init https://github.com/you/your-app          # or a local path
-qaas init ~/code/your-app --name your-app
+pip install qaas-python
 ```
-
-This inspects the repository and writes `.qaas/config/targets/your-app.yaml`.
-Every value in it is a **guess you are expected to correct** — it reports what it
-detected and what it could not find. Nothing runs and nothing is called yet.
-A git URL is cloned into `.qaas/targets/<name>/`, never into your own tree.
-
-In a hurry, `qaas run --repo` does both steps at once — it provisions the
-profile if there is not one already and then runs against it:
 
 ```bash
-qaas run --mode pr-check --repo https://github.com/you/your-app --dry-run
+cd ~/code/your-app
+qaas init .                          # inspects the repo, writes + activates a target profile
+qaas validate                        # config, prompts, allowlists      ← no API call
+qaas run --mode pr-check --dry-run   # every agent's exact options      ← no API call
 ```
 
-It reuses an existing profile rather than overwriting one you have corrected;
-pass `--force` to regenerate. It does not change which target is active by
-default — that stays a decision you make in `system.yaml` or with `qaas init`.
+Or point it straight at a URL:
 
-### 3. Tell it how to reach your app
+```bash
+qaas run --repo https://github.com/you/your-app --dry-run
+```
 
-Edit the profile. The `environment.mode` field is the important decision:
+> [!TIP]
+> Nothing above contacts an API. `--dry-run` prints exactly what each agent would
+> receive — model, budget, turn cap, tool allowlist, prompt size.
 
-| mode | what it means | what agents can do |
+**Auth:** the Claude Code CLI if you are signed in, otherwise `ANTHROPIC_API_KEY`.
+
+---
+
+## 💰 What it costs
+
+> [!IMPORTANT]
+> **Real runs spend real money.** Read this before your first one.
+
+Median cost per dispatch, **measured** across real runs — not estimated:
+
+| agent | median | what you get |
+|---|--:|---|
+| 🖱️ `SURFACE` | **$3.34** | broken flows, console errors, a11y, forms |
+| 🔧 `MENDER` | **$2.03** | the minimal fix, on a branch |
+| 🔌 `CONDUIT` | **$1.97** | API contract, authz and error-shape defects |
+| 🔨 `FORGE` | **$1.61** | a minimal repro + failing test — **per finding** |
+| ✅ `PROOF` / ⚖️ `ARBITER` | ~$1.00 | verification and adversarial review |
+| 📝 `CLERK` / 🗺️ `CARTOGRAPHER` | ~$0.70 | filing, and the map everything reads |
+
+A full discovery run over the demo app found **13 of 16** seeded defects for
+about **$15**. A `fix-cycle` pass costs **$5–7**.
+
+> `FORGE` runs **once per finding** in a fresh context, so cost scales with what
+> was found, not with how many agents exist.
+
+**The controls are real, not advisory:**
+
+- `max_budget_usd` per agent *and* per run mode; the governor checks before every dispatch and **stops the run** rather than overspending.
+- The cap survives a resume — `qaas run --run-id <existing>` carries forward what that run already spent.
+- `qaas validate` refuses a run mode whose agents could outspend its cap.
+- `--dry-run` on everything.
+
+---
+
+## 🎯 Point it at your repository
+
+```bash
+qaas init https://github.com/you/your-app     # clones, inspects, writes a profile
+qaas init ~/code/your-app --name your-app     # or a local path
+```
+
+`init` writes `.qaas/config/targets/<name>.yaml` **and activates it**. Every value
+in it is a **guess you are expected to correct** — it reports what it detected and
+what it could not find.
+
+The load-bearing field is `environment.mode`:
+
+| mode | meaning | what agents may do |
 |---|---|---|
-| `none` | no running instance | read code, schema and spec only |
-| `external` | already running (staging, a dev server) | read and exercise it, never reset it |
-| `compose` | this system owns the lifecycle | seed, reset, tear down |
+| 🔵 `none` | no running instance | read code, schema and spec only |
+| 🟡 `external` | already running (staging, dev server) | read and exercise, **never** reset |
+| 🟢 `compose` | qaas owns the lifecycle | seed, reset, tear down |
 
-`none` is a perfectly good place to start, and is where most first runs against a
-real repository begin. Findings are honest about it: an agent that could not
-observe a behaviour says so and lowers its confidence.
+> [!NOTE]
+> `none` is a perfectly good place to start, and where most first runs against a
+> real repository begin. Findings stay honest about it: an agent that could not
+> observe a behaviour says so and lowers its confidence.
+
+**Credentials never live in the profile.** It names environment variables:
 
 ```yaml
-environment:
-  mode: external
-  api_url: https://staging-api.your-app.com
-  web_url: https://staging.your-app.com
-  health_path: /healthz
-
 auth:
   mode: login
-  login_endpoint: POST /api/v1/login
-  username_field: email
-  token_path: access_token
+  login_endpoint: POST /api/v1/session
   roles:
-    admin:  { username: qa-admin@your-app.com,  password_env: QAAS_PASSWORD }
-    viewer: { username: qa-viewer@your-app.com, password_env: QAAS_PASSWORD }
+    admin:  { username: qa-admin@example.com,  password_env: APP_ADMIN_PASSWORD }
+    viewer: { username: qa-viewer@example.com, password_env: APP_VIEWER_PASSWORD }
 ```
-
-**Credentials never go in this file.** It names environment variables; you export
-the secrets. Use dedicated QA accounts on a non-production environment.
-
-### 4. Check and run
-
-```bash
-export QAAS_PASSWORD=...
-qaas doctor --target your-app        # what is possible, and what is missing
-qaas run --mode pr-check --target your-app --dry-run
-qaas run --mode pr-check --target your-app
-qaas show <run-id>                   # findings, cost, tickets, escalations
-qaas trace <run-id>                  # the whole ledger as a timeline
-```
-
-`doctor` tells you which agents can do useful work against this target and which
-cannot — SURFACE with no reachable UI has nothing to do, and says so rather than
-substituting a weaker static read.
 
 ---
 
-## Filing into real Jira and GitHub
-
-Both are behind adapters, off by default. In `config/system.yaml`:
-
-```yaml
-tracker: jira      # local | jira
-vcs: github        # local | github
-```
-
-**Jira Cloud** reads from the environment, and fails at startup rather than
-halfway through a run:
+## 🎫 File into Jira
 
 ```bash
 export JIRA_BASE_URL=https://you.atlassian.net
 export JIRA_EMAIL=you@example.com
-export JIRA_API_TOKEN=...            # id.atlassian.com/manage-profile/security/api-tokens
-export JIRA_PROJECT_KEY=ENG
-export JIRA_SECURITY_PROJECT_KEY=SEC # without this, security findings are REFUSED, never filed publicly
+export JIRA_API_TOKEN=...            # an API token, not a password
+export JIRA_PROJECT_KEY=QA
+
+QAAS_TRACKER=jira qaas tracker-check  # auth, project, permissions, workflow — creates nothing
+QAAS_TRACKER=jira qaas run --mode nightly
 ```
 
-**GitHub** uses the `gh` CLI, so it reuses your existing login — no token
-handling. Run `gh auth login` once. There is no merge path anywhere in the
-system, and force-push does not exist as a parameter: merge is always a human
-decision.
+`tracker-check` validates credentials, confirms the project and issue type exist,
+maps your workflow statuses, and prints the exact JSON it *would* POST. **It
+creates nothing.**
 
-Before the first live run, check the configuration without filing anything:
+- 🔁 **Dedupe across runs** — tickets carry a `qaas-fp-<fingerprint>` label, so the next run recognises an already-filed defect and increments its occurrence count instead of filing again.
+- 🔐 **Security findings are refused** unless `JIRA_SECURITY_PROJECT_KEY` is set. A vulnerability in a project the whole company can read is a disclosure with no undo.
 
-```bash
-qaas tracker-check                    # auth, projects, permissions, workflow — read-only
-qaas tracker-check --dry-run-ticket   # the exact JSON that would be POSTed
-```
-
-Then rehearse a whole run with `QAAS_TRACKER_DRY_RUN=1`, which makes every
-tracker write log what it would have done and send nothing.
-
-Start with `tracker: local`. It writes tickets as JSON under `.qaas/tickets/`, so
-you can read what the system would have filed before it files anything into a
-project real people watch.
-
-**[docs/jira-setup.md](docs/jira-setup.md)** is the full walkthrough: minting the
-token, the four project permissions, every environment variable, what the
-tickets and their labels look like, how the fingerprint label dedupes across
-runs, and a troubleshooting table keyed by the errors this adapter actually
-produces. Jira Server / Data Center is not supported, and that page says why.
+> [!TIP]
+> Keep the committed backend `local` — it writes tickets as JSON under
+> `.qaas/tickets/` so you can read what *would* be filed. Switch per shell with
+> `QAAS_TRACKER=jira`.
 
 ---
 
-## What it costs
+## 🔌 Bring your own MCP servers
 
-Measured against a small app, per run:
+Declare them in `system.yaml`. No Python to edit.
 
-| agent | typical cost | what you get |
-|---|---|---|
-| CARTOGRAPHER | $0.50–0.65 | the system map everything else reads |
-| CONDUIT | $2 | API, contract, authorization and error-handling defects |
-| SURFACE | $3–4 | broken flows, console errors, accessibility, forms |
-| FORGE | $1–2 **per finding** | a minimal reproduction and a failing test |
-| CLERK | $0.70 | deduped, routed, written tickets |
+```yaml
+mcp_servers:
+  house-lint:
+    type: stdio
+    command: ./tools/lint-mcp
+    args: ["--strict"]
+    env: { LINT_TOKEN: "${ACME_LINT_TOKEN}" }   # from the environment, never a literal
+  remote-docs:
+    type: http
+    url: https://mcp.example/v1
+```
 
-A full nightly on a small app runs about $7–15. FORGE dominates on a
-finding-heavy run because it is invoked once per finding — budget accordingly.
-Every mode has a hard spend and wall-clock cap enforced in code, and the run
-stops and escalates rather than overrunning.
+Then add the name to any agent's `mcp_servers:` list. **Declaring a server grants
+nothing** — an agent receives it only by naming it.
+
+```console
+$ qaas validate
+                       Declared MCP servers
+┃ name        ┃ kind  ┃ what it runs              ┃ used by      ┃
+│ house-lint  │ stdio │ ./tools/lint-mcp --strict │ CARTOGRAPHER │
+│ remote-docs │ http  │ https://mcp.example/v1    │ nobody       │
+```
+
+> [!WARNING]
+> A server's tools are allowed **wholesale** once an agent names it. qaas checks
+> that the agent declared the server; it cannot inspect what a third-party
+> server's tools actually do. **A server you declare is a server you trust.**
+
+There is deliberately **no in-process Python server type** — a module path from a
+config file would mean importing arbitrary code into the process holding your
+Anthropic, Jira and GitHub credentials. Wrap it in a stdio entry point instead.
+
+Two limits worth knowing: **6 MCP servers per agent** (tool-selection accuracy
+falls off past ~7), and **MENDER is already at the cap** — the agent people most
+want to extend.
 
 ---
 
-## The controls that matter
+## ✏️ Make the prompts yours
 
-Read §8 of the architecture document for the full picture. The short version:
+Agents are **a prompt plus a YAML file**. Both are yours to change.
 
-- **The finder never fixes, and never certifies its own finding.** A discovery
-  agent cannot mark its own defect reproduced — FORGE decides independently.
-- **Write access is per agent, per resource**, enforced in a `PreToolUse` hook
-  rather than requested in a prompt. Discovery agents cannot write at all; FORGE
-  writes only under `qa/repro/` on `qa/repro/*` branches; only CLERK files.
-- **Evidence or it did not happen.** A finding with no artifact and no failing
-  test cannot be filed, and confidence below 0.6 goes to a human queue.
-- **Security findings never reach a public project.** If no restricted project is
-  configured, the filing is refused rather than downgraded.
-- **Every run is capped** on spend, wall-clock, findings per agent and tickets
-  per run. Hitting a cap escalates; it does not quietly continue.
-- Every tool call, denial and escalation lands in `.qaas/runs/<id>/ledger.jsonl`.
+```bash
+qaas prompts list              # which prompt is in force, and where it came from
+qaas prompts eject CONDUIT     # copy it to .qaas/prompts/ and edit freely
+qaas prompts diff              # what you changed vs. what shipped
+```
+
+Prefer **adding** to replacing — drop a `CONDUIT.append.md` beside it:
+
+```markdown
+## Our conventions
+- Never file a finding without a curl reproduction.
+- Treat any 500 on a write path as blocker severity.
+```
+
+That block is inserted between the agent's prompt and the shared house rules, so
+you keep receiving improvements to the base prompt instead of forking it forever.
 
 ---
 
-## Calibration
+## 🔍 Full traceability
 
-`target-app/` is a deliberately buggy application whose defects are recorded in
-`target-app/defects.yaml`. That makes discovery **measurable** rather than
-impressive-looking:
+Every tool call, denial, verdict and escalation is on the record.
 
-```bash
-cd target-app && docker compose up -d
-qaas run --mode nightly && qaas score
+```console
+$ qaas trace run-20260908T182034-c6ed26
+    t+  agent         kind            detail                                    cost
+    0s  -             run_started     mode=nightly  agents=[5]  budget_usd=40
+    0s  CARTOGRAPHER  agent_started   model=claude-sonnet-5
+    4s  CARTOGRAPHER  tool_call ×34   Read×25, Glob×6, ToolSearch×2
+    6s  CARTOGRAPHER  denial          tool=Bash  reason=Bash is not in CARTOGRAPHER's
+                                      tool allowlist (Read, Grep, Glob).
+  146s  CARTOGRAPHER  system_map      version=20260907T233530  sections=[12]
+  156s  CARTOGRAPHER  agent_finished  subtype=success  num_turns=45            $0.60
 ```
 
-`qaas score` reports recall, precision, false-positive rate, severity agreement
-and cost per accepted finding. Use it after changing a prompt, a threshold or a
-model — it is the only way to know whether a change helped.
+```bash
+qaas trace <run-id> --agent proof --kind verdict   # filter
+qaas trace <run-id> --json                         # export
+qaas show <run-id>                                 # mode, commit, cost, tickets, escalations
+qaas runs                                          # everything that ever ran
+```
 
-You will not have a ledger for your own application, so `score` does not apply
-there. The bar the architecture sets is **ticket acceptance rate above 70%**
-before widening scope: file into a local tracker first and read what comes out.
+Runs are pinned to the **commit of the target** they examined, so a finding can
+be replayed against the tree that produced it.
 
 ---
 
-## Development
+## 🛡️ Safety rails
+
+Enforced in code, not requested in a prompt:
+
+| rail | what it does |
+|---|---|
+| 📁 **Path scoping** | Writes checked against that agent's `write_paths`. Most agents cannot write at all. |
+| 🌿 **Branch scoping** | Git writes must match the agent's patterns (`qa/repro/*`, `fix/*`). `main` and force-push refused outright. |
+| ⛔ **Forbidden classes** | Migrations, auth, payment, secrets, infrastructure, CI — stop at a human however small the change looks. |
+| 🎟️ **Ticket rate limit** | Over the per-run cap the call is denied and the conductor escalates rather than filing. |
+| 🧪 **Immutable test** | The agent fixing a defect may not edit the test that defines it. |
+| 🚫 **No filesystem settings** | `setting_sources=[]` — a repository qaas is inspecting cannot inject settings, hooks or MCP servers into the process running it. |
+
+Denials return a reason and are logged; they never kill the turn. The agent reads
+the refusal and adapts.
+
+---
+
+## 📈 Benchmarks, honestly
+
+Against the bundled demo app and its golden ledger:
+
+| metric | value |
+|---|--:|
+| 🎯 recall | **81%** — 13 of 16 seeded defects |
+| 🔇 precision | **100%** — 0 false positives |
+| 🏷️ severity agreement | **100%** |
+| 🔁 duplicate rate | 13% |
+
+The ledger's `not_defects` section plants **correct-but-suspicious** code, so
+precision is measured rather than assumed.
+
+> [!CAUTION]
+> **Treat this as a floor, not a proof.** Seeded defects are easier than real
+> ones and the system was calibrated against them. These numbers show the loop
+> works end to end and does not spray false positives — not that it will find the
+> hard bug in your codebase.
+
+---
+
+## 📋 Status
+
+Honest about what exists:
+
+- ✅ **8 of the 16 agents** in the design are built — CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK, MENDER, ARBITER, PROOF. CONDUCTOR is the Python state machine rather than an agent. **Seven Phase-2 agents are designed, not written.**
+- ✅ The fix loop has closed end to end on a real defect: `NOT_FIXED → MENDER → ARBITER APPROVE → VERIFIED`.
+- ✅ 30 skills, 7 in-process MCP servers, 649 offline tests.
+- ⚠️ Running the bundled demo needs `export CORVID_PASSWORD=password123` — credentials come from the environment, including the demo's.
+
+---
+
+## 🤝 Contributing
 
 ```bash
-pytest                     # ~460 tests, no API calls, no network
-pytest -m docker           # needs the demo app running
-qaas validate              # config, prompts and tool allowlists
-qaas run --mode nightly --dry-run
+git clone https://github.com/allaabdella2-us/qa-multi-agent-system
+cd qa-multi-agent-system
+uv venv && uv pip install -e ".[dev]"
+
+pytest                 # 649 tests, offline, free — keep it that way
+pytest -m docker       # needs: cd target-app && docker compose up -d
+qaas validate
 ```
 
-Adding an agent is a prompt in `src/qaas/prompts/` plus a file in
-`config/agents/`. No changes to the conductor, runner or guardrails.
+The `llm`, `docker`, `github` and `jira` markers are deselected by default.
+**A CI run that costs money is a CI run people switch off.**
 
-### Changing a prompt
+> [!IMPORTANT]
+> If you change a seeded defect in `target-app/`, retire its ledger entry with
+> `fixed_in:` in the same commit — a stale ledger silently corrupts every score.
 
-Prompts ship inside the package, and editing them there is invisible to git and
-gone on the next upgrade. Override them from your project instead:
+New to the codebase? [`ARCHITECTURE.md`](ARCHITECTURE.md) explains the entry
+point, the five phases, what moves between agents, and what the guardrails stop.
 
-```bash
-qaas prompts list                # which prompt file each agent is given, and from where
-qaas prompts eject CONDUIT       # copy it to .qaas/prompts/CONDUIT.md, then edit
-qaas prompts diff                # your local edits against the bytes that shipped
-```
+---
 
-`.qaas/prompts/` beats the packaged copy, file by file: overriding `CONDUIT.md`
-keeps the house `_shared.md`, and replacing `_shared.md` keeps all eight agent
-prompts.
+<div align="center">
 
-To add a few lines rather than fork a whole file, drop a
-`.qaas/prompts/<AGENT>.append.md` beside it. It is inserted between the agent's
-prompt and the shared house rules, and the packaged prompt keeps tracking the
-package — so the next release's improvements to it still reach you.
+**MIT licensed** · [LICENSE](LICENSE) · Built on the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview)
+
+</div>
