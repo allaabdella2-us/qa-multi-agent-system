@@ -127,6 +127,12 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         self._dispatch("POST")
 
+    def do_PUT(self) -> None:  # noqa: N802
+        self._dispatch("PUT")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        self._dispatch("DELETE")
+
     def log_message(self, *_args: Any) -> None:
         """Silence: the stub's chatter would bury the actual assertions."""
 
@@ -1112,7 +1118,11 @@ def test_a_second_run_against_the_same_repo_reuses_the_board(tracker, stub):
         (200, {"id": 42, "location": {"projectKey": "CORVID"}}),
     )
     name = "claude-code-training — QA (qaas)"
-    stub.route("GET", f"{API}/filter/search", (200, {"values": [{"id": "10100", "name": name}]}))
+    jql = 'project = "CORVID" AND labels = "repo-claude-code-training" ORDER BY created DESC'
+    stub.route(
+        "GET", f"{API}/filter/search",
+        (200, {"values": [{"id": "10100", "name": name, "jql": jql}]}),
+    )
     stub.route("GET", f"{AGILE}/board", (200, {"values": [{"id": 42, "name": name}]}))
 
     info = tracker.ensure_repo_board("claude-code-training")
@@ -1121,6 +1131,7 @@ def test_a_second_run_against_the_same_repo_reuses_the_board(tracker, stub):
     assert not info.created_filter and not info.created_board
     assert stub.calls("POST", f"{API}/filter") == []
     assert stub.calls("POST", f"{AGILE}/board") == []
+    assert stub.calls("PUT", f"{API}/filter/10100") == []
 
 
 def test_a_refused_board_still_returns_a_usable_filter(tracker, stub):
@@ -1231,17 +1242,62 @@ def test_a_team_managed_project_gets_the_filter_and_no_board_attempt(tracker, st
     assert stub.calls("POST", f"{AGILE}/board") == []
 
 
-def test_a_board_with_no_location_is_not_offered_as_a_link(tracker, stub):
-    """Belt and braces for a Jira that is not team-managed and still hands back
-    an unrenderable board. A 404 reads as "this tool is broken"."""
-    route_no_existing_board(stub)
-    stub.route("GET", f"{AGILE}/board/42", (200, {"id": 42, "name": "x"}))   # no location
+def test_an_existing_board_with_no_location_is_not_offered_as_a_link(tracker, stub):
+    """Belt and braces for a board that has existed for a while and still has
+    no location. A 404 reads as "this tool is broken"."""
+    name = "claude-code-training — QA (qaas)"
+    jql = 'project = "CORVID" AND labels = "repo-claude-code-training" ORDER BY created DESC'
+    stub.route("GET", f"{API}/myself", (200, {"accountId": "acct-1"}))
+    stub.route("GET", f"{API}/project/CORVID", (200, {"key": "CORVID", "style": "classic"}))
+    stub.route(
+        "GET", f"{API}/filter/search",
+        (200, {"values": [{"id": "10100", "name": name, "jql": jql}]}),
+    )
+    stub.route("GET", f"{AGILE}/board", (200, {"values": [{"id": 42, "name": name}]}))
+    stub.route("GET", f"{AGILE}/board/42", (200, {"id": 42, "name": name}))   # no location
 
     info = tracker.ensure_repo_board("claude-code-training")
 
     assert info.board_id == 42 and not info.created_board
     assert "filter=10100" in info.url
     assert info.note and "no project location" in info.note
+
+
+def test_a_freshly_created_board_is_trusted_despite_a_missing_location(tracker, stub):
+    """Jira populates `location` asynchronously: a board read back immediately
+    after creation reports None whatever its project. Gating on that field
+    rejected perfectly good boards in a company-managed project — observed on a
+    real Jira, not theorised."""
+    route_no_existing_board(stub)
+    stub.route("GET", f"{AGILE}/board/42", (200, {"id": 42, "name": "x"}))   # no location yet
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.board_id == 42 and info.created_board
+    assert "rapidView=42" in info.url
+    assert info.note is None
+
+
+def test_a_reused_filter_whose_jql_drifted_is_repointed(tracker, stub):
+    """A filter is found by name, and the name does not encode the project. So
+    moving JIRA_PROJECT_KEY left the filter scoped to the old project: tickets
+    filed correctly into the new one and did not appear on the view someone was
+    told to watch. Same "files fine, invisible" failure, different road."""
+    name = "claude-code-training — QA (qaas)"
+    stub.route("GET", f"{API}/myself", (200, {"accountId": "acct-1"}))
+    stub.route("GET", f"{API}/project/CORVID", (200, {"key": "CORVID", "style": "next-gen"}))
+    stub.route(
+        "GET", f"{API}/filter/search",
+        (200, {"values": [{"id": "10100", "name": name, "jql": 'project = "OLD" AND labels = "x"'}]}),
+    )
+    stub.route("PUT", f"{API}/filter/10100", (200, {"id": "10100", "name": name}))
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.filter_id == 10100
+    sent = stub.calls("PUT", f"{API}/filter/10100")[0].body
+    assert sent["jql"] == info.jql
+    assert 'project = "CORVID"' in sent["jql"]
 
 
 def test_an_unreadable_project_style_does_not_stop_the_board_attempt(tracker, stub):

@@ -322,8 +322,16 @@ qaas board -t other-repo  # a different target
 
 | Your project | What you get | Why |
 |---|---|---|
-| Company-managed (classic) | A filter **and** a board over it | Boards can be built over an arbitrary filter |
+| Company-managed (classic) | A filter **and** a real board with To Do / In Progress / Done | Boards can be built over an arbitrary filter |
 | Team-managed (next-gen) | The filter alone | The project owns its board and cannot have a second |
+
+If you want real boards and your project is team-managed, create one
+**company-managed** Jira project and point `JIRA_PROJECT_KEY` at it. Every
+repository then gets its own board inside that one project — which is the
+design. Changing `JIRA_PROJECT_KEY` also **repoints an existing filter**: the
+filter is found by name and the name does not encode the project, so without
+that repair it would keep asking about the old project and your tickets would
+file correctly and be invisible.
 
 Jira's API will create a board on a team-managed project and give it **no page in
 the UI** — both `/jira/software/boards/<id>` and

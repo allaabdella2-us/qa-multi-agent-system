@@ -203,7 +203,9 @@ qaas board --no-create      # show the label and JQL, touch nothing
 > board and cannot have a second one built over a filter — Jira's API will
 > happily create one and give it no page in the UI. So the project's style is
 > checked first, and on a team-managed project you get the filter alone. You are
-> told which you got, and the link always opens.
+> told which you got, and the link always opens. Point `JIRA_PROJECT_KEY` at a
+> **company-managed** project and you get a real board per repository, with
+> To Do / In Progress / Done.
 
 Run it twice on the same repository and it **reuses** what is there. A run is
 never failed over this: a run that found nine defects and could not make a view

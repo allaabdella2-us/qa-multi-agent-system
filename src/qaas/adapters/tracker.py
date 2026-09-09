@@ -1017,6 +1017,18 @@ class JiraTracker(TrackerAdapter):
                 return entry
         return None
 
+    def update_filter_jql(self, filter_id: int, *, name: str, jql: str) -> dict[str, Any]:
+        """Repoint an existing filter at new JQL.
+
+        A filter is found by name and reused, and the name does not encode the
+        project. Repointing `JIRA_PROJECT_KEY` at a different project therefore
+        left the filter still scoped to the old one: tickets filed correctly,
+        into the new project, and did not appear on the view someone had been
+        told to watch. That is the same "files fine, invisible" failure the
+        `repo-` label exists to prevent, arriving by a different road.
+        """
+        return self._request("PUT", f"/filter/{filter_id}", body={"name": name, "jql": jql})
+
     def create_filter(self, *, name: str, jql: str, description: str = "") -> dict[str, Any]:
         """A saved filter, shared with authenticated users.
 
@@ -1169,6 +1181,12 @@ class JiraTracker(TrackerAdapter):
             info = replace(info, filter_id=int(created["id"]), filter_name=name, created_filter=True)
         else:
             info = replace(info, filter_id=int(existing["id"]), filter_name=name)
+            # A reused filter is only the right filter if it still asks the
+            # right question. `expand=jql` on the search is what makes this
+            # checkable without a second round trip.
+            if str(existing.get("jql") or "").strip() != jql:
+                self.update_filter_jql(info.filter_id, name=name, jql=jql)
+                info = replace(info, created_filter=True)
 
         filter_link = self.filter_url(info.filter_id)
         info = replace(info, url=filter_link, filter_url=filter_link)
@@ -1209,11 +1227,15 @@ class JiraTracker(TrackerAdapter):
     def _with_board(self, info: BoardInfo, board_id: int, name: str, *, created: bool) -> BoardInfo:
         """Attach a board to the result — but only if the UI can actually show it.
 
-        A board with no `location` is renderable nowhere. Handing out its URL
-        produced a 404 page that reads as "this tool is broken" rather than
-        "your Jira does not work that way", so the filter link stands instead.
+        `is_team_managed` is the authoritative gate and it runs before any of
+        this. The `location` check below is a second, weaker one, and it is
+        applied **only to a board that already existed**: Jira populates
+        `location` asynchronously, so a board read back immediately after
+        creation reports `location: None` whatever its project. Gating a fresh
+        board on that field rejected perfectly good boards in a company-managed
+        project — a false negative, observed, not theorised.
         """
-        if not self._board_is_reachable(board_id):
+        if not created and not self._board_is_reachable(board_id):
             return replace(
                 info,
                 board_id=board_id,
@@ -1233,7 +1255,14 @@ class JiraTracker(TrackerAdapter):
         )
 
     def _board_is_reachable(self, board_id: int) -> bool:
-        """Whether this board has a project location, and therefore a UI page."""
+        """Whether an existing board has a project location, and so a UI page.
+
+        Only meaningful for a board that has existed for a while; see
+        `_with_board`. And note that a location is necessary, not sufficient —
+        a team-managed project's API-made board eventually reports one and the
+        UI still refuses to render it, which is why `is_team_managed` and not
+        this is the real gate.
+        """
         try:
             board = self._request(
                 "GET", f"/board/{board_id}", retry_on_429=True, api_base=JIRA_AGILE_BASE

@@ -2,7 +2,7 @@
 # Distribution name is `qaas-python` (`qaas` was taken); the import package and
 # the CLI are both `qaas`.
 name = "qaas-python"
-version = "0.4.0"
+version = "0.4.1"
 description = "A multi-agent QA system: finds real defects, reproduces them, files tickets, fixes them, and proves the fix"
 readme = "README.md"
 license = "MIT"

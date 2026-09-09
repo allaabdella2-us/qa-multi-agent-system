@@ -152,12 +152,27 @@ needs none.
 
 **A 200 from the board API is not a working board.** Team-managed (next-gen)
 projects own their board; `POST /rest/agile/1.0/board` over a filter still
-returns 201, and the resulting board has no `location` and therefore no page in
-the UI — every candidate URL 404s. So `is_team_managed` skips the attempt, and
-`_board_is_reachable` re-checks anything that was created. `board_url` never
-assembles a URL either: `/secure/RapidBoard.jspa?rapidView=<id>` is followed and
-whatever Jira resolves it to is the answer. None of this can fail a run — the
-filter is always the fallback, and the findings matter more than the view.
+returns 201, and the UI has no page for the result — every candidate URL 404s.
+`is_team_managed` is the authoritative gate and skips the attempt there.
+`_board_is_reachable` (no `location` -> unusable) is a *second, weaker* check
+applied **only to a board that already existed**: Jira populates `location`
+asynchronously, so a board read back immediately after creation reports None
+whatever its project, and gating a fresh board on it rejected good boards.
+Location is necessary, not sufficient — a team-managed board eventually reports
+one and still will not render.
+
+`board_url` never assembles a URL: `/secure/RapidBoard.jspa?rapidView=<id>` is
+followed and whatever Jira resolves it to is the answer (a company-managed
+board's path carries a `/c/` segment that a hand-built URL missed).
+
+**A reused filter is only the right filter if its JQL still matches.** Filters
+are found by name and the name does not encode the project, so repointing
+`JIRA_PROJECT_KEY` left the filter scoped to the old project — tickets filed
+correctly and were invisible on the view. `ensure_repo_board` repairs the JQL;
+`filter/search` is expanded with `jql` so the check costs no extra round trip.
+
+None of this can fail a run — the filter is the fallback and the findings matter
+more than the view.
 
 ### Targets make it portable
 
