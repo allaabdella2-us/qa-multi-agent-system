@@ -33,11 +33,11 @@ run_modes:
 
   nightly:
     trigger: cron
-    agents: [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]
+    agents: [CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK]
     # FORGE runs once per finding, so the deep sweep's budget scales with how
     # much discovery found, not with the number of agents. Measured: discovery
     # ~$6, then roughly $1-2 per finding reproduced.
-    max_budget_usd: 40.0
+    max_budget_usd: 50.0
     max_wall_clock_s: 7200
     max_concurrency: 3
 
@@ -63,7 +63,7 @@ run_modes:
   # expensive mode in the system and the only one that closes the loop.
   full-loop:
     trigger: on_demand
-    agents: [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK, MENDER, ARBITER, PROOF]
-    max_budget_usd: 60.0
+    agents: [CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK, MENDER, ARBITER, PROOF]
+    max_budget_usd: 70.0
     max_wall_clock_s: 10800
     max_concurrency: 3

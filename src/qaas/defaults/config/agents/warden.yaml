@@ -1,0 +1,23 @@
+name: WARDEN
+layer: discovery
+role: >
+  Security and dependency auditor. Finds missing authorization, secrets committed
+  to the repository, dependencies with known advisories, and error paths that
+  leak internals to a caller. Reports a concrete exploit path or lowers its
+  confidence -- a security finding without one is a guess wearing a severity.
+prompt: WARDEN.md
+model: claude-opus-5
+effort: high
+max_turns: 60
+# Measured: WARDEN exhausted $3.00 on its first real run against the demo app
+# and was killed mid-audit. Building the endpoint-by-role matrix and actually
+# impersonating each role costs more than reading a spec does.
+max_budget_usd: 5.0
+mcp_servers: [envelope, env_control, defect_memory]
+builtin_tools: [Read, Grep, Glob]
+policy: {}
+
+skills: [authz-matrix-check, error-taxonomy, severity-rubric, routing-rules, repro-minimisation]
+
+# No must_call: see VAULT. Also: an auditor that must report something will
+# report something, and security noise is the fastest way to be ignored.

@@ -192,14 +192,24 @@ codebase is strict about it:
 | CARTOGRAPHER | map | services, routes, schema, ownership → `system-map.json` |
 | CONDUIT | discovery | API contract drift; ships a failing contract test |
 | SURFACE | discovery | drives the UI through real journeys |
+| VAULT | discovery | schema constraints the code assumes and the database does not enforce |
+| WARDEN | discovery | missing authorization, secrets, vulnerable dependencies, leaked internals |
 | FORGE | triage | reproduces, minimises, measures flake, commits a failing test |
 | CLERK | triage | dedupes, scores severity, routes, files — the only tracker writer |
 | MENDER | remediation | the minimal fix, on a `fix/*` branch |
 | ARBITER | remediation | adversarial review: APPROVE / REQUEST_CHANGES / ESCALATE |
 | PROOF | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
 
-The design names 16. Eight are built; CONDUCTOR is the state machine rather than
-an agent; seven Phase-2 agents are designed and not written.
+The design names 16. Ten are built; CONDUCTOR is the state machine rather than an
+agent; five further discovery specialists are designed and not written.
+
+VAULT and WARDEN are worth noting for *how* they were added: a prompt file and a
+YAML file each, with no Python. That is the architecture's central claim, and it
+was not quite true until they tested it -- `_phase_discover` dispatched from a
+closed dict of task builders, so a new discovery agent validated, assembled,
+appeared in `--dry-run`, and was then silently skipped with `no task builder`.
+There is a generic discovery task now, and a test that asserts a config-only
+agent actually *runs*.
 
 ---
 

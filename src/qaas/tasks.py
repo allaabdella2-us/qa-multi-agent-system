@@ -11,7 +11,7 @@ one repository's directory layout or one app's seeded users works exactly once.
 
 from __future__ import annotations
 
-from qaas.config import SystemConfig
+from qaas.config import AgentSpec, SystemConfig
 from qaas.envelope import DefectEnvelope
 from qaas.target import TargetProfile
 
@@ -216,6 +216,49 @@ and the console output as evidence before moving on.
 Judge like a user, not like a reviewer with opinions about the code. Report what
 fails, misleads, blocks or excludes someone. Do not report what you would have
 designed differently."""
+
+
+def discovery(config: SystemConfig, mode: str, spec: "AgentSpec") -> str:
+    """The task for a discovery agent with no hand-written builder.
+
+    The architecture's claim is that adding an agent needs a prompt file and a
+    YAML file and no Python. That was not true: `_phase_discover` dispatched
+    from a hardcoded dict of builders, so a new discovery agent was silently
+    skipped with `no task builder` -- it validated, it assembled, it appeared in
+    `--dry-run`, and then it did nothing. VAULT and WARDEN were added exactly
+    that way and this is the bug they found.
+
+    What an agent should be told is: which application, what it can reach, and
+    what its own prompt says its domain is. Everything specific to a domain
+    belongs in that agent's prompt, not here -- CONDUIT and SURFACE keep their
+    bespoke builders because they name tools (`diff_openapi`, the browser) that
+    only they have.
+    """
+    p = _profile(config)
+    reach = (
+        "The application is reachable, so prove what you report: observe the "
+        "behaviour and capture the evidence. A finding you have not observed is a "
+        "hypothesis, and its confidence should say so."
+        if p.environment.is_reachable
+        else "There is no reachable instance, so every finding is a reading of the "
+        "code. Quote the lines that support it and keep your confidence honest "
+        "about not having observed the behaviour."
+    )
+    return f"""Audit {p.name} for defects in your domain.
+
+Layout — {p.layout.described()}
+
+Your own instructions define what your domain is and what counts as evidence in
+it. Work within it and leave the other surfaces to the agents that own them.
+
+{reach}
+
+Emit one envelope per distinct defect with `emit_envelope`. Finding nothing is a
+valid outcome; inventing something to report is not. Deduplicate against
+`search_similar` before you emit, so a defect this system already knows about
+comes back as an occurrence rather than a new finding.
+
+Mode: {mode}."""
 
 
 def forge(envelope: DefectEnvelope, config: SystemConfig, flake_runs: int) -> str:

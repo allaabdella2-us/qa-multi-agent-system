@@ -19,6 +19,9 @@ import pytest
 from support import CONFIG_SEARCH, PACKAGED_CONFIG, PACKAGED_PROMPTS, PACKAGED_SKILLS
 
 from qaas.config import load_config
+
+#: However many ship; the point is that shadowing one does not lose the rest.
+PACKAGED_AGENTS = sorted((PACKAGED_CONFIG / "agents").glob("*.yaml"))
 from qaas.paths import Workspace, find_project, package_root
 
 
@@ -115,7 +118,7 @@ def test_one_agent_file_can_be_shadowed_without_forking_the_rest(tmp_path):
 
     cfg = load_config(search=(tmp_path / "config", *CONFIG_SEARCH))
     assert cfg.agents["MENDER"].max_budget_usd == 9.0, "the override did not win"
-    assert len(cfg.agents) == 8, "shadowing one agent must not drop the others"
+    assert len(cfg.agents) == len(PACKAGED_AGENTS), "shadowing one agent must not drop the others"
     assert cfg.agents["CONDUIT"].max_budget_usd == 3.0, "an untouched agent changed"
 
 

@@ -2,7 +2,7 @@
 # Distribution name is `qaas-python` (`qaas` was taken); the import package and
 # the CLI are both `qaas`.
 name = "qaas-python"
-version = "0.1.1"
+version = "0.2.0"
 description = "A multi-agent QA system: finds real defects, reproduces them, files tickets, fixes them, and proves the fix"
 readme = "README.md"
 license = "MIT"
@@ -23,7 +23,12 @@ dependencies = [
     "claude-agent-sdk>=0.2.127",
     "pydantic>=2.9",
     "pyyaml>=6.0",
-    "typer>=0.15",
+    # typer>=0.16 is not cosmetic: click 8.2 changed Parameter.make_metavar()
+    # to require a ctx argument, and typer 0.15 calls it without one. The pair
+    # `typer 0.15.3` + `click 8.2.0` resolves happily and then crashes on
+    # `qaas <command> --help` with a TypeError -- which is how a user found it,
+    # on a package installed from PyPI.
+    "typer>=0.16",
     "rich>=13.9",
 ]
 

@@ -543,3 +543,21 @@ async def test_a_resumed_run_keeps_the_budget_it_already_spent(cfg, tmp_path, fa
 
     assert report.stopped_early, "the resumed run ignored what the run had already spent"
     assert "spend cap" in report.stopped_early
+
+
+async def test_a_new_discovery_agent_runs_without_a_hand_written_task(cfg, tmp_path, fake_agents):
+    """The architecture's central claim, finally tested.
+
+    `_phase_discover` used to dispatch from a closed dict of task builders, so a
+    discovery agent that was not in it got `skipped: no task builder` -- it
+    passed `qaas validate`, assembled correctly, appeared in `--dry-run`, and
+    then silently did nothing. VAULT and WARDEN were added as a prompt plus a
+    YAML each and found exactly that.
+
+    A silent skip is the worst shape this failure could take, which is why this
+    test asserts the agent RAN rather than asserting the config loaded.
+    """
+    calls, behaviour = fake_agents
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+    ran = {name for name, _ in calls}
+    assert {"VAULT", "WARDEN"} <= ran, f"a config-only agent was skipped: {sorted(ran)}"

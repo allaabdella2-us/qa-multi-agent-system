@@ -80,6 +80,11 @@ adding an agent as a sign something is wrong. Constraints enforced in
 `config.py`: at most 6 MCP servers per agent (§5.3, tool-selection accuracy),
 and every `must_call` tool must name a server the agent actually has.
 
+Adding a discovery agent is a prompt file plus a YAML file and no Python --
+`_phase_discover` falls back to `tasks.discovery` for anything without a
+bespoke builder. VAULT and WARDEN were added that way and found that it was
+not true before them.
+
 `prompts/_shared.md` is appended to every agent prompt — house rules go there,
 not copy-pasted into six prompts. Prompts resolve through `Workspace.prompt_dirs`
 (`.qaas/prompts/` beats the packaged copy), **file by file and independently**, so

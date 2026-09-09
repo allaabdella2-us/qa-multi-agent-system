@@ -21,7 +21,7 @@
 
 Most "AI QA" tools generate tests. **This one behaves like a QA team.**
 
-Eight agents, each with its own context, tool allowlist and budget, coordinated by
+Ten agents, each with its own context, tool allowlist and budget, coordinated by
 a state machine that is ordinary Python — because a model cannot enforce a budget
 it is itself spending.
 
@@ -215,20 +215,20 @@ Every tool call, denial, verdict and escalation is on the record.
 
 ```console
 $ qaas trace run-20260908T182034-c6ed26
-    t+  agent         kind            detail                                    cost
-    0s  -             run_started     mode=nightly  agents=[5]  budget_usd=40
+    t+  agent         kind            detail
+    0s  -             run_started     mode=nightly  agents=[7]
     0s  CARTOGRAPHER  agent_started   model=claude-sonnet-5
     4s  CARTOGRAPHER  tool_call ×34   Read×25, Glob×6, ToolSearch×2
     6s  CARTOGRAPHER  denial          tool=Bash  reason=Bash is not in CARTOGRAPHER's
                                       tool allowlist (Read, Grep, Glob).
   146s  CARTOGRAPHER  system_map      version=20260907T233530  sections=[12]
-  156s  CARTOGRAPHER  agent_finished  subtype=success  num_turns=45            $0.60
+  156s  CARTOGRAPHER  agent_finished  subtype=success  num_turns=45
 ```
 
 ```bash
 qaas trace <run-id> --agent proof --kind verdict   # filter
 qaas trace <run-id> --json                         # export
-qaas show <run-id>                                 # mode, commit, cost, tickets, escalations
+qaas show <run-id>                                 # mode, commit, tickets, escalations
 qaas runs                                          # everything that ever ran
 ```
 
@@ -266,7 +266,6 @@ Two runs against the demo app, scored automatically:
 | 🎯 recall | **81%** — 13 of 16 | **69%** — 11 of 16 |
 | 🔇 precision | **100%** — 0 FP | **92%** — 1 FP |
 | 🏷️ severity agreement | **100%** | **100%** |
-| 💵 cost per accepted finding | $1.12 | $0.64 |
 
 **Both numbers are shown on purpose.** A single figure would be the flattering
 one, and it would not survive contact with a second run. These are stochastic
@@ -289,7 +288,8 @@ precision is measured rather than assumed.
 
 Honest about what exists:
 
-- ✅ **8 of the 16 agents** in the design are built — CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK, MENDER, ARBITER, PROOF. CONDUCTOR is the Python state machine rather than an agent. **Seven Phase-2 agents are designed, not written.**
+- ✅ **10 of the 16 agents** in the design are built — CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK, MENDER, ARBITER, PROOF. CONDUCTOR is the Python state machine rather than an agent. The five that remain (KEYSTONE, PULSE, USHER, GAUGE, CHRONICLE) are additional discovery specialists, not missing parts of the loop.
+- ✅ **Adding an agent needs a prompt file and a YAML file — no Python.** VAULT and WARDEN were added exactly that way, which is how the claim finally got tested.
 - ✅ The fix loop has closed end to end on a real defect: `NOT_FIXED → MENDER → ARBITER APPROVE → VERIFIED`.
 - ✅ 30 skills, 7 in-process MCP servers, 649 offline tests.
 - ⚠️ Running the bundled demo needs `export CORVID_PASSWORD=password123` — credentials come from the environment, including the demo's.

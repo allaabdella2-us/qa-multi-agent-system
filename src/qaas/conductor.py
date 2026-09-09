@@ -272,18 +272,20 @@ class Conductor:
         if not discovery:
             return
 
+        # CONDUIT and SURFACE keep bespoke tasks because they name tools only
+        # they have. Everything else gets the generic discovery task, which is
+        # what makes "a new agent is a prompt plus a YAML" true: this used to be
+        # a closed dict, so a new discovery agent was skipped with `no task
+        # builder` -- it validated, it assembled, it showed up in `--dry-run`,
+        # and then it silently did nothing.
         builders = {
-            "CONDUIT": lambda: tasks.conduit(self.config, mode),
-            "SURFACE": lambda: tasks.surface(self.config, mode),
+            "CONDUIT": lambda spec: tasks.conduit(self.config, mode),
+            "SURFACE": lambda spec: tasks.surface(self.config, mode),
         }
         jobs = [
-            (spec, builders[spec.name]())
+            (spec, builders.get(spec.name, lambda sp: tasks.discovery(self.config, mode, sp))(spec))
             for spec in discovery
-            if spec.name in builders
         ]
-        unknown = [s.name for s in discovery if s.name not in builders]
-        if unknown:
-            store.log("skipped", reason="no task builder", agents=unknown)
 
         await self._gather(jobs, store, budget, report, map_version, self.config.run_modes[mode].max_concurrency)
 

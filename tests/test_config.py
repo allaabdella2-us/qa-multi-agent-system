@@ -15,7 +15,12 @@ PROMPTS = REPO / "src" / "qaas" / "prompts"
 
 PHASE_1 = {"CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK", "PROOF"}
 PHASE_3 = {"MENDER", "ARBITER"}
-ROSTER = PHASE_1 | PHASE_3
+#: Added later, and the point of them is how they were added: a prompt file and a
+#: YAML file each, with no change to conductor, runner, registry or guardrails.
+#: That was the architecture's central claim and it went untested until someone
+#: actually tried it.
+PHASE_2 = {"VAULT", "WARDEN"}
+ROSTER = PHASE_1 | PHASE_3 | PHASE_2
 
 
 @pytest.fixture(scope="module")
