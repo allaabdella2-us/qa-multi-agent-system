@@ -54,7 +54,11 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 # contributor can run `qaas score`. The wheel does not: it is 69M, and it is a
 # deliberately vulnerable application that has no business in site-packages.
 include = [
-    "src/", "config/", "target-app/", "tests/", ".claude/skills/",
+    # Skills are NOT listed: they live inside the package now
+    # (src/qaas/plugin/skills), so "src/" already carries them. The old
+    # ".claude/skills/" entry outlived the directory it named -- hatchling
+    # ignores a missing path, so it broke nothing and simply misled.
+    "src/", "config/", "target-app/", "tests/", "tutorial/",
     "README.md", "LICENSE", "ARCHITECTURE.md", "CLAUDE.md", "BUILD_PLAN.md",
     "pyproject.toml",
 ]

@@ -17,7 +17,7 @@ first, and update the plan's milestone table when work lands.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (SURFACE) runs
 
-pytest                                   # ~460 tests, no API calls, no network
+pytest                                   # 649 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject

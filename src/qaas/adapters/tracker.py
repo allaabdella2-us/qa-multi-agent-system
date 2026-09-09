@@ -103,7 +103,7 @@ class Issue(BaseModel):
 
 
 class TrackerAdapter(ABC):
-    """The four operations the system needs from any tracker."""
+    """The five operations the system needs from any tracker."""
 
     @abstractmethod
     def create_issue(
