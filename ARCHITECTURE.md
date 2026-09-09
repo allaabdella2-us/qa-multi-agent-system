@@ -301,21 +301,28 @@ wrong:
 **Nothing in `tasks.py` or a prompt may name a specific application.** A prompt
 that mentions one repo's layout or one app's seeded users works exactly once.
 
-### The eight agents
+### The sixteen agents
 
 | agent | layer | does |
 |---|---|---|
 | CARTOGRAPHER | map | services, routes, schema, ownership → `system-map.json` |
+| KEYSTONE | discovery | circular deps, layering violations, god modules, dead code |
 | CONDUIT | discovery | API contract drift; ships a failing contract test |
 | SURFACE | discovery | drives the UI through real journeys |
+| VAULT | discovery | schema constraints the code assumes and the database does not enforce |
+| WARDEN | discovery | missing authorization, secrets, vulnerable dependencies, leaked internals |
+| PULSE | discovery | WebSocket auth, reconnect, ordering, backpressure |
+| USHER | discovery | whether a person can *find* a feature, not just whether it works |
+| GAUGE | discovery | N+1 queries, unindexed hot paths, unbounded results, bundle outliers |
 | FORGE | triage | reproduces, minimises, measures flake, commits a failing test |
 | CLERK | triage | dedupes, scores severity, routes, files — the only tracker writer |
 | MENDER | remediation | the minimal fix, on a `fix/*` branch |
 | ARBITER | remediation | adversarial review: APPROVE / REQUEST_CHANGES / ESCALATE |
 | PROOF | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
+| CHRONICLE | reporting | what the run found, what recurred, and what it could not reach |
 
-(The design doc names 16. Eight are built; CONDUCTOR is the Python state machine
-rather than an agent; seven Phase-2 agents are not built.)
+CONDUCTOR is the sixteenth. It is the Python state machine in `conductor.py`
+rather than an agent, because a model cannot enforce a budget it is spending.
 
 ---
 

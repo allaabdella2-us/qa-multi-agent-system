@@ -21,7 +21,7 @@
 
 Most "AI QA" tools generate tests. **This one behaves like a QA team.**
 
-Ten agents, each with its own context, tool allowlist and budget, coordinated by
+Fifteen agents, each with its own context, tool allowlist and budget, coordinated by
 a state machine that is ordinary Python — because a model cannot enforce a budget
 it is itself spending.
 
