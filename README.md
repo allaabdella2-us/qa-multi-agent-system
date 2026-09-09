@@ -368,19 +368,6 @@ than an opinion.
 
 ---
 
-## 📋 Status
-
-Honest about what exists:
-
-- ✅ **All 16 agents in the design are built.**
-- ✅ **Adding one needs a prompt file and a YAML file — no Python.** Six were added that way, which is how the claim got tested.
-- ✅ The fix loop has closed end to end on a real defect: `NOT_FIXED → MENDER → ARBITER APPROVE → VERIFIED`.
-- ✅ 30 skills, 7 in-process MCP servers, 686 offline tests.
-- ✅ Run against a real third-party repository end to end: clone → map → 4 discovery agents → dedupe → 10 Jira tickets on that repo's own filter.
-- ⚠️ Running the bundled demo needs `export CORVID_PASSWORD=password123` — credentials come from the environment, including the demo's.
-
----
-
 ## 🤝 Contributing
 
 ```bash
