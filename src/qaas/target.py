@@ -274,6 +274,13 @@ def agent_usable(agent_name: str, caps: dict[str, bool]) -> bool:
     Everything except SURFACE can contribute from static analysis alone, at
     lower confidence. SURFACE without a reachable UI has nothing to do at all.
     """
-    if agent_name == "SURFACE":
+    if agent_name in ("SURFACE", "USHER"):
+        # Both drive a browser. USHER's whole method is navigating the product
+        # as a person would; with nothing to navigate it has no job at all.
         return caps.get("live_ui", False)
+    if agent_name == "GAUGE":
+        # Performance work needs something to measure. GAUGE can read query and
+        # rendering code statically, but a latency claim about an application it
+        # never called is a guess, and this system does not ship guesses.
+        return caps.get("live_api", False) or caps.get("live_ui", False)
     return True

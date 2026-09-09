@@ -126,9 +126,15 @@ async def test_phases_run_in_dependency_order(cfg, tmp_path, fake_agents):
     order = [name for name, _ in calls]
 
     assert order[0] == "CARTOGRAPHER", "the map must exist before anything reads it"
-    assert set(order[1:3]) == {"CONDUIT", "SURFACE"}
+    # Discovery runs between the map and triage. Which agents are in it is
+    # config -- the roster grew from two to eight -- so assert the ordering,
+    # not the membership.
+    discovery = order[1:order.index("FORGE")]
+    assert {"CONDUIT", "SURFACE"} <= set(discovery), "the core discovery pair must run"
+    assert "CARTOGRAPHER" not in discovery, "the map agent runs once, before discovery"
     assert order.count("FORGE") == 3, "one FORGE invocation per finding"
-    assert order[-1] == "CLERK", "filing comes last"
+    assert order.index("CLERK") > order.index("FORGE"), "filing comes after reproduction"
+    assert order[-1] == "CHRONICLE", "reporting runs last, over what the run produced"
     assert report.cost_usd > 0
 
 
@@ -591,3 +597,34 @@ async def test_an_agent_the_target_cannot_support_is_not_dispatched(cfg, tmp_pat
     ran = {name for name, _ in calls}
     assert "SURFACE" not in ran, "dispatched SURFACE at a target with no UI"
     assert "CONDUIT" in ran, "static analysis agents must still run"
+
+
+async def test_every_shipped_agent_is_actually_dispatchable(cfg, tmp_path, fake_agents):
+    """No agent may validate, assemble, and then silently do nothing.
+
+    This is the generalisation of two real bugs. VAULT and WARDEN were added as
+    prompt + YAML and were skipped with `no task builder`, because
+    `_phase_discover` dispatched from a closed dict. CHRONICLE would have been
+    skipped for a different reason -- every phase except discovery dispatches by
+    NAME, and nothing asked for the reporting layer.
+
+    Both failures look identical from outside: `qaas validate` passes, the agent
+    appears in `--dry-run`, and the run reports success having never called it.
+    That is the worst shape a failure can take here, so this asserts dispatch
+    for the whole roster rather than for the agents someone remembered.
+    """
+    calls, behaviour = fake_agents
+    behaviour["CARTOGRAPHER"] = {"publish_map": True}
+    behaviour["CONDUIT"] = {"emit": 1}
+
+    await make_conductor(cfg, tmp_path).run("full-loop")
+    dispatched = {name for name, _ in calls}
+
+    # Remediation agents only run on a NOT_FIXED verdict, which this run has no
+    # way to produce; they are covered by the fix-loop tests instead.
+    expected = {s.name for s in cfg.enabled_agents("full-loop")} - {"MENDER", "ARBITER", "PROOF"}
+    missing = sorted(expected - dispatched)
+    assert not missing, (
+        f"{missing} are configured into full-loop and were never dispatched. "
+        "An agent that loads but never runs is the failure this test exists for."
+    )

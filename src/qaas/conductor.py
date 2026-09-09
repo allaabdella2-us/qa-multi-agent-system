@@ -239,6 +239,7 @@ class Conductor:
             else:
                 store.log("skipped", reason="mode does not file tickets", mode=mode)
             await self._phase_verify(specs, store, budget, report, map_version)
+            await self._phase_report(specs, store, budget, report, mode, map_version)
         except BudgetExceeded as exc:
             report.stopped_early = str(exc)
             report.escalations.append(str(exc))
@@ -315,6 +316,30 @@ class Conductor:
         ]
 
         await self._gather(jobs, store, budget, report, map_version, self.config.run_modes[mode].max_concurrency)
+
+    async def _phase_report(self, specs, store, budget, report, mode, map_version) -> None:
+        """Reporting agents run last, over what the run itself produced.
+
+        Dispatched by LAYER, like discovery, and deliberately not by name. Every
+        other phase looks up a specific agent (`specs.get("FORGE")`), which is
+        why CHRONICLE could be configured, validated, assembled and shown in
+        `--dry-run` while never running: no phase asked for it. That is the same
+        silent skip VAULT and WARDEN exposed for discovery, and it is worth
+        fixing the shape rather than the instance -- a second reporting agent
+        now needs no Python either.
+
+        A run with no reporting agent is the ordinary case and not worth a log
+        line; most modes have none.
+        """
+        reporting = [s for s in specs.values() if s.layer == "reporting"]
+        if not reporting:
+            return
+
+        for spec in reporting:
+            budget.check()
+            await self._dispatch(
+                spec, store, budget, report, tasks.report(self.config, mode), map_version
+            )
 
     async def _phase_reproduce(self, specs, store, budget, report, map_version) -> None:
         """One FORGE invocation per finding.

@@ -52,8 +52,8 @@ default `pytest` run is offline and free, and must stay that way.
 ### Phase pipeline (`conductor.py`)
 
 ```
-map -> discover -> reproduce -> file -> verify
-CARTOGRAPHER   CONDUIT/SURFACE   FORGE   CLERK   PROOF
+map -> discover -> reproduce -> file -> verify -> report
+CARTOGRAPHER   CONDUIT/SURFACE/…   FORGE   CLERK   PROOF   CHRONICLE
 ```
 
 Discovery agents run concurrently up to the mode's cap; FORGE runs **once per
@@ -80,7 +80,9 @@ adding an agent as a sign something is wrong. Constraints enforced in
 `config.py`: at most 6 MCP servers per agent (§5.3, tool-selection accuracy),
 and every `must_call` tool must name a server the agent actually has.
 
-Adding a discovery agent is a prompt file plus a YAML file and no Python --
+Discovery AND reporting agents dispatch **by layer**; every other phase
+dispatches by name. So adding a discovery or reporting agent is a prompt file
+plus a YAML file and no Python --
 `_phase_discover` falls back to `tasks.discovery` for anything without a
 bespoke builder. VAULT and WARDEN were added that way and found that it was
 not true before them.

@@ -54,6 +54,31 @@ Nothing crosses between the loops except a ticket — which is also the audit tr
 
 ---
 
+## 🤖 The roster
+
+| agent | layer | what it does |
+|---|---|---|
+| 🗺️ CARTOGRAPHER | map | services, routes, schema, ownership → the system map everything reads |
+| 🏛️ KEYSTONE | discovery | circular deps, layering violations, god modules, dead code |
+| 🔌 CONDUIT | discovery | API contract drift, authz gaps, error-shape inconsistency |
+| 🖱️ SURFACE | discovery | drives the UI through real journeys |
+| 🗄️ VAULT | discovery | schema constraints the code assumes and the database does not enforce |
+| 🔒 WARDEN | discovery | missing authorization, secrets, vulnerable dependencies, leaks |
+| 📡 PULSE | discovery | WebSocket auth, reconnect, ordering, backpressure |
+| 🧭 USHER | discovery | whether a person can *find* a feature, not just whether it works |
+| ⏱️ GAUGE | discovery | N+1 queries, unindexed hot paths, unbounded results, bundle outliers |
+| 🔨 FORGE | triage | reproduces, minimises, measures flake, commits a failing test |
+| 📝 CLERK | triage | dedupes, scores severity, routes, files — the only tracker writer |
+| 🔧 MENDER | remediation | the minimal fix, on a branch |
+| ⚖️ ARBITER | remediation | adversarial review: APPROVE / REQUEST_CHANGES / ESCALATE |
+| ✅ PROOF | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
+| 📊 CHRONICLE | reporting | what the run found, what recurred, and what it could not reach |
+
+**CONDUCTOR** is the sixteenth. It is the Python state machine rather than an
+agent — a model cannot enforce a budget it is itself spending.
+
+---
+
 ## 🚀 Quickstart in 60 seconds
 
 ```bash
@@ -288,8 +313,8 @@ precision is measured rather than assumed.
 
 Honest about what exists:
 
-- ✅ **10 of the 16 agents** in the design are built — CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK, MENDER, ARBITER, PROOF. CONDUCTOR is the Python state machine rather than an agent. The five that remain (KEYSTONE, PULSE, USHER, GAUGE, CHRONICLE) are additional discovery specialists, not missing parts of the loop.
-- ✅ **Adding an agent needs a prompt file and a YAML file — no Python.** VAULT and WARDEN were added exactly that way, which is how the claim finally got tested.
+- ✅ **All 16 agents in the design are built.**
+- ✅ **Adding one needs a prompt file and a YAML file — no Python.** Six were added that way, which is how the claim got tested.
 - ✅ The fix loop has closed end to end on a real defect: `NOT_FIXED → MENDER → ARBITER APPROVE → VERIFIED`.
 - ✅ 30 skills, 7 in-process MCP servers, 649 offline tests.
 - ⚠️ Running the bundled demo needs `export CORVID_PASSWORD=password123` — credentials come from the environment, including the demo's.

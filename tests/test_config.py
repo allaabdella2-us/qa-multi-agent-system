@@ -19,8 +19,14 @@ PHASE_3 = {"MENDER", "ARBITER"}
 #: YAML file each, with no change to conductor, runner, registry or guardrails.
 #: That was the architecture's central claim and it went untested until someone
 #: actually tried it.
-PHASE_2 = {"VAULT", "WARDEN"}
-ROSTER = PHASE_1 | PHASE_3 | PHASE_2
+PHASE_2 = {"VAULT", "WARDEN", "KEYSTONE", "PULSE", "USHER", "GAUGE"}
+#: The reporting layer. CHRONICLE is the only agent that is not discovery,
+#: triage or remediation, and it needed the one piece of Python the others did
+#: not: a `_phase_report` in the conductor. Every other phase dispatches by
+#: NAME, so a reporting agent would otherwise validate, assemble, appear in
+#: `--dry-run` and never run.
+PHASE_4 = {"CHRONICLE"}
+ROSTER = PHASE_1 | PHASE_3 | PHASE_2 | PHASE_4
 
 
 @pytest.fixture(scope="module")
@@ -138,7 +144,11 @@ def test_no_vendor_pricing_is_baked_into_the_shipped_config(cfg):
 
 def test_enabled_agents_resolves_a_mode(cfg):
     names = [s.name for s in cfg.enabled_agents("pr-check")]
-    assert names == ["CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK"]
+    # The exact roster is config and will change; the invariants are that the
+    # map comes first and filing comes last.
+    assert names[0] == "CARTOGRAPHER", "the map must be built before anything reads it"
+    assert names[-1] == "CLERK", "filing is last"
+    assert set(names) <= ROSTER, f"mode names an agent that does not exist: {set(names) - ROSTER}"
 
 
 def test_unknown_mode_is_an_error(cfg):

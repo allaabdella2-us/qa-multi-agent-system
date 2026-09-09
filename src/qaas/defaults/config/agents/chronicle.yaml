@@ -1,0 +1,19 @@
+name: CHRONICLE
+layer: reporting
+role: >
+  Reporting analyst. Reads what a run produced -- findings, verdicts, denials,
+  escalations, recurrence -- and reports the pattern across them, including what
+  the run could not reach. Audits the run, never the application.
+prompt: CHRONICLE.md
+model: claude-sonnet-5
+effort: medium
+max_turns: 40
+mcp_servers: [envelope, defect_memory, tracker]
+builtin_tools: [Read]
+policy: {}
+
+skills: [severity-rubric, dedupe-strategy, verdict-reporting]
+
+# No must_call: a run that found nothing still deserves a report saying so, and
+# a report is not an envelope. Requiring an emission would turn "nothing to say"
+# into an invented finding.
