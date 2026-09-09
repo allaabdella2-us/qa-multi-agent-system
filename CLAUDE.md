@@ -80,7 +80,12 @@ adding an agent as a sign something is wrong. Constraints enforced in
 and every `must_call` tool must name a server the agent actually has.
 
 `prompts/_shared.md` is appended to every agent prompt — house rules go there,
-not copy-pasted into six prompts. Role and standards live in the system prompt;
+not copy-pasted into six prompts. Prompts resolve through `Workspace.prompt_dirs`
+(`.qaas/prompts/` beats the packaged copy), **file by file and independently**, so
+overriding `CONDUIT.md` keeps the house `_shared.md`. A `<AGENT>.append.md` is
+inserted between the agent block and the shared block — never after it, because
+the house rules must stay the last word. `qaas prompts list/eject/diff`.
+Role and standards live in the system prompt;
 *procedure* lives in `.claude/skills/*/SKILL.md`; the per-run *task* (which app,
 which environment, which finding) is built in `tasks.py`.
 
