@@ -13,7 +13,7 @@
 [![Tests](https://img.shields.io/badge/tests-649%20offline-success)](#-contributing)
 [![Built on](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-D97757)](https://docs.claude.com/en/api/agent-sdk/overview)
 
-[Quickstart](#-quickstart-in-60-seconds) · [What it costs](#-what-it-costs) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Architecture](ARCHITECTURE.md)
+[Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Architecture](ARCHITECTURE.md)
 
 </div>
 
@@ -78,37 +78,6 @@ qaas run --repo https://github.com/you/your-app --dry-run
 > receive — model, budget, turn cap, tool allowlist, prompt size.
 
 **Auth:** the Claude Code CLI if you are signed in, otherwise `ANTHROPIC_API_KEY`.
-
----
-
-## 💰 What it costs
-
-> [!IMPORTANT]
-> **Real runs spend real money.** Read this before your first one.
-
-Median cost per dispatch, **measured** across real runs — not estimated:
-
-| agent | median | what you get |
-|---|--:|---|
-| 🖱️ `SURFACE` | **$3.34** | broken flows, console errors, a11y, forms |
-| 🔧 `MENDER` | **$2.03** | the minimal fix, on a branch |
-| 🔌 `CONDUIT` | **$1.97** | API contract, authz and error-shape defects |
-| 🔨 `FORGE` | **$1.61** | a minimal repro + failing test — **per finding** |
-| ✅ `PROOF` / ⚖️ `ARBITER` | ~$1.00 | verification and adversarial review |
-| 📝 `CLERK` / 🗺️ `CARTOGRAPHER` | ~$0.70 | filing, and the map everything reads |
-
-A full discovery run over the demo app found **13 of 16** seeded defects for
-about **$15**. A `fix-cycle` pass costs **$5–7**.
-
-> `FORGE` runs **once per finding** in a fresh context, so cost scales with what
-> was found, not with how many agents exist.
-
-**The controls are real, not advisory:**
-
-- `max_budget_usd` per agent *and* per run mode; the governor checks before every dispatch and **stops the run** rather than overspending.
-- The cap survives a resume — `qaas run --run-id <existing>` carries forward what that run already spent.
-- `qaas validate` refuses a run mode whose agents could outspend its cap.
-- `--dry-run` on everything.
 
 ---
 
