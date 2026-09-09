@@ -10,7 +10,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/qaas-python?color=3776AB&logo=python&logoColor=white)](https://pypi.org/project/qaas-python/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml/badge.svg)](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-649%20offline-success)](#-contributing)
+[![Tests](https://img.shields.io/badge/tests-686%20offline-success)](#-contributing)
 [![Built on](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-D97757)](https://docs.claude.com/en/api/agent-sdk/overview)
 
 [Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Architecture](ARCHITECTURE.md)
@@ -45,7 +45,7 @@ Nothing crosses between the loops except a ticket — which is also the audit tr
 
 | | |
 |---|---|
-| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `conductor.py`. That is also why **649 tests run offline, free, with no API key.** |
+| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `conductor.py`. That is also why **686 tests run offline, free, with no API key.** |
 | 🧱 **Every agent is its own `query()`** | Not subagents of a shared parent. Each gets a real context boundary, an enforceable tool allowlist, and its own cost number. |
 | 🔬 **Evidence or it did not happen** | `has_evidence()` and `is_fileable()` are methods on the envelope model, not requests in a prompt. An agent cannot talk its way past them. |
 | 📊 **Measured, not asserted** | A deliberately buggy demo app ships with a golden ledger of **16 seeded defects + 4 planted non-defects**. `qaas score` reports recall *and* precision, so a prompt change has a number attached. |
@@ -373,7 +373,8 @@ Honest about what exists:
 - ✅ **All 16 agents in the design are built.**
 - ✅ **Adding one needs a prompt file and a YAML file — no Python.** Six were added that way, which is how the claim got tested.
 - ✅ The fix loop has closed end to end on a real defect: `NOT_FIXED → MENDER → ARBITER APPROVE → VERIFIED`.
-- ✅ 30 skills, 7 in-process MCP servers, 649 offline tests.
+- ✅ 30 skills, 7 in-process MCP servers, 686 offline tests.
+- ✅ Run against a real third-party repository end to end: clone → map → 4 discovery agents → dedupe → 10 Jira tickets on that repo's own filter.
 - ⚠️ Running the bundled demo needs `export CORVID_PASSWORD=password123` — credentials come from the environment, including the demo's.
 
 ---
@@ -385,7 +386,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest                 # 649 tests, offline, free — keep it that way
+pytest                 # 686 tests, offline, free — keep it that way
 pytest -m docker       # needs: cd target-app && docker compose up -d
 qaas validate
 ```
