@@ -515,3 +515,31 @@ async def test_concurrent_discovery_agents_do_not_steal_each_others_findings(cfg
 
     assert len(outcome.result.envelope_ids) == 1, "only its own finding"
     assert store.get_envelope(outcome.result.envelope_ids[0]).discovered_by == "CONDUIT"
+
+
+async def test_a_resumed_run_keeps_the_budget_it_already_spent(cfg, tmp_path, fake_agents):
+    """A cap that resets on resumption is not a cap.
+
+    `qaas run --run-id <existing>` appends to an existing ledger, but the
+    governor used to build a fresh Budget starting at zero -- so resuming three
+    times against a $20 mode could spend $60 while every individual pass
+    reported itself within budget. A real run recorded exactly that:
+    `cost $32.90 of $20.00 budget`.
+
+    The wall clock is deliberately not carried across. It measures this process,
+    and a run resumed the next morning has not been running all night.
+    """
+    calls, behaviour = fake_agents
+    store = RunStore.new(tmp_path)
+
+    # A first invocation that has already consumed most of the mode's cap.
+    mode = cfg.run_modes["pr-check"]
+    store.put_result(AgentResult(agent="CONDUIT", subtype="success",
+                                 cost_usd=mode.max_budget_usd - 0.05, num_turns=1))
+    assert store.total_cost_usd() == pytest.approx(mode.max_budget_usd - 0.05)
+
+    behaviour["CARTOGRAPHER"] = {"cost": 1.0, "publish_map": True}
+    report = await make_conductor(cfg, tmp_path).run("pr-check", run_id=store.run_id)
+
+    assert report.stopped_early, "the resumed run ignored what the run had already spent"
+    assert "spend cap" in report.stopped_early

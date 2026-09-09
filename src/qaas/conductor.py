@@ -109,10 +109,19 @@ class RunReport:
 class Budget:
     """The spend and wall-clock governor. Checked before every dispatch."""
 
-    def __init__(self, max_usd: float, max_seconds: int):
+    def __init__(self, max_usd: float, max_seconds: int, *, already_spent: float = 0.0):
         self.max_usd = max_usd
         self.max_seconds = max_seconds
-        self.spent = 0.0
+        #: What this run has already cost, including earlier invocations.
+        #:
+        #: A resumed run (`qaas run --run-id <existing>`) used to start the
+        #: counter at zero, so the cap was per *invocation*, not per run --
+        #: resume three times against a $20 mode and you could spend $60 while
+        #: every individual pass reported itself within budget. One real run
+        #: shows the effect: `cost $32.90 of $20.00 budget`. The wall clock is
+        #: deliberately NOT carried across: it measures this process, and a run
+        #: resumed the next morning has not been running all night.
+        self.spent = already_spent
         self.started = time.monotonic()
 
     @property
@@ -193,7 +202,13 @@ class Conductor:
         specs = {s.name: s for s in self.config.enabled_agents(mode)}
         run_mode = self.config.run_modes[mode]
         store = RunStore(run_id, self.root) if run_id else RunStore.new(self.root)
-        budget = Budget(run_mode.max_budget_usd, run_mode.max_wall_clock_s)
+        # Carry forward what this run id has already spent, so a cap survives a
+        # resumption instead of resetting with it.
+        budget = Budget(
+            run_mode.max_budget_usd,
+            run_mode.max_wall_clock_s,
+            already_spent=store.total_cost_usd() if run_id else 0.0,
+        )
         report = RunReport(run_id=store.run_id, mode=mode)
 
         store.log(
