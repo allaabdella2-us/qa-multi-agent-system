@@ -110,7 +110,7 @@ class RunReport:
 class Budget:
     """The spend and wall-clock governor. Checked before every dispatch."""
 
-    def __init__(self, max_usd: float, max_seconds: int, *, already_spent: float = 0.0):
+    def __init__(self, max_usd: float | None, max_seconds: int, *, already_spent: float = 0.0):
         self.max_usd = max_usd
         self.max_seconds = max_seconds
         #: What this run has already cost, including earlier invocations.
@@ -130,23 +130,28 @@ class Budget:
         return time.monotonic() - self.started
 
     @property
-    def remaining_usd(self) -> float:
-        return max(0.0, self.max_usd - self.spent)
+    def remaining_usd(self) -> float | None:
+        return None if self.max_usd is None else max(0.0, self.max_usd - self.spent)
 
     def spend(self, amount: float) -> None:
         self.spent += amount
 
     def check(self) -> None:
-        if self.spent >= self.max_usd:
+        # `max_usd is None` means no spend ceiling -- the shipped config sets
+        # none, because a dollar figure bakes one vendor's pricing into a tool
+        # meant to run against local models too. The wall-clock cap and each
+        # agent's `max_turns` still bound a run; those are model-agnostic.
+        if self.max_usd is not None and self.spent >= self.max_usd:
             raise BudgetExceeded(f"spend cap reached: ${self.spent:.2f} of ${self.max_usd:.2f}")
         if self.elapsed >= self.max_seconds:
             raise BudgetExceeded(
                 f"wall-clock cap reached: {self.elapsed:.0f}s of {self.max_seconds}s"
             )
 
-    def allowance(self, spec: AgentSpec) -> float:
-        """What this agent may spend: its own cap, or what the run has left."""
-        return max(0.01, min(spec.max_budget_usd, self.remaining_usd))
+    def allowance(self, spec: AgentSpec) -> float | None:
+        """What this agent may spend, or None when neither it nor the run caps it."""
+        caps = [c for c in (spec.max_budget_usd, self.remaining_usd) if c is not None]
+        return max(0.01, min(caps)) if caps else None
 
 
 class Conductor:

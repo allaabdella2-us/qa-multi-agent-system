@@ -74,7 +74,8 @@ class AgentSpec(BaseModel):
     model: str = "claude-opus-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_turns: int = 40
-    max_budget_usd: float = 2.0
+    max_budget_usd: float | None = None
+
 
     mcp_servers: list[str] = Field(default_factory=list)
     builtin_tools: list[str] = Field(default_factory=list)
@@ -165,7 +166,8 @@ class RunMode(BaseModel):
 
     trigger: str
     agents: list[str]
-    max_budget_usd: float = 10.0
+    max_budget_usd: float | None = None
+
     max_wall_clock_s: int = 3600
     max_concurrency: int = 3
     files_tickets: bool = True

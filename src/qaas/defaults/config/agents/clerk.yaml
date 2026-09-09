@@ -8,7 +8,6 @@ prompt: CLERK.md
 model: claude-sonnet-5      # composition against a fixed rubric and house format
 effort: high
 max_turns: 50
-max_budget_usd: 2.0
 mcp_servers: [envelope, tracker, defect_memory]
 builtin_tools: [Read]
 policy:

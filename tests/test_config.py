@@ -121,11 +121,20 @@ def test_incident_mode_files_nothing(cfg):
     assert "CLERK" not in incident.agents
 
 
-def test_every_run_mode_is_budgeted(cfg):
+def test_every_run_mode_is_bounded(cfg):
+    """Every mode must have SOME bound. It used to be a dollar cap; the shipped
+    config sets none now, because a price belongs to one vendor and this is
+    meant to run against local models too. The wall clock is the bound that
+    survives that, and `max_turns` bounds each agent."""
     for name, mode in cfg.run_modes.items():
-        assert mode.max_budget_usd > 0, name
-        assert mode.max_wall_clock_s > 0, name
+        assert mode.max_wall_clock_s > 0, f"{name} has no wall-clock bound"
+        assert mode.max_concurrency > 0, f"{name} has no concurrency bound"
 
+
+def test_no_vendor_pricing_is_baked_into_the_shipped_config(cfg):
+    """A dollar figure in the defaults is a bet on one provider's price list."""
+    assert all(s.max_budget_usd is None for s in cfg.agents.values())
+    assert all(m.max_budget_usd is None for m in cfg.run_modes.values())
 
 def test_enabled_agents_resolves_a_mode(cfg):
     names = [s.name for s in cfg.enabled_agents("pr-check")]
@@ -209,16 +218,12 @@ def test_a_nonsense_override_is_rejected_loudly(monkeypatch):
         load_config(search=CONFIG_SEARCH)
 
 
-def test_every_mode_can_afford_the_agents_it_names():
-    """A mode whose roster outspends its cap stops partway through and looks
-    like it worked. `pr-check` shipped with a $6 cap against a $15 roster:
-    discovery alone spent $6.09, so FORGE and CLERK never dispatched and the
-    mode meant for every pull request could not file a ticket. Nothing errored,
-    which is what made it survive."""
+def test_a_mode_that_cannot_afford_its_agents_is_rejected():
+    """Still enforced -- but only when someone actually sets caps, since the
+    shipped config sets none."""
     cfg = load_config(search=CONFIG_SEARCH)
     for name, mode in cfg.run_modes.items():
-        needed = sum(cfg.agents[a].max_budget_usd for a in mode.agents if a in cfg.agents)
-        assert needed <= mode.max_budget_usd, (
-            f"mode '{name}' names agents that can spend ${needed:.2f} against a "
-            f"${mode.max_budget_usd:.2f} cap; it will stop before the last agent runs"
-        )
+        caps = [cfg.agents[a].max_budget_usd for a in mode.agents
+                if a in cfg.agents and cfg.agents[a].max_budget_usd is not None]
+        if caps and mode.max_budget_usd is not None:
+            assert sum(caps) <= mode.max_budget_usd, f"mode '{name}' cannot finish"

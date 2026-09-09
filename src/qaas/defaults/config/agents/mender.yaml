@@ -10,7 +10,6 @@ prompt: MENDER.md
 model: claude-opus-5
 effort: high
 max_turns: 80
-max_budget_usd: 5.0
 mcp_servers: [envelope, test_runner, env_control, vcs, tracker, contract_diff]
 builtin_tools: [Read, Grep, Glob, Write, Edit, Bash]
 skills: [test-first-fix, minimal-diff-discipline, root-cause-vs-symptom, rollback-plan-authoring]

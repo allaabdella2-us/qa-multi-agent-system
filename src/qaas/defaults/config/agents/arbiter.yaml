@@ -9,7 +9,6 @@ prompt: ARBITER.md
 model: claude-opus-5
 effort: high
 max_turns: 50
-max_budget_usd: 3.0
 mcp_servers: [envelope, vcs, contract_diff, test_runner]
 builtin_tools: [Read, Grep, Glob]
 skills: [adversarial-review, root-cause-vs-symptom, regression-risk-scoring, test-quality-audit]

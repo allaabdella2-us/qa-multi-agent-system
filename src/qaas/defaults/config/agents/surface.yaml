@@ -8,7 +8,6 @@ prompt: SURFACE.md
 model: claude-opus-5
 effort: high
 max_turns: 80
-max_budget_usd: 4.0
 mcp_servers: [envelope, env_control, playwright]
 builtin_tools: [Read, Grep, Glob]
 policy: {}

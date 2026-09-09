@@ -7,7 +7,6 @@ prompt: CARTOGRAPHER.md
 model: claude-sonnet-5      # extraction, not judgment
 effort: medium
 max_turns: 60
-max_budget_usd: 2.0
 mcp_servers: [envelope]
 builtin_tools: [Read, Grep, Glob]
 policy: {}                  # read-only

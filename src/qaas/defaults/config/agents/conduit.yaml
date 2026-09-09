@@ -8,7 +8,6 @@ prompt: CONDUIT.md
 model: claude-opus-5
 effort: high
 max_turns: 60
-max_budget_usd: 3.0
 mcp_servers: [envelope, contract_diff, env_control, defect_memory]
 builtin_tools: [Read, Grep, Glob]
 policy: {}

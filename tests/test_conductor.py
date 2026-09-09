@@ -168,10 +168,18 @@ async def test_each_forge_invocation_gets_its_own_finding(cfg, tmp_path, fake_ag
 
 
 async def test_a_spend_blowout_stops_the_run_and_escalates(cfg, tmp_path, fake_agents):
+    """The governor still works; it just no longer ships with a dollar figure.
+
+    Shipped config sets no `max_budget_usd` -- a price belongs to one vendor and
+    this runs against local models too -- so a test about spend has to declare
+    the cap it is testing.
+    """
     calls, behaviour = fake_agents
     behaviour["CARTOGRAPHER"] = {"publish_map": True, "cost": 99.0}
 
-    report = await make_conductor(cfg, tmp_path).run("pr-check")
+    mode = cfg.run_modes["pr-check"].model_copy(update={"max_budget_usd": 10.0})
+    capped = cfg.model_copy(update={"run_modes": {**cfg.run_modes, "pr-check": mode}})
+    report = await make_conductor(capped, tmp_path).run("pr-check")
     assert report.stopped_early and "spend cap" in report.stopped_early
     assert "CLERK" not in [n for n, _ in calls]
     assert report.escalations
@@ -533,13 +541,15 @@ async def test_a_resumed_run_keeps_the_budget_it_already_spent(cfg, tmp_path, fa
     store = RunStore.new(tmp_path)
 
     # A first invocation that has already consumed most of the mode's cap.
-    mode = cfg.run_modes["pr-check"]
-    store.put_result(AgentResult(agent="CONDUIT", subtype="success",
-                                 cost_usd=mode.max_budget_usd - 0.05, num_turns=1))
-    assert store.total_cost_usd() == pytest.approx(mode.max_budget_usd - 0.05)
+    capped_mode = cfg.run_modes["pr-check"].model_copy(update={"max_budget_usd": 5.0})
+    capped = cfg.model_copy(update={"run_modes": {**cfg.run_modes, "pr-check": capped_mode}})
+    store.put_result(AgentResult(agent="CONDUIT", subtype="success", cost_usd=4.95, num_turns=1))
+    assert store.total_cost_usd() == pytest.approx(4.95)
 
     behaviour["CARTOGRAPHER"] = {"cost": 1.0, "publish_map": True}
-    report = await make_conductor(cfg, tmp_path).run("pr-check", run_id=store.run_id)
+    # The shipped config sets no cap, so this test supplies one -- the governor
+    # is still there, it just no longer bakes a dollar figure into defaults.
+    report = await make_conductor(capped, tmp_path).run("pr-check", run_id=store.run_id)
 
     assert report.stopped_early, "the resumed run ignored what the run had already spent"
     assert "spend cap" in report.stopped_early

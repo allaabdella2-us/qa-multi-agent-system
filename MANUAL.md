@@ -140,16 +140,21 @@ auth:
 
 ## 🎛️ Run modes
 
-| mode | budget | agents | when |
-|---|--:|---|---|
-| `incident` | $4 | CONDUIT | diagnose one thing, file nothing |
-| `pr-check` | $16 | CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK | on a pull request |
-| `nightly` | $40 | same five | the scheduled sweep |
-| `fix-cycle` | $20 | PROOF, MENDER, ARBITER | take a filed ticket and fix it |
-| `full-loop` | $60 | all eight | discover → file → fix → verify |
+| mode | agents | when |
+|---|---|---|
+| `incident` | CONDUIT | diagnose one thing, file nothing |
+| `pr-check` | CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK | on a pull request |
+| `nightly` | same seven | the scheduled sweep |
+| `fix-cycle` | PROOF, MENDER, ARBITER | take a filed ticket and fix it |
+| `full-loop` | all ten | discover → file → fix → verify |
 
-Budgets are **caps, not estimates**. The governor checks before every dispatch and
-stops the run rather than exceeding them. The cap survives a resume.
+Every mode is bounded by a **wall clock** and each agent by **`max_turns`** —
+both model-agnostic, so they mean the same thing against a local model as against
+a hosted one.
+
+No spend cap ships by default: a dollar figure is one vendor's price list. Set
+`max_budget_usd` on a mode or an agent if you want a ceiling, and the governor
+enforces it before every dispatch.
 
 ---
 
@@ -366,18 +371,17 @@ summary of it — nothing is hidden from you.
 
 ---
 
-## 💸 Keeping the bill down
+## 💸 Keeping runs bounded
 
 - **`--dry-run` first, always.** It is free and shows exactly what would happen.
 - **`--only AGENT`** while you are tuning. One agent is a fraction of a full run.
-- **FORGE runs once per finding.** A finding-heavy run costs more than an
-  agent-heavy one; that is the main thing that surprises people.
-- **Budgets are caps.** The run stops rather than overrunning, and the cap
-  survives `--run-id` resumption.
+- **FORGE runs once per finding**, so a finding-heavy run is longer than an
+  agent-heavy one. That is the thing that most often surprises people.
+- **`max_turns`** is the per-agent bound, and **`max_wall_clock_s`** the per-mode
+  one. Both are enforced in code and neither assumes a provider.
 - **`incident` mode files nothing** — useful for diagnosing without paperwork.
-
-Measured medians per dispatch: SURFACE $3.34, MENDER $2.03, CONDUIT $1.97,
-FORGE $1.61 per finding, PROOF/ARBITER ~$1.00, CLERK/CARTOGRAPHER ~$0.70.
+- Set **`max_budget_usd`** on a mode or an agent if you are running against a
+  paid API and want a hard ceiling. Nothing ships with one.
 
 ---
 

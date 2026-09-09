@@ -115,10 +115,24 @@ def test_the_timeline_carries_the_facts_not_just_the_kinds(runner, run):
     assert "CORVID-1" in output
 
 
-def test_cost_accumulates_through_the_run(runner, run):
+def test_cost_is_recorded_in_the_ledger_but_never_printed(runner, run):
+    """Cost is data, not display.
+
+    `qaas trace` used to carry a running-total column. The shipped config sets
+    no spend cap now -- a dollar figure is one vendor's price list, and this is
+    meant to run against local models too -- so printing money everywhere made
+    a Claude-specific assumption look like a property of the tool. The ledger
+    still records `cost_usd` on every `agent_finished`, so nothing is lost and
+    `--json` still carries it.
+    """
     output = _trace(runner, run)
-    assert "$1.25" in output, "CONDUIT's cost"
-    assert "$2.00" in output, "the running total after FORGE, not FORGE's $0.75"
+    assert "$" not in output, "a dollar figure reached the terminal"
+
+    entries = trace_mod.read_ledger(run)
+    finished = [e for e in entries if e.kind == "agent_finished"]
+    assert finished and any("cost_usd" in e.detail for e in finished), (
+        "cost stopped being recorded; it should only have stopped being printed"
+    )
 
 
 def test_consecutive_tool_calls_fold_into_one_row(run):
@@ -204,11 +218,11 @@ def test_json_output_survives_a_detail_longer_than_the_console(runner, tmp_path)
 # -- qaas show --------------------------------------------------------------
 
 
-def test_show_reports_cost_mode_duration_and_escalations(runner, run):
+def test_show_reports_mode_duration_and_escalations(runner, run):
     result = runner.invoke(cli.app, ["show", run.run_id, "--root", str(run.root)])
     assert result.exit_code == 0, result.output
     assert "fix-cycle" in result.output
-    assert "$2.00" in result.output, "cost, which show never printed"
+    assert "$" not in result.output, "no dollar figure should be printed"
     assert "duration" in result.output
     assert "escalations" in result.output and "CORVID-2 needs a human" in result.output
 

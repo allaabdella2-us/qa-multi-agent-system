@@ -500,14 +500,18 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
     # never dispatched. The mode meant for every pull request could not file a
     # ticket. It took a live run to notice; this check makes it free.
     for mode_name, mode in sorted(cfg.run_modes.items()):
-        needed = sum(
-            cfg.agents[a].max_budget_usd for a in mode.agents if a in cfg.agents
-        )
-        if needed > mode.max_budget_usd:
+        # Only meaningful when both sides declare a cap. The shipped config
+        # declares none, so this check simply does not fire there.
+        agent_caps = [
+            cfg.agents[a].max_budget_usd for a in mode.agents
+            if a in cfg.agents and cfg.agents[a].max_budget_usd is not None
+        ]
+        needed = sum(agent_caps)
+        if mode.max_budget_usd is not None and agent_caps and needed > mode.max_budget_usd:
             missing = [a for a in mode.agents if a in cfg.agents][-1]
             problems.append(
-                f"mode '{mode_name}': agents can spend ${needed:.2f} but the cap is "
-                f"${mode.max_budget_usd:.2f}, so the run stops before it reaches "
+                f"mode '{mode_name}': the agents' caps exceed the mode's cap, so "
+                f"its cap, so the run stops before it reaches "
                 f"{missing} and files nothing. Raise max_budget_usd or drop an agent"
             )
 
@@ -567,7 +571,7 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
         filing = "" if rm.files_tickets else "  [dim](no filing)[/dim]"
         console.print(
             f"[bold]{mode}[/bold]: {', '.join(rm.agents)}  "
-            f"[dim]budget ${rm.max_budget_usd:.2f}, {rm.max_wall_clock_s}s[/dim]{filing}"
+            f"[dim]{rm.max_wall_clock_s}s[/dim]{filing}"
         )
 
     if notes:
@@ -834,7 +838,7 @@ def runs(root: Path = Root, limit: int = 10) -> None:
         console.print("[dim]no runs yet[/dim]")
         return
     table = Table(header_style="bold")
-    for col in ("run", "envelopes", "agents", "cost"):
+    for col in ("run", "envelopes", "agents"):
         table.add_column(col)
     for run_id in ids:
         store = RunStore(run_id, root)
@@ -843,7 +847,6 @@ def runs(root: Path = Root, limit: int = 10) -> None:
             run_id,
             str(len(store.envelopes())),
             str(len(results)),
-            f"${store.total_cost_usd():.2f}",
         )
     console.print(table)
 
@@ -872,9 +875,6 @@ def show(run_id: str, root: Path = Root) -> None:
         header.append(f"started {summary.started:%Y-%m-%d %H:%M:%S}Z")
     if summary.duration_s is not None:
         header.append(f"duration {summary.duration_s:.0f}s")
-    header.append(f"cost ${summary.cost_usd:.2f}")
-    if summary.budget_usd:
-        header.append(f"of ${summary.budget_usd:.2f} budget")
     console.print("  " + "  ".join(header))
     if summary.target_sha:
         dirty = " [yellow](dirty tree)[/yellow]" if summary.target_dirty else ""
@@ -960,7 +960,6 @@ def trace(
     table.add_column("agent", style="cyan")
     table.add_column("kind")
     table.add_column("detail", overflow="fold")
-    table.add_column("cost", justify="right", style="dim")
     for row in trace_mod.timeline(entries):
         label = f"{row.kind} ×{row.count}" if row.count > 1 else row.kind
         table.add_row(
@@ -968,7 +967,6 @@ def trace(
             row.agent,
             f"[{KIND_STYLE.get(row.kind, 'white')}]{label}[/]",
             row.detail,
-            f"${row.cost_usd:.2f}" if row.cost_usd is not None else "",
         )
     console.print(table)
     console.print(f"\n[dim]{len(entries)} entries[/dim]")
@@ -1082,7 +1080,7 @@ def run(
     rm = cfg.run_modes[mode]
     console.print(
         f"[bold]{mode}[/bold] — {len(specs)} agents, "
-        f"budget ${rm.max_budget_usd:.2f}, concurrency {rm.max_concurrency}"
+        f"concurrency {rm.max_concurrency}"
     )
 
     if dry_run:
@@ -1093,7 +1091,7 @@ def run(
             d = describe(spec, prompt_dirs)
             console.print(
                 f"  [bold]{spec.name:14s}[/bold] {spec.model:18s} effort={spec.effort:7s} "
-                f"turns<={spec.max_turns:<3d} ${spec.max_budget_usd:.2f}"
+                f"turns<={spec.max_turns}"
             )
             console.print(f"    tools: {', '.join(d['allowed_tools'])}")
             console.print(f"    prompt: {d['prompt_chars']} chars")
@@ -1101,11 +1099,11 @@ def run(
 
     def on_event(kind: str, detail: dict) -> None:
         if kind == "agent_started":
-            console.print(f"[dim]->[/dim] {detail.get('agent')} [dim](${detail.get('budget', 0):.2f})[/dim]")
+            console.print(f"[dim]->[/dim] {detail.get('agent')}")
         elif kind == "finished":
             console.print(
                 f"[dim]<-[/dim] {detail.get('agent')} "
-                f"[dim]${detail.get('cost', 0):.3f}, {detail.get('envelopes', 0)} findings[/dim]"
+                f"[dim]{detail.get('envelopes', 0)} findings[/dim]"
             )
         elif kind == "stopped":
             console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
@@ -1172,11 +1170,6 @@ def score(
     table.add_row("false positives", f"{s['false_positives']} ({s['false_positive_rate']:.0%})")
     table.add_row("duplicates", f"{s['duplicates']} ({s['duplicate_rate']:.0%})")
     table.add_row("severity agreement", f"{s['severity_agreement']:.0%}")
-    table.add_row("cost", f"${s['cost_usd']:.2f}")
-    table.add_row(
-        "cost per accepted",
-        f"${s['cost_per_accepted']:.2f}" if s["cost_per_accepted"] is not None else "-",
-    )
     console.print(table)
 
     if card.matches:

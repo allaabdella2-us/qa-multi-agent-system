@@ -9,6 +9,11 @@ target:
 tracker: local      # local | jira   -- swap to file against real Jira
 vcs: local          # local | github
 
+# No spend cap by default. A dollar figure bakes one vendor's pricing into
+# the config, and this is meant to run against local models too. `max_turns`
+# is the model-agnostic bound. Set `max_budget_usd` here if you want a
+# ceiling; the governor enforces one whenever it is present.
+
 thresholds:
   min_confidence_to_file: 0.6      # §7 confidence gate
   max_findings_per_agent_run: 25   # §8.3 loop breaker: pause and escalate, don't file
@@ -21,30 +26,18 @@ run_modes:
   pr-check:
     trigger: pull_request
     agents: [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]
-    # Was 6.0, which this roster could not complete. Measured on a real run:
-    # CARTOGRAPHER $0.69 + CONDUIT $2.25 + SURFACE $3.16 = $6.09, so the governor
-    # stopped the run before FORGE or CLERK ever dispatched. The mode meant to
-    # run on every pull request could not file a ticket, and it failed silently:
-    # agents ran, findings landed in the ledger, nothing errored. `qaas validate`
-    # now refuses a mode whose agents cannot fit inside its cap.
-    max_budget_usd: 16.0
     max_wall_clock_s: 900
     max_concurrency: 2
 
   nightly:
     trigger: cron
     agents: [CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK]
-    # FORGE runs once per finding, so the deep sweep's budget scales with how
-    # much discovery found, not with the number of agents. Measured: discovery
-    # ~$6, then roughly $1-2 per finding reproduced.
-    max_budget_usd: 50.0
     max_wall_clock_s: 7200
     max_concurrency: 3
 
   incident:
     trigger: alert
     agents: [CONDUIT]
-    max_budget_usd: 4.0
     max_wall_clock_s: 600
     max_concurrency: 2
     files_tickets: false          # §9: diagnostic only, read-only, no filing
@@ -55,7 +48,6 @@ run_modes:
   fix-cycle:
     trigger: agent_ready_ticket
     agents: [PROOF, MENDER, ARBITER]
-    max_budget_usd: 20.0
     max_wall_clock_s: 3600
     max_concurrency: 1
 
@@ -64,6 +56,5 @@ run_modes:
   full-loop:
     trigger: on_demand
     agents: [CARTOGRAPHER, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK, MENDER, ARBITER, PROOF]
-    max_budget_usd: 70.0
     max_wall_clock_s: 10800
     max_concurrency: 3
