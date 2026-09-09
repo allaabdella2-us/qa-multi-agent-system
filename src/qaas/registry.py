@@ -9,6 +9,8 @@ allowlist that §5.3 depends on.
 from __future__ import annotations
 
 import importlib
+import os
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,11 +62,66 @@ def build_system_prompt(spec: AgentSpec, prompts_dir: Path = PROMPTS_DIR) -> str
     return f"{own.read_text().rstrip()}\n\n{shared.strip()}\n"
 
 
+class MissingServerEnv(RuntimeError):
+    """A declared server references an environment variable that is not set."""
+
+
+def expand_env(value: str, *, where: str) -> str:
+    """Substitute `${VAR}` from the environment, loudly.
+
+    The CLI would do this itself -- `--mcp-config` is parsed with
+    `expandVars` on -- but two things argue for doing it here. An unset
+    variable becomes an empty string down there, so a missing token surfaces
+    much later as an unexplained auth failure rather than as the missing token
+    it is. And it is an implementation detail of a vendored binary found by
+    reading it, not a documented contract; `sdk_compat.py` exists because this
+    project does not build on those.
+
+    Expanding here is idempotent with respect to the CLI: a value with no `${`
+    left in it is passed through unchanged.
+    """
+    def replace(match: "re.Match[str]") -> str:
+        var = match.group(1)
+        got = os.environ.get(var)
+        if got is None:
+            raise MissingServerEnv(
+                f"{where} references ${{{var}}} and it is not set. "
+                "Export it, or remove the reference -- a credential belongs in "
+                "the environment, never in a config file."
+            )
+        return got
+
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", replace, value)
+
+
+def _declared_server(name: str, spec: Any) -> dict[str, Any]:
+    """Turn a user's YAML declaration into the dict the SDK expects."""
+    payload = spec.model_dump(exclude_none=True)
+    where = f"MCP server '{name}'"
+    for key in ("command", "url"):
+        if key in payload:
+            payload[key] = expand_env(str(payload[key]), where=where)
+    if "args" in payload:
+        payload["args"] = [expand_env(str(a), where=where) for a in payload["args"]]
+    for key in ("env", "headers"):
+        if key in payload:
+            payload[key] = {k: expand_env(str(v), where=where) for k, v in payload[key].items()}
+    return payload
+
+
 def build_mcp_servers(spec: AgentSpec, ctx: ToolContext) -> dict[str, Any]:
-    """Instantiate exactly the servers this agent declared, and no others."""
+    """Instantiate exactly the servers this agent declared, and no others.
+
+    Config-declared servers resolve FIRST, so a project can override a built-in
+    -- the bundled Playwright entry is hardcoded down to `--browser chromium`,
+    and someone testing Firefox should not have to fork the package to say so.
+    """
+    declared = dict(getattr(ctx.config, "mcp_servers", {}) or {})
     servers: dict[str, Any] = {}
     for name in spec.mcp_servers:
-        if name in SDK_SERVER_MODULES:
+        if name in declared:
+            servers[name] = _declared_server(name, declared[name])
+        elif name in SDK_SERVER_MODULES:
             module = importlib.import_module(SDK_SERVER_MODULES[name])
             servers[name] = module.build(ctx)
         elif name in STDIO_SERVERS:
@@ -72,8 +129,10 @@ def build_mcp_servers(spec: AgentSpec, ctx: ToolContext) -> dict[str, Any]:
         else:
             raise UnknownServer(
                 f"{spec.name} declares MCP server '{name}', which is neither an "
-                f"in-process server ({', '.join(sorted(SDK_SERVER_MODULES))}) nor a "
-                f"known stdio server ({', '.join(sorted(STDIO_SERVERS))})."
+                f"in-process server ({', '.join(sorted(SDK_SERVER_MODULES))}), a "
+                f"known stdio server ({', '.join(sorted(STDIO_SERVERS))}), nor "
+                f"declared under `mcp_servers:` in system.yaml "
+                f"({', '.join(sorted(declared)) or 'nothing declared'})."
             )
     return servers
 

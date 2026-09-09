@@ -53,7 +53,8 @@ AGENTS = ["CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK", "PROOF", "MEND
 
 
 def test_every_server_named_in_config_has_an_implementation(cfg):
-    known = set(SDK_SERVER_MODULES) | set(STDIO_SERVERS)
+    # A project may also declare its own under `mcp_servers:` in system.yaml.
+    known = set(SDK_SERVER_MODULES) | set(STDIO_SERVERS) | set(cfg.mcp_servers)
     for name, spec in cfg.agents.items():
         unknown = set(spec.mcp_servers) - known
         assert not unknown, f"{name} declares unimplemented servers: {unknown}"

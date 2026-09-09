@@ -113,6 +113,42 @@ class AgentSpec(BaseModel):
         return prompts_dir / self.prompt
 
 
+class StdioServerSpec(BaseModel):
+    """A user-declared MCP server run as a subprocess.
+
+    Pure data: `command` and `args` are passed to the CLI, which spawns it. No
+    shell, ever -- `command` is a program and `args` is a list, so a string like
+    `"foo && rm -rf /"` is a program name that does not exist rather than two
+    commands.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["stdio"] = "stdio"
+    command: str
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class UrlServerSpec(BaseModel):
+    """A user-declared MCP server reached over HTTP or SSE."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["http", "sse"]
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+#: What a user may declare. Deliberately no in-process Python type: that would
+#: mean `importlib.import_module` on a name from a config file, executing
+#: arbitrary module-level code inside the process holding this user's Anthropic
+#: credentials, Jira token and GitHub auth. A subprocess is a subprocess; an
+#: import is a foothold. If someone needs a Python server they can wrap it in a
+#: stdio entry point and it costs them one line.
+McpServerSpec = StdioServerSpec | UrlServerSpec
+
+
 class Thresholds(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -151,6 +187,11 @@ class SystemConfig(BaseModel):
     #: Repository root of the target, resolved from the profile at load time.
     #: Kept as a plain path because most callers only need that much.
     target_app: str = "target-app"
+    #: Servers this project declares, on top of the built-in ones. Declaring a
+    #: server here grants nothing; an agent receives it only by naming it in its
+    #: own `mcp_servers:` list.
+    mcp_servers: dict[str, McpServerSpec] = Field(default_factory=dict)
+
     #: Overridable with QAAS_TRACKER. Keep the committed value `local`.
     tracker: Literal["local", "jira"] = "local"
     vcs: Literal["local", "github"] = "local"
@@ -158,6 +199,32 @@ class SystemConfig(BaseModel):
     run_modes: dict[str, RunMode] = Field(default_factory=dict)
     agents: dict[str, AgentSpec] = Field(default_factory=dict)
     profile: TargetProfile | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _agents_name_real_servers(self) -> "SystemConfig":
+        """Every server an agent names must resolve to something.
+
+        `AgentSpec` cannot check this -- it has no view of the rest of the
+        config -- so an unresolvable name used to surface as `UnknownServer`
+        part-way through a paid run. Here it is a load-time error, which is what
+        `qaas validate` is for.
+
+        Imported inside the function: `registry` imports `config`, so a
+        module-level import would be a cycle.
+        """
+        from qaas.registry import SDK_SERVER_MODULES, STDIO_SERVERS
+
+        builtin = set(SDK_SERVER_MODULES) | set(STDIO_SERVERS)
+        known = builtin | set(self.mcp_servers)
+        for name, spec in sorted(self.agents.items()):
+            unknown = [s for s in spec.mcp_servers if s not in known]
+            if unknown:
+                raise ValueError(
+                    f"{name} names MCP server(s) nothing provides: {', '.join(unknown)}. "
+                    f"Built in: {', '.join(sorted(builtin))}. "
+                    f"Declared in system.yaml: {', '.join(sorted(self.mcp_servers)) or 'none'}."
+                )
+        return self
 
     @model_validator(mode="after")
     def _modes_name_real_agents(self) -> "SystemConfig":

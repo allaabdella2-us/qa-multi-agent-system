@@ -227,6 +227,7 @@ def init(
         table.add_row(label, value)
     console.print(table)
 
+
     for note in notes:
         console.print(f"[yellow]note:[/yellow] {note}")
 
@@ -396,6 +397,31 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
             writes,
         )
     console.print(table)
+
+    # Show every subprocess a run would spawn, and every URL it would reach.
+    #
+    # Declaring a server grants nothing on its own -- an agent receives one only
+    # by naming it in its own `mcp_servers:` list -- but once it does, the tools
+    # of that server are allowed wholesale: `build_allowed_tools` grants
+    # `mcp__<server>` and the guardrail's only question is whether the agent
+    # declared it. qaas cannot police what a third-party server's tools do. So
+    # the least this command can do is print what will run, before it runs.
+    if cfg.mcp_servers:
+        spawn = Table(title="Declared MCP servers", header_style="bold")
+        for col in ("name", "kind", "what it runs", "used by"):
+            spawn.add_column(col)
+        for name, decl in sorted(cfg.mcp_servers.items()):
+            users = [a for a, sp in sorted(cfg.agents.items()) if name in sp.mcp_servers]
+            if decl.type == "stdio":
+                what = " ".join([decl.command, *decl.args])
+            else:
+                what = decl.url
+            spawn.add_row(name, decl.type, what, ", ".join(users) or "[dim]nobody[/dim]")
+        console.print(spawn)
+        console.print(
+            "[dim]These run with this process's environment. A server's tools are "
+            "allowed wholesale once an agent names it.[/dim]"
+        )
 
     for mode, rm in sorted(cfg.run_modes.items()):
         filing = "" if rm.files_tickets else "  [dim](no filing)[/dim]"
