@@ -290,21 +290,29 @@ the refusal and adapts.
 
 Against the bundled demo app and its golden ledger:
 
-| metric | value |
-|---|--:|
-| 🎯 recall | **81%** — 13 of 16 seeded defects |
-| 🔇 precision | **100%** — 0 false positives |
-| 🏷️ severity agreement | **100%** |
-| 🔁 duplicate rate | 13% |
+Two runs against the demo app, scored automatically:
+
+| metric | run A (full loop) | run B (discovery only) |
+|---|--:|--:|
+| 🎯 recall | **81%** — 13 of 16 | **69%** — 11 of 16 |
+| 🔇 precision | **100%** — 0 FP | **92%** — 1 FP |
+| 🏷️ severity agreement | **100%** | **100%** |
+| 💵 cost per accepted finding | $1.12 | $0.64 |
+
+**Both numbers are shown on purpose.** A single figure would be the flattering
+one, and it would not survive contact with a second run. These are stochastic
+agents: the two runs did not find the same 11–13 defects — run B caught a
+contrast failure run A missed, and missed three run A found. Expect variance of
+this order.
 
 The ledger's `not_defects` section plants **correct-but-suspicious** code, so
 precision is measured rather than assumed.
 
 > [!CAUTION]
 > **Treat this as a floor, not a proof.** Seeded defects are easier than real
-> ones and the system was calibrated against them. These numbers show the loop
-> works end to end and does not spray false positives — not that it will find the
-> hard bug in your codebase.
+> ones and the system was calibrated against them. Two runs is not a sample.
+> These numbers show the loop works end to end and does not spray false
+> positives — not that it will find the hard bug in your codebase.
 
 ---
 
