@@ -52,6 +52,7 @@ class Layout(BaseModel):
         for label, paths in (
             ("backend", self.backend), ("frontend", self.frontend),
             ("tests", self.tests), ("migrations", self.migrations),
+            ("docs", self.docs),
         ):
             if paths:
                 bits.append(f"{label}: {', '.join(paths)}")

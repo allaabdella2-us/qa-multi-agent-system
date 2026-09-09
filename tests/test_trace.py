@@ -388,3 +388,86 @@ def test_run_started_pins_the_run_to_a_commit(tmp_path, monkeypatch):
 def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
                           text=True, check=True).stdout
+
+
+# -- following a live run ---------------------------------------------------
+#
+# `qaas trace --follow` is how someone watches a run they are paying for while
+# it happens rather than reading it back afterwards. The ledger being
+# append-only is what makes it safe: a reader can hold a byte offset and never
+# be wrong about it.
+
+
+def test_following_a_finished_run_stops_at_run_finished(run):
+    entries = list(trace_mod.tail(run, poll=0.0))
+    assert entries[0].kind == LedgerKind.RUN_STARTED
+    assert entries[-1].kind == LedgerKind.RUN_FINISHED
+
+
+def test_a_half_written_line_is_not_an_entry_and_is_picked_up_later(tmp_path):
+    """A run can be mid-write when this reads. Half a JSON object is not an
+    entry, and raising on it would kill the view over a normal race."""
+    store = RunStore("run-partial-0001", tmp_path)
+    store.log("run_started", mode="nightly")
+    complete = store.ledger_path.read_text()
+    entry = LedgerEntry(kind=LedgerKind.DENIAL, agent="CONDUIT", detail={"tool": "Bash"})
+    line = entry.model_dump_json()
+    store.ledger_path.write_text(complete + line[: len(line) // 2])
+
+    stream = trace_mod.tail(store, poll=0.0, timeout_s=0.0)
+    first = next(stream)
+    assert first.kind == LedgerKind.RUN_STARTED
+    assert next(stream, None) is None            # the fragment is not yielded
+
+    store.ledger_path.write_text(complete + line + "\n")
+    assert [e.kind for e in trace_mod.tail(store, poll=0.0, timeout_s=0.0)] == [
+        LedgerKind.RUN_STARTED, LedgerKind.DENIAL
+    ]
+
+
+def test_following_a_run_that_has_not_started_yet_is_not_an_error(tmp_path):
+    """The normal case: `qaas trace --follow` typed while the run is starting."""
+    store = RunStore("run-not-yet-0001", tmp_path)
+    assert list(trace_mod.tail(store, poll=0.0, timeout_s=0.0)) == []
+
+
+def test_from_start_false_skips_what_already_happened(run):
+    assert list(trace_mod.tail(run, from_start=False, poll=0.0, timeout_s=0.0)) == []
+
+
+def test_follow_streams_entries_appended_after_it_started(tmp_path):
+    store = RunStore("run-live-0001", tmp_path)
+    store.log("run_started", mode="nightly")
+    stream = trace_mod.tail(store, poll=0.0)
+    assert next(stream).kind == LedgerKind.RUN_STARTED
+
+    store.log("agent_started", agent="CONDUIT", model="claude-opus-5")
+    assert next(stream).kind == LedgerKind.AGENT_STARTED
+
+    store.log("run_finished", agents_run=1, cost_usd=0.0, failed=[])
+    assert next(stream).kind == LedgerKind.RUN_FINISHED
+    assert next(stream, None) is None            # stopped, rather than polling forever
+
+
+def test_the_follow_view_prints_the_same_facts_as_the_timeline(runner, run):
+    output = _trace(runner, run, "--follow")
+    for expected in ("CONDUIT", "denial", "CORVID-1", "VERIFIED", "run finished"):
+        assert expected in output
+
+
+def test_quiet_drops_tool_calls_and_keeps_what_an_agent_decided(runner, run):
+    """A real run logs ~2400 tool calls against ~150 of everything else. What is
+    left is what the agent decided: found, refused, filed, verdicted."""
+    output = _trace(runner, run, "--quiet")
+    assert "tool_call" not in output
+    for kept in ("denial", "envelope", "ticket", "verdict", "escalation"):
+        assert kept in output
+
+
+def test_quiet_does_not_override_an_explicit_kind_filter(run):
+    """Asking for tool calls and getting none would be the tool disagreeing with
+    the operator about what they typed."""
+    entries = trace_mod.select(
+        trace_mod.read_ledger(run), kinds=[LedgerKind.DENIAL], quiet=True
+    )
+    assert [e.kind for e in entries] == [LedgerKind.DENIAL]

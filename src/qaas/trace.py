@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 from qaas.store import LedgerEntry, LedgerKind, RunStore
 
@@ -66,6 +66,68 @@ def read_ledger(store: RunStore) -> list[LedgerEntry]:
     return list(store.ledger())
 
 
+#: How often `tail` looks for new ledger lines. A run writes a line every few
+#: seconds at most, so polling faster buys nothing and spins a CPU; polling
+#: slower makes `--follow` feel broken while an agent is thinking.
+POLL_INTERVAL_S = 0.5
+
+
+def tail(
+    store: RunStore,
+    *,
+    from_start: bool = True,
+    poll: float = POLL_INTERVAL_S,
+    stop_on_finish: bool = True,
+    timeout_s: float | None = None,
+) -> Iterator[LedgerEntry]:
+    """Yield ledger entries as they are appended, for `qaas trace --follow`.
+
+    The ledger is append-only, which is what makes this safe: a reader can hold
+    a byte offset and never be wrong about it. Two rules follow from that and
+    both matter.
+
+    Only whole lines are parsed. A run can be mid-`write` when this reads, and
+    half a JSON object is not an entry -- the offset advances to the last
+    newline, so the remainder is picked up on the next poll rather than raising.
+
+    The file may not exist yet. Following a run that is still starting is the
+    normal case, not an error, so a missing ledger is waited for.
+    """
+    import time
+
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+    offset = 0
+    if not from_start and store.ledger_path.exists():
+        offset = store.ledger_path.stat().st_size
+    pending = ""
+
+    while True:
+        if store.ledger_path.exists():
+            with store.ledger_path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+                offset = handle.tell()
+            pending += chunk
+            lines = pending.split("\n")
+            pending = lines.pop()  # the tail with no newline yet: not an entry
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    entry = LedgerEntry.model_validate_json(line)
+                except Exception:
+                    # A line this reader cannot parse is a line a future version
+                    # wrote. Skipping it keeps the follow alive; killing the
+                    # view over one unknown entry would not.
+                    continue
+                yield entry
+                if stop_on_finish and entry.kind == LedgerKind.RUN_FINISHED:
+                    return
+        if deadline is not None and time.monotonic() >= deadline:
+            return
+        time.sleep(poll)
+
+
 def parse_kinds(names: Iterable[str]) -> list[LedgerKind]:
     """Validate `--kind` arguments against the enum.
 
@@ -83,18 +145,28 @@ def parse_kinds(names: Iterable[str]) -> list[LedgerKind]:
     return kinds
 
 
+#: What `--quiet` drops. A real run logs ~2400 `tool_call` lines against ~150 of
+#: everything else, and every one of them is an agent reading a file. Dropping
+#: them leaves what an agent *decided*: what it found, what it was refused, what
+#: it filed, what it verdicted. Never dropped when asked for by `--kind`.
+QUIET_KINDS = frozenset({LedgerKind.TOOL_CALL, LedgerKind.DRY_RUN})
+
+
 def select(
     entries: Sequence[LedgerEntry],
     *,
     agent: str | None = None,
     kinds: Sequence[LedgerKind] | None = None,
+    quiet: bool = False,
 ) -> list[LedgerEntry]:
     """Filter in memory. Agent match is case-insensitive; agent names are shouted."""
     wanted = set(kinds) if kinds else None
     name = agent.upper() if agent else None
+    hidden = QUIET_KINDS if quiet else frozenset()
     return [
         e for e in entries
-        if (wanted is None or e.kind in wanted)
+        if e.kind not in hidden
+        and (wanted is None or e.kind in wanted)
         and (name is None or (e.agent or "").upper() == name)
     ]
 

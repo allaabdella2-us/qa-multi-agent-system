@@ -29,6 +29,7 @@ from qaas.adapters.tracker import (
     TrackerError,
     build_tracker,
     issue_summary,
+    repo_label,
 )
 from qaas.envelope import DefectClass, DefectEnvelope
 from qaas.mcp.context import ToolContext, err, ok
@@ -202,6 +203,13 @@ def build_tools(ctx: ToolContext) -> list:
             labels.append("agent-found")
         if restricted and "security" not in labels:
             labels.append("security")
+        # Which repository this defect is in, stamped by the system rather than
+        # asked of the agent. It is the only thing that puts the ticket on that
+        # repository's board, and an agent that forgot it would file a ticket
+        # that exists and is invisible to the person watching.
+        repo = repo_label(ctx.config.target)
+        if repo and repo not in labels:
+            labels.append(repo)
 
         if dry_run:
             # The cap is still consumed: a rehearsal that ignores the rate limit

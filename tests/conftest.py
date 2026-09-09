@@ -40,3 +40,15 @@ import pytest
 def _select_the_demo_target() -> None:
     """Point the suite at the bundled calibration target for the whole session."""
     os.environ.setdefault("QAAS_TARGET", "corvid")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ignore_any_dotenv() -> None:
+    """The suite must not read the developer's `.env`.
+
+    The CLI loads one before every command, which is correct for a person and
+    fatal for a test: a suite that passes on a laptop with real Jira credentials
+    and fails in CI without them is testing the laptop. This is not a test hook
+    -- `QAAS_ENV_FILE=` is the documented way any caller turns the mechanism off.
+    """
+    os.environ["QAAS_ENV_FILE"] = ""

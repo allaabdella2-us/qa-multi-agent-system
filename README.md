@@ -159,6 +159,10 @@ QAAS_TRACKER=jira qaas run --mode nightly
 maps your workflow statuses, and prints the exact JSON it *would* POST. **It
 creates nothing.**
 
+Tired of four exports in every new shell? Put them in a `.env` — `.qaas/.env` is
+already gitignored — and every command reads it. **Anything you export wins over
+the file**, so a stale `.env` can never redirect a run.
+
 - 🔁 **Dedupe across runs** — tickets carry a `qaas-fp-<fingerprint>` label, so the next run recognises an already-filed defect and increments its occurrence count instead of filing again.
 - 🔐 **Security findings are refused** unless `JIRA_SECURITY_PROJECT_KEY` is set. A vulnerability in a project the whole company can read is a disclosure with no undo.
 
@@ -166,6 +170,34 @@ creates nothing.**
 > Keep the committed backend `local` — it writes tickets as JSON under
 > `.qaas/tickets/` so you can read what *would* be filed. Switch per shell with
 > `QAAS_TRACKER=jira`.
+
+### 📌 A board per repository, made for you
+
+Point it at a new repository and it provisions that repository's own Jira board
+before the first agent starts — so there is something to watch *during* the run,
+not a report afterwards.
+
+```console
+$ QAAS_TRACKER=jira qaas run --repo https://github.com/acme/checkout.git --mode nightly
+target: checkout (none)
+board created — https://you.atlassian.net/jira/software/projects/QA/boards/42
+every ticket from this run carries the label repo-checkout
+```
+
+It is **a board, not a project**: a saved filter over the label `repo-<target>`,
+which the system stamps on every ticket it files. That matters — creating a Jira
+*project* needs administrator rights a bot account rarely has, and a project per
+repository is unmanageable by the tenth repo. A filter needs no special grant.
+
+```bash
+qaas board                  # show or create this target's board
+qaas board --no-create      # show the label and JQL, touch nothing
+```
+
+Run it twice on the same repository and it **reuses** the board. If your Jira
+refuses to create one — team-managed projects own their boards — the filter is
+still made, the tickets still carry the label, and the URL still opens something
+useful. A run is never failed over a board.
 
 ---
 
@@ -251,11 +283,30 @@ $ qaas trace run-20260908T182034-c6ed26
 ```
 
 ```bash
+qaas trace <run-id> --follow                       # watch a run as it happens
+qaas trace <run-id> --quiet                        # decisions only, no file reads
 qaas trace <run-id> --agent proof --kind verdict   # filter
 qaas trace <run-id> --json                         # export
 qaas show <run-id>                                 # mode, commit, tickets, escalations
 qaas runs                                          # everything that ever ran
 ```
+
+**Watch a run live.** `--follow` tails the ledger of a run in progress — start it
+in a second terminal the moment a run begins, or even before, and it waits.
+
+```console
+$ qaas trace run-20260909T163240-83b11c --follow --quiet
+following run-20260909T163240-83b11c — ctrl-c to stop
+16:32:40 -            run_started      mode=pr-check  agents=[8]  target_sha=da19f406
+16:32:40 CARTOGRAPHER agent_started    model=claude-sonnet-5
+16:32:46 CARTOGRAPHER denial           tool=Bash  reason=Bash is not in CARTOGRAPHER's
+                                       tool allowlist (Read, Grep, Glob).
+16:36:11 KEYSTONE     envelope         severity=major  domain=architecture
+16:41:03 CLERK        ticket           action=created  key=QA-118  severity=major
+```
+
+Drop `--quiet` to see every file the agents read, one line each. Combine with
+`--agent` and `--kind` to watch one agent, or only the verdicts.
 
 Runs are pinned to the **commit of the target** they examined, so a finding can
 be replayed against the tree that produced it.

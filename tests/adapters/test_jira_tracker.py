@@ -36,6 +36,7 @@ from qaas.adapters.tracker import (
     adf_to_text,
     build_tracker,
     markdown_to_adf,
+    repo_label,
 )
 from qaas.config import load_config
 from qaas.envelope import DefectEnvelope
@@ -1046,3 +1047,102 @@ async def test_without_the_flag_nothing_changes(stub, tmp_path, monkeypatch, cle
     assert not result.get("isError"), result
     assert len(stub.calls("POST", f"{API}/issue")) == 1
     assert "dry_run" not in result["structuredContent"]
+
+
+# -- per-repository boards --------------------------------------------------
+#
+# One board per repository, inside one Jira project. The board is a filter over
+# a `repo-<target>` label rather than a project of its own, because creating a
+# project needs administrator rights that a bot account does not have.
+
+AGILE = "/rest/agile/1.0"
+
+
+def test_a_target_name_becomes_a_label_and_an_unusable_one_becomes_nothing():
+    """None, not a mangled value. A mangled label files fine and never matches
+    the board filter, so the ticket exists and is invisible."""
+    assert repo_label("Claude-Code-Training") == "repo-claude-code-training"
+    assert repo_label("my repo") == "repo-my-repo"
+    assert repo_label("") is None
+    assert repo_label(None) is None
+
+
+def route_no_existing_board(stub: JiraStub) -> None:
+    stub.route("GET", f"{API}/myself", (200, {"accountId": "acct-1", "displayName": "QA bot"}))
+    stub.route("GET", f"{API}/filter/search", (200, {"values": []}))
+    stub.route("POST", f"{API}/filter", (200, {"id": "10100", "name": "x"}))
+    stub.route("GET", f"{AGILE}/board", (200, {"values": []}))
+    stub.route("POST", f"{AGILE}/board", (200, {"id": 42, "name": "x"}))
+
+
+def test_ensure_repo_board_creates_a_shared_filter_and_a_board_over_it(tracker, stub):
+    route_no_existing_board(stub)
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.label == "repo-claude-code-training"
+    assert info.filter_id == 10100 and info.created_filter
+    assert info.board_id == 42 and info.created_board
+    assert info.url.endswith("/boards/42")
+
+    body = stub.calls("POST", f"{API}/filter")[0].body
+    assert 'labels = "repo-claude-code-training"' in body["jql"]
+    assert 'project = "CORVID"' in body["jql"]
+    # Jira refuses to build a board over a private filter, and says so on the
+    # *board* call — two steps from the cause.
+    assert body["sharePermissions"] == [{"type": "authenticated"}]
+    assert stub.calls("POST", f"{AGILE}/board")[0].body["filterId"] == 10100
+
+
+def test_a_second_run_against_the_same_repo_reuses_the_board(tracker, stub):
+    """Idempotence is the whole requirement: this is called at the top of every
+    run, and the second run must not produce `repo QA (2)`."""
+    stub.route("GET", f"{API}/myself", (200, {"accountId": "acct-1"}))
+    name = "claude-code-training — QA (qaas)"
+    stub.route("GET", f"{API}/filter/search", (200, {"values": [{"id": "10100", "name": name}]}))
+    stub.route("GET", f"{AGILE}/board", (200, {"values": [{"id": 42, "name": name}]}))
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert (info.filter_id, info.board_id) == (10100, 42)
+    assert not info.created_filter and not info.created_board
+    assert stub.calls("POST", f"{API}/filter") == []
+    assert stub.calls("POST", f"{AGILE}/board") == []
+
+
+def test_a_refused_board_still_returns_a_usable_filter(tracker, stub):
+    """Team-managed projects own their boards and reject this. The run's job is
+    to find defects; losing them over a board would be the larger failure."""
+    stub.route("GET", f"{API}/myself", (200, {"accountId": "acct-1"}))
+    stub.route("GET", f"{API}/filter/search", (200, {"values": []}))
+    stub.route("POST", f"{API}/filter", (200, {"id": "10100"}))
+    stub.route("GET", f"{AGILE}/board", (200, {"values": []}))
+    stub.route("POST", f"{AGILE}/board", (400, {"errorMessages": ["board create not allowed"]}))
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.board_id is None
+    assert info.filter_id == 10100
+    assert "filter=10100" in info.url
+    assert info.note and "repo-claude-code-training" in info.note
+
+
+def test_a_target_name_that_cannot_be_a_label_is_refused_loudly(tracker, stub):
+    with pytest.raises(TrackerError):
+        tracker.ensure_repo_board("   ")
+
+
+async def test_every_filed_ticket_carries_its_repository_label(stub, tmp_path, monkeypatch, clean_jira_env):
+    """Stamped by the system, not asked of the agent. It is the only thing that
+    puts the ticket on that repository's board."""
+    ctx = jira_ctx(stub, tmp_path, monkeypatch)
+    ctx = ToolContext(
+        store=ctx.store, maps=ctx.maps, agent=ctx.agent, target_root=ctx.target_root,
+        config=ctx.config.model_copy(update={"target": "claude-code-training"}),
+    )
+    tools = handlers(build_tools(ctx))
+
+    result = await tools["create_issue"]({"title": "A defect", "body": "Repro: ..."})
+
+    assert not result.get("isError"), result
+    assert "repo-claude-code-training" in stub.calls("POST", f"{API}/issue")[0].fields["labels"]

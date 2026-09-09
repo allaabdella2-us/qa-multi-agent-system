@@ -42,6 +42,12 @@ FRONTEND_HINTS = re.compile(r'"(react|vue|svelte|@angular/core|next|nuxt|solid-j
 TEST_DIR_NAMES = {"tests", "test", "__tests__", "spec", "e2e", "integration_tests"}
 MIGRATION_DIR_NAMES = {"migrations", "migrate", "alembic", "db/migrate", "prisma/migrations"}
 
+#: `Layout.docs` existed and nothing ever filled it, so a documentation-heavy
+#: repository profiled as having no documentation at all and KEYSTONE was told
+#: to go and find it. Prose is a real surface: specs that contradict the code,
+#: tickets that describe behaviour nobody built, standards nothing follows.
+DOC_DIR_NAMES = {"docs", "doc", "documentation", "adr", "rfcs", "specs"}
+
 
 @dataclass
 class Discovery:
@@ -101,6 +107,7 @@ def inspect(root: Path) -> Discovery:
     frontend: list[str] = []
     tests: list[str] = []
     migrations: list[str] = []
+    docs: list[str] = []
 
     for directory, children in _walk(root, excludes):
         names = {c.name for c in children}
@@ -128,6 +135,13 @@ def inspect(root: Path) -> Discovery:
             tests.append(rel)
         if directory.name in MIGRATION_DIR_NAMES and rel not in migrations:
             migrations.append(rel)
+        # Only the top of a documentation tree: `docs` and `docs/specs` and
+        # `docs/tickets` are one surface, and listing all three says nothing
+        # the first does not.
+        if directory.name in DOC_DIR_NAMES and not any(
+            rel == d or rel.startswith(f"{d}/") for d in docs
+        ):
+            docs.append(rel)
 
     # A source directory with .tsx/.jsx in it is a frontend even without a
     # package.json of its own — monorepos often hoist dependencies.
@@ -181,6 +195,7 @@ def inspect(root: Path) -> Discovery:
             frontend=sorted(set(frontend))[:4],
             tests=sorted(set(tests))[:4],
             migrations=sorted(set(migrations))[:3],
+            docs=sorted(set(docs))[:4],
             spec=spec,
             ownership=ownership,
             exclude=list(DEFAULT_EXCLUDES),

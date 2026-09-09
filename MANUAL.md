@@ -199,8 +199,9 @@ qaas run --mode fix-cycle --ticket QA-42              # fix one ticket
 ```bash
 qaas runs [--limit N]                    # every run, newest first
 qaas show <run-id>                       # findings, cost, tickets, escalations
-qaas trace <run-id> [--agent A] [--kind K] [--json]
+qaas trace <run-id> [--agent A] [--kind K] [--follow] [--quiet] [--json]
 qaas map [--version V]                   # the system map CARTOGRAPHER built
+qaas board [--no-create]                 # this target's Jira board
 ```
 
 `qaas trace` is the one to reach for when you want to know *why* something
@@ -211,8 +212,25 @@ qaas trace <run-id>                              # the whole timeline
 qaas trace <run-id> --agent MENDER               # one agent
 qaas trace <run-id> --kind denial                # every refused tool call
 qaas trace <run-id> --kind verdict --kind review # just the decisions
+qaas trace <run-id> --quiet                      # decisions only, no file reads
 qaas trace <run-id> --json > run.json            # export
 ```
+
+#### Watching a run while it happens
+
+`--follow` tails the ledger of a run in progress. Start it in a second terminal
+the moment you kick a run off — or before, it waits for the ledger to appear.
+
+```bash
+qaas run --mode nightly &                        # terminal one
+qaas trace $(ls -t .qaas/runs | head -1) --follow --quiet   # terminal two
+```
+
+Without `--quiet` you see every file an agent opens, one line each — which is
+genuinely what "what is it doing right now" looks like, and is a lot. With it you
+see only what the agent *decided*: findings, refusals, tickets, verdicts,
+escalations. `--follow` stops on its own when the run finishes; ctrl-c is safe at
+any point and stops only the view, never the run.
 
 ### Measuring
 
@@ -262,6 +280,51 @@ QAAS_TRACKER=jira qaas run --mode nightly
 Filed tickets carry `qaas-fp-<fingerprint>` and `qaas-envelope-<id>` labels. That
 is how the next run recognises an already-filed defect and increments its
 occurrence count instead of filing it again.
+
+Rather than exporting four variables in every shell, put them in a `.env`:
+
+```bash
+mkdir -p .qaas && cat > .qaas/.env <<'EOF'
+JIRA_BASE_URL=https://you.atlassian.net
+JIRA_EMAIL=you@example.com
+JIRA_API_TOKEN=...
+JIRA_PROJECT_KEY=QA
+EOF
+chmod 600 .qaas/.env
+```
+
+`.qaas/` is already gitignored, which is why it is looked at before a `.env` at
+your repository root. **Anything already exported wins over the file**, so a
+stale `.env` cannot silently redirect a run. `QAAS_ENV_FILE=/path/to/file` names
+a different one; `QAAS_ENV_FILE=` turns the whole mechanism off, which is what
+CI should do.
+
+### A board per repository
+
+Every ticket the system files carries `repo-<target>`. At the top of a
+Jira-backed run it finds or creates a board over exactly that label, so each
+repository you point it at gets its own board without a Jira project of its own:
+
+```console
+$ QAAS_TRACKER=jira qaas run --repo https://github.com/acme/checkout.git --mode nightly
+board created — https://you.atlassian.net/jira/software/projects/QA/boards/42
+every ticket from this run carries the label repo-checkout
+```
+
+```bash
+qaas board                # find or create the board for the configured target
+qaas board --no-create    # show the label and the JQL, touch nothing
+qaas board -t other-repo  # a different target
+```
+
+A board rather than a project, deliberately: creating a Jira project needs
+administrator rights a bot account rarely has, and a project per repository is
+unmanageable by the tenth one. Creating a saved filter needs no special grant.
+
+If Jira refuses to create the board — team-managed projects own their boards, and
+some accounts lack "Create shared objects" — the **filter is still created**, the
+tickets still carry the label, and the URL printed opens the filter instead. A
+run is never failed over a board; losing the findings would be the larger failure.
 
 > [!TIP]
 > Keep the committed backend `local` and switch per shell with `QAAS_TRACKER=jira`.

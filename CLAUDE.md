@@ -27,6 +27,8 @@ qaas doctor --target corvid              # what a target makes possible
 qaas run --mode pr-check --dry-run       # renders each agent's options, no API call
 qaas run --mode nightly --only CONDUIT   # real run, costs money
 qaas runs / qaas show <run-id> / qaas map
+qaas trace <run-id> --follow --quiet     # watch a live run's decisions
+qaas board                               # find-or-create this target's Jira board
 qaas trace <run-id> [--agent NAME] [--kind KIND] [--json]   # the ledger, readably
 qaas score [<run-id>]                    # recall/precision against the golden ledger
 qaas sweep                               # run + score + fail below the precision gate
@@ -139,6 +141,15 @@ one stdio subprocess, declared in `registry.STDIO_SERVERS`.
 Tool results use `ok()`/`err()` from `mcp/context.py`: errors are **returned, not
 raised**, so the agent reads the reason and corrects itself.
 
+### One Jira board per repository, not one project
+
+Every ticket carries `repo-<target>`, stamped by `mcp/tracker.py` rather than
+asked of CLERK. `JiraTracker.ensure_repo_board` finds-or-creates a saved filter
+over exactly that label and a board over the filter; `cli._ensure_board` calls it
+at the top of every Jira-backed run. A *project* per repo would need admin rights
+a bot account rarely has; a filter needs none. Board creation failing is not run
+failure — the filter still exists and the label still routes.
+
 ### Targets make it portable
 
 `target.py` / `config/targets/*.yaml`. `environment.mode` is the load-bearing
@@ -164,7 +175,10 @@ two sets of rules about where someone else's code lands on disk.
 
 ### Runtime state
 
-`.qaas/` (gitignored): `runs/<id>/ledger.jsonl` (append-only audit trail —
+`.qaas/` (gitignored): `.env` (credentials, read before every command; anything
+already exported wins, and `QAAS_ENV_FILE=` disables the whole mechanism — the
+test suite sets that so a developer's `.env` cannot make the suite pass);
+`runs/<id>/ledger.jsonl` (append-only audit trail —
 every tool call, denial and escalation), `envelopes/`, `artifacts/`, `results/`;
 plus a versioned `system-map/` shared across runs and pinned per run so a bad map
 cannot half-propagate. Evidence is referenced by `artifact://<run>/<name>` uris;

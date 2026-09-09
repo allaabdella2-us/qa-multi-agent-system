@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -280,6 +281,21 @@ def _provision_target(
 
 app = typer.Typer(add_completion=False, help="Multi-agent QA & remediation system.")
 console = Console()
+
+
+@app.callback()
+def _bootstrap() -> None:
+    """Runs before every command. Loads credentials from `.env`, if there is one.
+
+    Credentials come from the environment and never from `config/`, which is
+    committed -- that rule stands. This only makes it liveable: four exports in
+    every new shell is how a real token ends up pasted into a config file. An
+    already-exported variable always wins, so nothing here can override what an
+    operator typed on the command line.
+    """
+    from qaas.envfile import load_env_file
+
+    load_env_file()
 
 #: None means "let the workspace decide" -- an explicit --config, then the
 #: project, then the defaults that shipped in the wheel. A literal "config"
@@ -922,6 +938,49 @@ def show(run_id: str, root: Path = Root) -> None:
     console.print(f"\n[dim]{len(entries)} ledger entries — qaas trace {run_id}[/dim]")
 
 
+def _follow(store, *, agent: str | None, kinds, as_json: bool, quiet: bool = False) -> None:
+    """Stream a live run's ledger until it finishes or the operator stops.
+
+    Deliberately line-by-line rather than a redrawn table: a run lasts minutes,
+    the interesting lines are denials and verdicts, and they must survive being
+    scrolled past, piped, and pasted into a bug report. A `rich.Live` view that
+    repaints would lose all three.
+    """
+    from qaas.store import LedgerKind
+
+    wanted = set(kinds) if kinds else None
+    name = agent.upper() if agent else None
+    console.print(f"[dim]following {store.run_id} — ctrl-c to stop[/dim]")
+    hidden = trace_mod.QUIET_KINDS if quiet else frozenset()
+    seen = 0
+    try:
+        for entry in trace_mod.tail(store):
+            if entry.kind in hidden:
+                continue
+            if wanted is not None and entry.kind not in wanted:
+                continue
+            if name is not None and (entry.agent or "").upper() != name:
+                continue
+            seen += 1
+            if as_json:
+                # Newline-delimited, flushed per line: `--follow --json` exists
+                # to be piped into something that reacts, and a buffered pipe
+                # that only speaks at the end is not a live feed.
+                typer.echo(json.dumps(entry.model_dump(mode="json")), nl=True)
+                sys.stdout.flush()
+                continue
+            style = KIND_STYLE.get(str(entry.kind), "white")
+            console.print(
+                f"[dim]{entry.at.strftime('%H:%M:%S')}[/dim] "
+                f"[cyan]{(entry.agent or '-'):<12}[/cyan] "
+                f"[{style}]{str(entry.kind):<16}[/] {trace_mod.describe(entry)}"
+            )
+            if entry.kind == LedgerKind.RUN_FINISHED:
+                console.print("[dim]run finished[/dim]")
+    except KeyboardInterrupt:
+        console.print(f"\n[dim]stopped following after {seen} entries[/dim]")
+
+
 @app.command()
 def trace(
     run_id: str,
@@ -929,10 +988,12 @@ def trace(
     agent: str | None = typer.Option(None, "--agent", "-a", help="Only this agent's entries."),
     kind: list[str] = typer.Option(None, "--kind", "-k", help="Only these ledger kinds (repeatable)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the filtered entries as JSON."),
+    follow: bool = typer.Option(False, "--follow", "-f", help="Stream new entries as the run produces them."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Drop tool_call lines and show only what an agent decided."),
 ) -> None:
     """Print one run's ledger as a timeline: dispatches, tools, denials, verdicts, cost."""
     store = RunStore(run_id, root)
-    if not store.ledger_path.exists():
+    if not store.ledger_path.exists() and not follow:
         console.print(f"[red]no ledger for run {run_id}[/red] — try `qaas runs`")
         raise typer.Exit(1)
 
@@ -942,7 +1003,11 @@ def trace(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from None
 
-    entries = trace_mod.select(trace_mod.read_ledger(store), agent=agent, kinds=kinds)
+    if follow:
+        _follow(store, agent=agent, kinds=kinds, as_json=as_json, quiet=quiet)
+        return
+
+    entries = trace_mod.select(trace_mod.read_ledger(store), agent=agent, kinds=kinds, quiet=quiet)
 
     if as_json:
         # Plain stdout, not `console.print_json`: rich soft-wraps at the console
@@ -1097,6 +1162,10 @@ def run(
             console.print(f"    prompt: {d['prompt_chars']} chars")
         return
 
+    # Before the first agent, not after the first ticket: the board is what
+    # someone watches a run *on*, and one that appears at the end is a report.
+    board_info = _ensure_board(cfg)
+
     def on_event(kind: str, detail: dict) -> None:
         if kind == "agent_started":
             console.print(f"[dim]->[/dim] {detail.get('agent')}")
@@ -1113,6 +1182,9 @@ def run(
 
     console.print()
     console.print_json(data=report.summary())
+    console.print(f"\n[dim]watch it back:[/dim] qaas trace {report.run_id}")
+    if board_info is not None and board_info.url:
+        console.print(f"[dim]board:[/dim] {board_info.url}")
     if report.failed or report.stopped_early:
         raise typer.Exit(1)
 
@@ -1499,6 +1571,104 @@ def _tracker_check_jira(dry_run_ticket: bool) -> tuple[list[str], list[str]]:
         console.print("[dim]nothing was sent.[/dim]")
 
     return problems, warnings
+
+
+def _ensure_board(cfg, *, create: bool = True):
+    """Find or create the Jira board for this run's target. Never fatal.
+
+    Called at the top of every Jira-backed run so that a person told to "watch
+    the board" has one to watch before the first ticket lands, rather than
+    after. Returns a `BoardInfo`, or None when there is nothing to do or Jira
+    could not be reached.
+
+    Failures are printed and swallowed. A run that found nine defects and could
+    not create a board has still done its job; a run that refused to start
+    because of a board has thrown the findings away.
+    """
+    from qaas.adapters.tracker import JiraTracker, TrackerError, repo_label
+
+    if cfg.tracker != "jira" or not cfg.target:
+        return None
+
+    label = repo_label(cfg.target)
+    if label is None:
+        console.print(
+            f"[yellow]note:[/yellow] target name '{cfg.target}' cannot be a Jira label, so "
+            "tickets will not be grouped onto a per-repository board."
+        )
+        return None
+
+    try:
+        tracker = JiraTracker()
+    except TrackerError as exc:
+        console.print(f"[yellow]no board:[/yellow] {exc}")
+        return None
+
+    if not create:
+        from qaas.adapters.tracker import BoardInfo
+
+        return BoardInfo(
+            slug=cfg.target,
+            label=label,
+            jql=f'project = "{tracker.default_project}" AND labels = "{label}" ORDER BY created DESC',
+        )
+
+    try:
+        info = tracker.ensure_repo_board(cfg.target)
+    except TrackerError as exc:
+        console.print(f"[yellow]could not provision a board:[/yellow] {exc}")
+        return None
+
+    verb = "created" if (info.created_board or info.created_filter) else "reused"
+    console.print(f"[bold]board {verb}[/bold] — {info.url}")
+    console.print(f"[dim]every ticket from this run carries the label {info.label}[/dim]")
+    if info.note:
+        console.print(f"[yellow]note:[/yellow] {info.note}")
+    return info
+
+
+@app.command()
+def board(
+    config_dir: Path | None = ConfigDir,
+    target: str = typer.Option(None, "--target", "-t", help="Target profile. Defaults to the configured one."),
+    create: bool = typer.Option(True, "--create/--no-create", help="Create the filter and board if they are missing."),
+) -> None:
+    """Show — or create — the Jira board that collects this repository's defects.
+
+    One board per repository, inside one Jira project. The board is a saved
+    filter over the label `repo-<target>`, which every ticket the system files
+    carries. That is why it needs no administrator rights: creating a Jira
+    *project* per repository does, creating a filter does not.
+    """
+    cfg = load_config(config_dir, target=target)
+    if target:
+        cfg = cfg.model_copy(update={"target": target, "profile": _load_target(target, config_dir)})
+
+    if cfg.tracker != "jira":
+        console.print(
+            f"[yellow]tracker is '{cfg.tracker}', not 'jira'[/yellow] — boards are a Jira "
+            "feature. Tickets are written to .qaas/tickets/ instead. Set QAAS_TRACKER=jira "
+            "(and the JIRA_* variables) to file into Jira."
+        )
+        raise typer.Exit(1)
+    if not cfg.target:
+        console.print("[red]no target configured[/red] — run `qaas init <repo>` first.")
+        raise typer.Exit(1)
+
+    info = _ensure_board(cfg, create=create)
+    if info is None:
+        raise typer.Exit(1)
+
+    table = Table(header_style="bold", box=None, pad_edge=False)
+    table.add_column("field", style="dim")
+    table.add_column("value", overflow="fold")
+    table.add_row("target", cfg.target)
+    table.add_row("label", info.label)
+    table.add_row("jql", info.jql)
+    table.add_row("filter", str(info.filter_id or "not created"))
+    table.add_row("board", str(info.board_id or "not created"))
+    table.add_row("url", info.url or "-")
+    console.print(table)
 
 
 @app.command("tracker-check")

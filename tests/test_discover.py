@@ -113,3 +113,29 @@ def test_build_profile_produces_a_valid_profile_and_its_caveats(repo):
     assert profile.auth.mode == "none"
     assert profile.ledger is None  # only a calibration target has one
     assert notes
+
+
+def test_a_documentation_tree_is_found_and_only_its_root_is_recorded(tmp_path):
+    """`Layout.docs` existed and nothing ever filled it, so a documentation-heavy
+    repository profiled as having none. Listing `docs`, `docs/specs` and
+    `docs/tickets` says nothing the first does not."""
+    (tmp_path / "docs" / "specs").mkdir(parents=True)
+    (tmp_path / "docs" / "tickets").mkdir()
+    (tmp_path / "docs" / "ORG-STANDARDS.md").write_text("# standards\n")
+
+    found = inspect(tmp_path)
+
+    assert found.layout.docs == ["docs"]
+    assert "docs: docs" in found.layout.described()
+
+
+def test_documentation_outside_a_docs_directory_is_still_found(tmp_path):
+    (tmp_path / "adr").mkdir()
+    (tmp_path / "adr" / "0001-use-postgres.md").write_text("# adr\n")
+
+    assert inspect(tmp_path).layout.docs == ["adr"]
+
+
+def test_a_repository_with_no_documentation_records_none(tmp_path):
+    (tmp_path / "src").mkdir()
+    assert inspect(tmp_path).layout.docs == []

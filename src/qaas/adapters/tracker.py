@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -469,6 +470,13 @@ def adf_to_text(node: Any) -> str:
 JIRA_API_TOKEN_URL = "https://id.atlassian.com/manage-profile/security/api-tokens"
 
 JIRA_API_BASE = "/rest/api/3"
+
+#: The Agile (board and sprint) API. A different base path, not a different
+#: host — boards simply do not exist under `/rest/api/3`, and asking for one
+#: there returns a 404 that reads like a missing board rather than a missing
+#: endpoint.
+JIRA_AGILE_BASE = "/rest/agile/1.0"
+
 JIRA_TIMEOUT_S = 30.0
 #: Reads are retried on 429; see `JiraTracker._request` for why writes are not.
 JIRA_READ_ATTEMPTS = 3
@@ -480,6 +488,12 @@ JIRA_MAX_RETRY_WAIT_S = 30.0
 SEVERITY_LABEL_PREFIX = "severity-"
 ENVELOPE_LABEL_PREFIX = "qaas-envelope-"
 FINGERPRINT_LABEL_PREFIX = "qaas-fp-"
+
+#: Every ticket a run files carries `repo-<target>`. It is what makes a
+#: per-repository board possible without a per-repository *project*: the board
+#: is a saved filter over this label, and creating a filter needs no
+#: administrator rights while creating a project does.
+REPO_LABEL_PREFIX = "repo-"
 
 #: House status -> the Jira workflow names it plausibly means. Jira workflows
 #: are per-project and unknowable from here, so this is a set of candidates to
@@ -532,6 +546,50 @@ def _label_safe(value: str | None, prefix: str = "") -> str | None:
     if not candidate or any(char.isspace() for char in candidate) or len(candidate) > 255:
         return None
     return candidate
+
+
+def repo_label(slug: str | None) -> str | None:
+    """The label every ticket from a run against `slug` carries, or None.
+
+    None when the slug cannot survive being a Jira label at all (whitespace,
+    empty, too long). Returning None rather than a mangled value is deliberate:
+    a mangled label would never match the board filter, so the tickets would
+    file successfully and then be invisible on the board someone was told to
+    watch — the worst of the three outcomes.
+    """
+    return _label_safe(_label_slug(slug), REPO_LABEL_PREFIX)
+
+
+def _label_slug(value: str | None) -> str | None:
+    """`My Repo.git` -> `my-repo`. The same shape `qaas init` gives a target."""
+    if not value:
+        return None
+    slug = re.sub(r"[^a-z0-9-]+", "-", value.strip().lower()).strip("-")[:64]
+    return slug or None
+
+
+@dataclass(frozen=True)
+class BoardInfo:
+    """What a per-repository board provisioning attempt produced.
+
+    `board_id` is None when Jira refused to create a board — which happens on
+    team-managed projects, where boards belong to the project and cannot be
+    made over an arbitrary filter. That is not a failure of the run: the filter
+    still exists, the tickets still carry the label, and `url` still points at
+    something a human can open. `note` says which of the two they got.
+    """
+
+    slug: str
+    label: str
+    jql: str
+    filter_id: int | None = None
+    filter_name: str = ""
+    board_id: int | None = None
+    board_name: str = ""
+    url: str = ""
+    created_filter: bool = False
+    created_board: bool = False
+    note: str | None = None
 
 
 class JiraTracker(TrackerAdapter):
@@ -603,6 +661,7 @@ class JiraTracker(TrackerAdapter):
         # environment the tracker was configured in rather than per call.
         self._opener = urllib.request.build_opener()
         self._link_type_cache: list[dict[str, Any]] | None = None
+        self._account_id_cache: str | None = None
 
     @classmethod
     def _missing_env_message(cls, missing: list[str]) -> str:
@@ -652,6 +711,7 @@ class JiraTracker(TrackerAdapter):
         body: dict[str, Any] | None = None,
         params: dict[str, str] | None = None,
         retry_on_429: bool = False,
+        api_base: str = JIRA_API_BASE,
     ) -> Any:
         """One Jira call. `retry_on_429` is only ever true for reads.
 
@@ -660,7 +720,7 @@ class JiraTracker(TrackerAdapter):
         Jira has already created the issue, so the second attempt files it
         twice. Reads are idempotent and honour `Retry-After`.
         """
-        url = f"{self.base_url}{JIRA_API_BASE}{path}"
+        url = f"{self.base_url}{api_base}{path}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
         payload = json.dumps(body).encode("utf-8") if body is not None else None
@@ -923,6 +983,176 @@ class JiraTracker(TrackerAdapter):
                 (available[candidate] for candidate in candidates if candidate in available), None
             )
         return mapped
+
+    # -- boards -----------------------------------------------------------
+    #
+    # A board per repository, without a project per repository. Creating a Jira
+    # *project* needs administrator rights that a bot account normally does not
+    # have, and a project per repository is unmanageable by the tenth repo.
+    # Creating a saved *filter* needs no special grant, and a board can be built
+    # over a filter — so every repository gets its own board inside one project,
+    # and the tickets are separated by a label rather than by a project key.
+
+    def find_filter(self, name: str) -> dict[str, Any] | None:
+        """A filter owned by this account with exactly this name, or None.
+
+        Matched on the account's own filters rather than on all visible ones:
+        `filter/search` returns other people's filters too, and adopting a
+        stranger's filter as the run's board would silently repoint it.
+        """
+        data = self._request(
+            "GET",
+            "/filter/search",
+            params={
+                "filterName": name,
+                "accountId": self._account_id() or "",
+                "expand": "jql,viewUrl,searchUrl",
+                "maxResults": "50",
+            },
+            retry_on_429=True,
+        )
+        for entry in data.get("values") or []:
+            if str(entry.get("name") or "").strip() == name:
+                return entry
+        return None
+
+    def create_filter(self, *, name: str, jql: str, description: str = "") -> dict[str, Any]:
+        """A saved filter, shared with authenticated users.
+
+        The share permission is not optional decoration: Jira refuses to build
+        a board over a private filter, and the refusal arrives as a 400 on the
+        *board* call, two steps away from the cause.
+        """
+        return self._request(
+            "POST",
+            "/filter",
+            body={
+                "name": name,
+                "jql": jql,
+                "description": description,
+                "favourite": True,
+                "sharePermissions": [{"type": "authenticated"}],
+            },
+        )
+
+    def find_board(self, name: str) -> dict[str, Any] | None:
+        """A board with exactly this name, or None. Agile API."""
+        data = self._request(
+            "GET",
+            "/board",
+            params={"name": name, "maxResults": "50"},
+            retry_on_429=True,
+            api_base=JIRA_AGILE_BASE,
+        )
+        for entry in data.get("values") or []:
+            if str(entry.get("name") or "").strip() == name:
+                return entry
+        return None
+
+    def create_board(self, *, name: str, filter_id: int, board_type: str = "kanban") -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/board",
+            body={"name": name, "type": board_type, "filterId": filter_id},
+            api_base=JIRA_AGILE_BASE,
+        )
+
+    def board_url(self, board_id: int) -> str:
+        return f"{self.base_url}/jira/software/projects/{self._project}/boards/{board_id}"
+
+    def filter_url(self, filter_id: int) -> str:
+        return f"{self.base_url}/issues/?filter={filter_id}"
+
+    def _account_id(self) -> str | None:
+        """This credential's Atlassian account id, fetched once.
+
+        Cached because `find_filter` is called on every run and `/myself` is
+        the same answer every time.
+        """
+        if self._account_id_cache is None:
+            try:
+                self._account_id_cache = str(self.whoami().get("accountId") or "")
+            except TrackerError:
+                self._account_id_cache = ""
+        return self._account_id_cache or None
+
+    def ensure_repo_board(
+        self,
+        slug: str,
+        *,
+        display: str | None = None,
+        project: str | None = None,
+    ) -> BoardInfo:
+        """Find or create the board for one repository. Idempotent.
+
+        Called at the top of every run, so it must be safe to call when
+        everything already exists — the second run against a repository reuses
+        the board rather than making `repo QA (2)`.
+
+        A board this could not create is reported, not raised. The run's job is
+        to find defects and file them; a missing board makes the tickets harder
+        to look at, and nothing else. Losing the findings over it would be the
+        larger failure.
+        """
+        label = repo_label(slug)
+        if label is None:
+            raise TrackerError(
+                f"'{slug}' cannot become a Jira label, so no per-repository board can be "
+                "built for it. Give the target a simpler name with `qaas init --name`."
+            )
+        key = project or self._project
+        jql = f'project = "{key}" AND labels = "{label}" ORDER BY created DESC'
+        name = f"{display or _label_slug(slug)} — QA (qaas)"
+
+        info = BoardInfo(slug=_label_slug(slug) or slug, label=label, jql=jql)
+
+        existing = self.find_filter(name)
+        if existing is None:
+            created = self.create_filter(
+                name=name,
+                jql=jql,
+                description=(
+                    f"Defects filed automatically by qaas against {slug}. "
+                    f"Every ticket carries the label {label}."
+                ),
+            )
+            info = replace(info, filter_id=int(created["id"]), filter_name=name, created_filter=True)
+        else:
+            info = replace(info, filter_id=int(existing["id"]), filter_name=name)
+
+        info = replace(info, url=self.filter_url(info.filter_id))
+
+        board = self.find_board(name)
+        if board is not None:
+            return replace(
+                info,
+                board_id=int(board["id"]),
+                board_name=name,
+                url=self.board_url(int(board["id"])),
+            )
+
+        try:
+            made = self.create_board(name=name, filter_id=int(info.filter_id))
+        except TrackerError as exc:
+            # Team-managed projects own their boards and reject this; so does an
+            # account without "Create shared objects". Both leave the filter
+            # usable, which is why this returns rather than raises.
+            return replace(
+                info,
+                note=(
+                    f"Jira would not create a board over the filter ({exc}). The filter "
+                    f"exists and every ticket carries {label}, so open the filter link "
+                    "above, or create a board from it by hand in Jira."
+                ),
+            )
+        board_id = int(made["id"])
+        return replace(
+            info,
+            board_id=board_id,
+            board_name=name,
+            url=self.board_url(board_id),
+            created_board=True,
+        )
 
     # -- operations -------------------------------------------------------
 
