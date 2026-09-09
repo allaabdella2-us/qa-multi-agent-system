@@ -16,3 +16,6 @@ node_modules/
 
 # Build artifacts.
 dist/
+
+# Agent evidence screenshots land here because put_artifact takes only text.
+target-app/*.png
