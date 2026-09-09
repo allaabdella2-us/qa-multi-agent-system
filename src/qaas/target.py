@@ -259,3 +259,21 @@ def load_target(name: str, targets_dir: Path | str = "config/targets") -> Target
 # directory is the bug that hid `<project>/config/targets/` the moment anything
 # wrote into `.qaas/config/targets/`; profiles layer across every config
 # directory, and `config.target_files(dirs)` is the one place that knows it.
+
+
+def agent_usable(agent_name: str, caps: dict[str, bool]) -> bool:
+    """Whether an agent can do useful work with the capabilities available.
+
+    Lives here, beside `capabilities()`, because it has two callers that must
+    agree: `qaas doctor` reports it, and the conductor acts on it. They did not
+    agree for a while -- doctor would say "agents that cannot: SURFACE" and then
+    a run would dispatch SURFACE anyway and spend its whole budget looking for a
+    browser that was never there. Being told an agent cannot work and then
+    watching it run is worse than not being told.
+
+    Everything except SURFACE can contribute from static analysis alone, at
+    lower confidence. SURFACE without a reachable UI has nothing to do at all.
+    """
+    if agent_name == "SURFACE":
+        return caps.get("live_ui", False)
+    return True

@@ -561,3 +561,23 @@ async def test_a_new_discovery_agent_runs_without_a_hand_written_task(cfg, tmp_p
     report = await make_conductor(cfg, tmp_path).run("nightly")
     ran = {name for name, _ in calls}
     assert {"VAULT", "WARDEN"} <= ran, f"a config-only agent was skipped: {sorted(ran)}"
+
+
+async def test_an_agent_the_target_cannot_support_is_not_dispatched(cfg, tmp_path, fake_agents):
+    """`qaas doctor` has always reported "agents that cannot: SURFACE" for a
+    target with no reachable UI. Nothing acted on it: the run dispatched SURFACE
+    anyway and spent its budget looking for a browser that was never there.
+
+    Being told an agent cannot work and then watching it run is worse than not
+    being told, which is why this asserts the dispatch, not the report.
+    """
+    calls, behaviour = fake_agents
+    from qaas.target import Environment, TargetProfile
+
+    static_only = TargetProfile(name="static", root=".", environment=Environment(mode="none"))
+    cfg2 = cfg.model_copy(update={"profile": static_only})
+
+    await make_conductor(cfg2, tmp_path).run("pr-check")
+    ran = {name for name, _ in calls}
+    assert "SURFACE" not in ran, "dispatched SURFACE at a target with no UI"
+    assert "CONDUIT" in ran, "static analysis agents must still run"

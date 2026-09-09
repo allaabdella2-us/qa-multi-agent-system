@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from qaas.config import AgentSpec, SystemConfig, load_config
 from qaas.envelope import DefectEnvelope
+from qaas.target import agent_usable
 from qaas.mcp.context import ToolContext
 from qaas.runner import RunOutcome, run_agent
 from qaas.store import RunStore, SystemMapStore
@@ -269,6 +270,27 @@ class Conductor:
     async def _phase_discover(self, specs, store, budget, report, mode, map_version) -> None:
         """Discovery agents are independent. Run them concurrently, bounded."""
         discovery = [s for name, s in specs.items() if s.layer == "discovery"]
+
+        # Skip agents this target cannot support. `qaas doctor` has always
+        # reported these ("agents that cannot: SURFACE"), but nothing acted on
+        # it, so a run against a target with no reachable UI would still
+        # dispatch SURFACE and spend its entire budget hunting a browser that
+        # was never there. Being told an agent cannot work and then watching it
+        # run is worse than not being told.
+        profile = getattr(self.config, "profile", None)
+        if profile is not None:
+            caps = profile.capabilities()
+            unusable = [s for s in discovery if not agent_usable(s.name, caps)]
+            if unusable:
+                discovery = [s for s in discovery if s not in unusable]
+                store.log(
+                    "skipped",
+                    reason="target cannot support these agents",
+                    agents=[s.name for s in unusable],
+                )
+                for spec in unusable:
+                    self._emit("skipped", agent=spec.name, reason="target lacks the capability")
+
         if not discovery:
             return
 

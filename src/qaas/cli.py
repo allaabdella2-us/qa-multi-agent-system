@@ -449,16 +449,14 @@ def doctor(
 
 
 def _agent_usable(spec, caps: dict[str, bool]) -> bool:
-    """Whether an agent can do useful work with the capabilities available.
+    """Delegates to `target.agent_usable`, which the conductor also uses.
 
-    SURFACE without a browser-reachable UI has nothing to do; the rest can all
-    contribute from static analysis alone, at lower confidence.
+    Two copies of this rule meant `qaas doctor` could report an agent unusable
+    while a run dispatched it anyway.
     """
-    if spec.name == "SURFACE":
-        return caps["live_ui"]
-    if spec.name == "PROOF":
-        return caps["live_api"] or caps["static_analysis"]
-    return True
+    from qaas.target import agent_usable
+
+    return agent_usable(spec.name, caps)
 
 
 @app.command()
