@@ -37,9 +37,21 @@ qaas init https://github.com/you/your-app          # or a local path
 qaas init ~/code/your-app --name your-app
 ```
 
-This inspects the repository and writes `config/targets/your-app.yaml`. Every
-value in it is a **guess you are expected to correct** — it reports what it
+This inspects the repository and writes `.qaas/config/targets/your-app.yaml`.
+Every value in it is a **guess you are expected to correct** — it reports what it
 detected and what it could not find. Nothing runs and nothing is called yet.
+A git URL is cloned into `.qaas/targets/<name>/`, never into your own tree.
+
+In a hurry, `qaas run --repo` does both steps at once — it provisions the
+profile if there is not one already and then runs against it:
+
+```bash
+qaas run --mode pr-check --repo https://github.com/you/your-app --dry-run
+```
+
+It reuses an existing profile rather than overwriting one you have corrected;
+pass `--force` to regenerate. It does not change which target is active by
+default — that stays a decision you make in `system.yaml` or with `qaas init`.
 
 ### 3. Tell it how to reach your app
 

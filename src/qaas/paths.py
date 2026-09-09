@@ -149,6 +149,19 @@ def find_project(start: Path | None = None) -> Path | None:
     return None
 
 
+def project_root(start: Path | None = None) -> Path:
+    """The qaas project directory, falling back to the cwd when there is none.
+
+    This is the base a *relative* target root resolves against. It has to be the
+    project rather than the cwd: a profile says `root: target-app` because that
+    is where the application sits relative to the project that configures it,
+    and running `qaas run` from a subdirectory must not silently point the whole
+    system at a directory that does not exist.
+    """
+    here = (start or Path.cwd()).resolve()
+    return find_project(here) or here
+
+
 def _existing(*candidates: Path | None) -> tuple[Path, ...]:
     """Keep the directories that exist, in order, without duplicates."""
     seen: list[Path] = []

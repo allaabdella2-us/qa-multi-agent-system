@@ -112,7 +112,7 @@ def _path_refusal(ctx: ToolContext, raw: str) -> tuple[Path | None, str | None]:
             "Report what you found; fixing is another agent's job (§2)."
         )
 
-    root = ctx.repo_root.resolve()
+    root = ctx.target_root.resolve()
     candidate = Path(raw)
     resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
 
@@ -157,7 +157,7 @@ def build_tools(ctx: ToolContext) -> list:
         """Built on first use: the GitHub backend raises on construction, and a
         read-only agent should not eat that error just for loading the server."""
         if "adapter" not in adapter:
-            adapter["adapter"] = build_vcs(ctx.config.vcs, ctx.repo_root)
+            adapter["adapter"] = build_vcs(ctx.config.vcs, ctx.target_root)
         return adapter["adapter"]
 
     @tool(
@@ -243,7 +243,7 @@ def build_tools(ctx: ToolContext) -> list:
             )
 
         assert resolved is not None  # _path_refusal returns one or the other
-        relative = resolved.relative_to(ctx.repo_root.resolve()).as_posix()
+        relative = resolved.relative_to(ctx.target_root.resolve()).as_posix()
         try:
             vcs().write_files({relative: content})
         except OSError as exc:
@@ -294,7 +294,7 @@ def build_tools(ctx: ToolContext) -> list:
             if path_refusal:
                 return _deny(ctx, "commit", path_refusal)
             assert resolved is not None
-            staged.append(resolved.relative_to(ctx.repo_root.resolve()).as_posix())
+            staged.append(resolved.relative_to(ctx.target_root.resolve()).as_posix())
 
         try:
             sha = vcs().commit(message, staged)

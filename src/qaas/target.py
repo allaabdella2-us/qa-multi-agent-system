@@ -21,6 +21,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from qaas.paths import project_root
+
 # Directories that are never product code. Excluded by default so a profile does
 # not have to restate them and an agent does not waste a turn reading vendored
 # dependencies.
@@ -192,8 +194,17 @@ class TargetProfile(BaseModel):
         return self
 
     def root_path(self, base: Path | None = None) -> Path:
+        """Where the application under test actually is, on this machine.
+
+        This is *the* answer to "what am I testing", and it is deliberately not
+        the process cwd. `qaas run --repo <url>` clones into
+        `.qaas/targets/<slug>`, so the target is routinely somewhere the qaas
+        project is not; an absolute `root` in a profile is honoured as written.
+        """
         root = Path(self.root)
-        return root if root.is_absolute() else (base or Path.cwd()) / root
+        if root.is_absolute():
+            return root
+        return (base if base is not None else project_root()) / root
 
     def readiness(self, base: Path | None = None) -> list[str]:
         """Everything that would stop a run right now. Empty means ready."""
@@ -244,6 +255,7 @@ def load_target(name: str, targets_dir: Path | str = "config/targets") -> Target
     return TargetProfile.model_validate(raw)
 
 
-def list_targets(targets_dir: Path | str = "config/targets") -> list[str]:
-    d = Path(targets_dir)
-    return sorted(p.stem for p in d.glob("*.yaml")) if d.exists() else []
+# `list_targets(one_dir)` lived here and is gone. Listing profiles from a single
+# directory is the bug that hid `<project>/config/targets/` the moment anything
+# wrote into `.qaas/config/targets/`; profiles layer across every config
+# directory, and `config.target_files(dirs)` is the one place that knows it.

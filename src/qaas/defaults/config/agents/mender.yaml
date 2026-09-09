@@ -16,9 +16,11 @@ builtin_tools: [Read, Grep, Glob, Write, Edit, Bash]
 skills: [test-first-fix, minimal-diff-discipline, root-cause-vs-symptom, rollback-plan-authoring]
 
 policy:
-  # Product code, on its own branches. Set per target: these are the demo app's
-  # source roots, and a different target needs its own.
-  write_paths: [target-app/api/app, target-app/web/src, qa/repro]
+  # Product code, on its own branches. Relative to the *target's* root, not to
+  # the qaas project: these used to read `target-app/api/app`, which only ever
+  # resolved because the demo happened to live inside this checkout. Still set
+  # per target -- a different application keeps its source somewhere else.
+  write_paths: [api/app, web/src, qa/repro]
   branch_patterns: ["fix/*"]
   may_open_pr: true
   may_transition_tickets: true
@@ -31,18 +33,24 @@ policy:
 
   # §8.2: these classes stop at a human however small the change looks. Their
   # blast radius is not something a review can reliably bound.
+  #
+  # Matched against a path relative to the *target's* root, so the directory
+  # patterns are `*x/*` and not `*/x/*`: with a leading slash required,
+  # `.github/workflows/ci.yml` -- a repository's CI at its own root, which is
+  # where almost every repository keeps it -- matched nothing. That hole was
+  # invisible while paths arrived prefixed with `target-app/`.
   forbidden_paths:
-    - "*/migrations/*"
+    - "*migrations/*"
     - "*migration*"
-    - "*/auth.py"
+    - "*auth.py"
     - "*auth*"
     - "*payment*"
     - "*billing*"
     - "*secret*"
     - "*.tf"
-    - "*/infra/*"
+    - "*infra/*"
     - "*docker-compose*"
     - "Dockerfile*"
-    - "*/.github/*"
+    - "*.github/*"
 
 must_call: [mcp__vcs__open_pr]

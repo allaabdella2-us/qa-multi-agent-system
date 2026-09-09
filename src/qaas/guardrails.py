@@ -107,7 +107,15 @@ class Guardrail:
         self.ctx = ctx
         self.agent = ctx.agent
         self.policy = ctx.agent.policy
-        self.root = ctx.repo_root.resolve()
+        # Every write path in a policy is relative to the *application under
+        # test*, never to the qaas project. This was `ctx.repo_root`, filled
+        # from `Path.cwd()`, which anchored the whole allowlist on wherever the
+        # operator happened to be standing -- harmless only while the target was
+        # a subdirectory of the qaas checkout. With `qaas run --repo <url>` the
+        # target is a clone under `.qaas/targets/`, and an allowlist anchored on
+        # the cwd would deny every legitimate write and permit a sandbox that
+        # sits inside qaas's own source.
+        self.root = ctx.target_root.resolve()
         self._allowed_roots = [
             (self.root / p).resolve() for p in self.policy.write_paths
         ]

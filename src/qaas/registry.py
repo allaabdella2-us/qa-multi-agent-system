@@ -344,7 +344,7 @@ def build_options(
         # with different rules -- see `skill_plugins` and `qualified_skills`.
         plugins=skill_plugins(ctx),
         skills=qualified_skills(spec, ctx),
-        cwd=str(ctx.repo_root),
+        cwd=str(ctx.target_root),
         env=env,
         # Load NOTHING from the filesystem. This was `["project"]`, defended on
         # reproducibility grounds -- project settings live in the repo, so they

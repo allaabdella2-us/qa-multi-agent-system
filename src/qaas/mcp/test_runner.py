@@ -149,7 +149,7 @@ def _resolve_cwd(ctx: ToolContext, raw: str | None) -> tuple[Path | None, str | 
     Resolved before the containment check so `..` and symlinks cannot walk out
     of the checkout the run is supposed to be confined to.
     """
-    root = ctx.repo_root.resolve()
+    root = ctx.target_root.resolve()
     if not raw:
         return root, None
     candidate = Path(raw)

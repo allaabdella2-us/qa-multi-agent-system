@@ -78,7 +78,7 @@ def fake_agents(monkeypatch):
 
 
 def make_conductor(cfg, tmp_path) -> Conductor:
-    return Conductor(cfg, repo_root=REPO, root=tmp_path)
+    return Conductor(cfg, target_root=REPO, root=tmp_path)
 
 
 # -- the budget governor ----------------------------------------------------
@@ -287,7 +287,7 @@ async def test_not_fixed_without_a_mender_escalates_immediately(cfg, tmp_path, v
     mode = cfg.run_modes["fix-cycle"].model_copy(update={"agents": ["PROOF"]})
     verify_only = cfg.model_copy(update={"run_modes": {**cfg.run_modes, "fix-cycle": mode}})
 
-    report = await Conductor(verify_only, repo_root=REPO, root=tmp_path).run(
+    report = await Conductor(verify_only, target_root=REPO, root=tmp_path).run(
         "fix-cycle", run_id=store.run_id
     )
     assert [n for n, _ in calls].count("PROOF") == 1, "must not cycle without a fixer"
@@ -445,7 +445,7 @@ async def test_a_discovery_agent_cannot_certify_its_own_finding(cfg, tmp_path):
     store = RunStore.new(root=tmp_path)
     ctx = ToolContext(
         store=store, maps=SystemMapStore(tmp_path), config=cfg,
-        agent=cfg.agents["CONDUIT"], repo_root=REPO,
+        agent=cfg.agents["CONDUIT"], target_root=REPO,
     )
     tools = handlers(envelope_server.build_tools(ctx))
     await tools["emit_envelope"]({
@@ -485,7 +485,7 @@ async def test_concurrent_discovery_agents_do_not_steal_each_others_findings(cfg
 
     def ctx_for(name: str) -> ToolContext:
         return ToolContext(store=store, maps=maps, config=cfg,
-                           agent=cfg.agents[name], repo_root=REPO)
+                           agent=cfg.agents[name], target_root=REPO)
 
     # A neighbour emitted while this agent was working.
     store.put_envelope(DefectEnvelope(

@@ -604,7 +604,7 @@ def jira_ctx(stub, tmp_path: Path, monkeypatch, **env_overrides: str) -> ToolCon
         maps=SystemMapStore(root=tmp_path / ".qaas"),
         config=config.model_copy(update={"tracker": "jira"}),
         agent=config.agents["CLERK"],
-        repo_root=REPO_ROOT,
+        target_root=REPO_ROOT,
     )
 
 

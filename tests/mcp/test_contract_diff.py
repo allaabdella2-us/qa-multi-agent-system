@@ -354,7 +354,7 @@ async def test_find_consumers_reports_file_and_line_and_skips_vendor_trees(make_
     (tmp_path / "node_modules" / "junk.js").write_text('fetch("/v1/orders")\n')
     (tmp_path / "notes.txt").write_text("/v1/orders is called from the web app\n")
 
-    tools = handlers(build_tools(make_ctx("CONDUIT", repo_root=tmp_path)))
+    tools = handlers(build_tools(make_ctx("CONDUIT", target_root=tmp_path)))
     result = await tools["find_consumers"]({"endpoint": "GET /v1/orders"})
     hits = structured(result)["consumers"]
 
@@ -364,7 +364,7 @@ async def test_find_consumers_reports_file_and_line_and_skips_vendor_trees(make_
 
 
 async def test_find_consumers_says_plainly_when_it_found_nothing(make_ctx, tmp_path):
-    tools = handlers(build_tools(make_ctx("CONDUIT", repo_root=tmp_path)))
+    tools = handlers(build_tools(make_ctx("CONDUIT", target_root=tmp_path)))
     result = await tools["find_consumers"]({"endpoint": "/v1/nothing"})
     assert not is_error(result)
     assert structured(result)["consumers"] == []

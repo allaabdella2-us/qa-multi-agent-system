@@ -184,9 +184,6 @@ class SystemConfig(BaseModel):
     #: need a profile say so rather than crashing during config load.
     target: str | None = None
 
-    #: Repository root of the target, resolved from the profile at load time.
-    #: Kept as a plain path because most callers only need that much.
-    target_app: str = "target-app"
     #: Servers this project declares, on top of the built-in ones. Declaring a
     #: server here grants nothing; an agent receives it only by naming it in its
     #: own `mcp_servers:` list.
@@ -242,6 +239,27 @@ class SystemConfig(BaseModel):
             raise KeyError(f"unknown run mode '{mode}'; have: {', '.join(sorted(self.run_modes))}")
         return [self.agents[n] for n in self.run_modes[mode].agents if self.agents[n].enabled]
 
+    def target_root(self, base: Path | None = None) -> Path:
+        """Where the application under test lives.
+
+        This used to be `Path.cwd() / config.target_app` -- one value serving as
+        both "where qaas lives" and "the application under test". That holds
+        only while the target is a subdirectory of the qaas checkout, which is
+        true of exactly one target: the bundled demo. `qaas run --repo <url>`
+        clones into `.qaas/targets/<slug>`, and every write-path allowlist,
+        every test cwd and the SDK subprocess cwd are anchored on this value --
+        so getting it from the profile is not tidying, it is the security
+        boundary being pointed at the right directory.
+
+        With no profile there is nothing to test; the base (the qaas project, or
+        the cwd) is returned so read-only tooling still has somewhere to stand.
+        """
+        if self.profile is not None:
+            return self.profile.root_path(base)
+        from qaas.paths import project_root
+
+        return base if base is not None else project_root()
+
 
 #: Environment overrides for the two swappable backends.
 TRACKER_ENV = "QAAS_TRACKER"
@@ -256,6 +274,7 @@ def load_config(
     config_dir: Path | str | None = None,
     *,
     search: Sequence[Path] | None = None,
+    target: str | None = None,
 ) -> SystemConfig:
     """Read system.yaml plus every agents/*.yaml, layered across search paths.
 
@@ -268,6 +287,12 @@ def load_config(
 
     With neither argument, the workspace resolver decides (an explicit
     --config, then the project, then what shipped in the wheel).
+
+    `target` beats everything -- system.yaml, QAAS_TARGET, the single-profile
+    guess. It is what `qaas run --target X` and `qaas run --repo <url>` mean:
+    *this* application, whatever is configured. Without it, a stale `target:`
+    naming a profile that no longer exists killed the run inside config loading,
+    before the override the operator had just typed was ever consulted.
     """
     if config_dir is not None:
         dirs: list[Path] = [Path(config_dir)]
@@ -285,6 +310,14 @@ def load_config(
 
     raw: dict[str, Any] = yaml.safe_load(system_path.read_text()) or {}
 
+    # `target_app:` used to name the application's directory relative to the
+    # process cwd. The target profile's `root` says the same thing and says it
+    # better, so the field is gone -- but `extra="forbid"` would turn an old
+    # system.yaml into a hard load failure, and someone else's committed config
+    # is not ours to break. Dropped silently: there is nothing for the reader to
+    # do about it, and the profile already carries the answer.
+    raw.pop("target_app", None)
+
     # Backend overrides from the environment, so pointing a run at a real
     # tracker or forge is not a committed file change.
     #
@@ -299,6 +332,10 @@ def load_config(
         if raw_value:
             # Backends are lowercase literals; a target is a profile name.
             raw[key] = raw_value if key == "target" else raw_value.lower()
+
+    # An explicit argument outranks both the file and the environment.
+    if target:
+        raw["target"] = target
 
     # Agents layer by filename. Walking the search paths in reverse means the
     # highest-precedence directory writes last and therefore wins.
@@ -327,7 +364,13 @@ def load_config(
     # `pip install qaas-python` gives you a working CLI that is not yet pointed
     # at anything, and the commands that need a profile say "run qaas init"
     # rather than dying inside config loading.
-    targets_dir = next((d / "targets" for d in dirs if (d / "targets").is_dir()), None)
+    # Profiles layer by filename, exactly as agents and skills do. This used to
+    # take the *first* config layer that had a `targets/` at all -- and the day
+    # `qaas run --repo` started writing a generated profile into the writable
+    # layer (`.qaas/config/targets/`), that layer became "the" targets directory
+    # and every profile in `<project>/config/targets/` vanished: `qaas doctor
+    # --target corvid` reported the demo profile did not exist.
+    profiles = target_files(dirs)
     chosen = config.target
 
     # No target named, but exactly one profile on disk: use it. Choosing between
@@ -336,14 +379,29 @@ def load_config(
     # the user restate it is ceremony. This is also what keeps this repository
     # working: its `system.yaml` ships in the package and names no target,
     # because a demo name has no business in the defaults everyone installs.
-    if not chosen and targets_dir is not None:
-        available = sorted(p.stem for p in targets_dir.glob("*.yaml"))
-        if len(available) == 1:
-            chosen = available[0]
+    if not chosen and len(profiles) == 1:
+        chosen = next(iter(profiles))
 
-    if chosen and targets_dir is not None:
-        profile = load_target(chosen, targets_dir)
-        config = config.model_copy(
-            update={"target": chosen, "profile": profile, "target_app": profile.root}
-        )
+    if chosen and profiles:
+        if chosen not in profiles:
+            # Named but absent stays fatal: running the wrong application is
+            # worse than not running. Listed from the merged view, so the
+            # suggestion names every profile the user actually has.
+            raise FileNotFoundError(
+                f"no target profile '{chosen}'. Available: {', '.join(sorted(profiles))}. "
+                "Create one with `qaas init <path-to-repo>`."
+            )
+        profile = load_target(chosen, profiles[chosen].parent)
+        config = config.model_copy(update={"target": chosen, "profile": profile})
     return config
+
+
+def target_files(dirs: Sequence[Path]) -> dict[str, Path]:
+    """Every target profile visible across the config layers, nearest wins."""
+    found: dict[str, Path] = {}
+    for d in reversed(list(dirs)):
+        base = Path(d) / "targets"
+        if base.is_dir():
+            for path in sorted(base.glob("*.yaml")):
+                found[path.stem] = path
+    return found

@@ -162,7 +162,7 @@ def _compose_path(ctx: ToolContext) -> Path:
     """The compose file this target declares, falling back to the usual name."""
     env = _environment(ctx)
     declared = getattr(env, "compose_file", None) if env else None
-    return ctx.target_app / (declared or DEFAULT_COMPOSE_FILENAME)
+    return ctx.target_root / (declared or DEFAULT_COMPOSE_FILENAME)
 
 
 def _seed_dir(ctx: ToolContext) -> Path:
@@ -175,8 +175,8 @@ def _seed_dir(ctx: ToolContext) -> Path:
     env = _environment(ctx)
     declared = getattr(env, "seed_sql", None) if env else None
     if declared:
-        return (ctx.target_app / declared).parent.resolve()
-    return (ctx.target_app / DEFAULT_SEED_DIR).resolve()
+        return (ctx.target_root / declared).parent.resolve()
+    return (ctx.target_root / DEFAULT_SEED_DIR).resolve()
 
 
 def _login_path(ctx: ToolContext) -> str:
@@ -355,7 +355,7 @@ def _read_state(ctx: ToolContext) -> dict[str, Any]:
     return _read_json(_state_path(ctx), {"fixture": None, "branch": None, "services": []})
 
 
-def _current_branch(repo_root: Path) -> str | None:
+def _current_branch(target_root: Path) -> str | None:
     """Best-effort git branch. Absent git is not an error here."""
     git = shutil.which("git")
     if git is None:
@@ -363,7 +363,7 @@ def _current_branch(repo_root: Path) -> str | None:
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
             [git, "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=10,
+            cwd=str(target_root), capture_output=True, text=True, timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -405,7 +405,7 @@ def build_tools(ctx: ToolContext) -> list:
         return [docker_bin() or "docker", "compose", "-f", str(compose_file), *args]
 
     async def ps_rows(timeout: float = SHORT_TIMEOUT_S) -> tuple[list[dict[str, Any]], _Proc]:
-        proc = await _exec(compose_argv("ps", "--all", "--format", "json"), timeout, cwd=ctx.target_app)
+        proc = await _exec(compose_argv("ps", "--all", "--format", "json"), timeout, cwd=ctx.target_root)
         return (_parse_ps(proc.out) if proc.okay else []), proc
 
     async def wait_ready(services: list[str], deadline: float) -> tuple[dict[str, dict[str, str]], str | None]:
@@ -478,7 +478,7 @@ def build_tools(ctx: ToolContext) -> list:
             ),
             SEED_TIMEOUT_S,
             stdin=sql,
-            cwd=ctx.target_app,
+            cwd=ctx.target_root,
         )
         if proc.timed_out:
             return err(f"Seeding timed out after {SEED_TIMEOUT_S}s. Is the '{db_name}' service healthy?")
@@ -524,7 +524,7 @@ def build_tools(ctx: ToolContext) -> list:
 
         branch = args.get("branch")
         if branch:
-            actual = _current_branch(ctx.repo_root)
+            actual = _current_branch(ctx.target_root)
             if actual and actual != branch:
                 return err(
                     f"You asked for branch '{branch}' but the working tree is on '{actual}'. "
@@ -536,7 +536,7 @@ def build_tools(ctx: ToolContext) -> list:
         timeout = float(args.get("timeout_s") or DEFAULT_UP_TIMEOUT_S)
         deadline = asyncio.get_running_loop().time() + timeout
 
-        up = await _exec(compose_argv("up", "-d", *requested), timeout, cwd=ctx.target_app)
+        up = await _exec(compose_argv("up", "-d", *requested), timeout, cwd=ctx.target_root)
         if up.timed_out:
             return err(
                 f"`docker compose up -d` did not finish within {timeout:.0f}s. "
@@ -562,12 +562,12 @@ def build_tools(ctx: ToolContext) -> list:
 
         state = _read_state(ctx)
         state["services"] = list(requested)
-        state["branch"] = branch or _current_branch(ctx.repo_root)
+        state["branch"] = branch or _current_branch(ctx.target_root)
         _write_json(_state_path(ctx), state)
         ctx.store.log("env", agent=ctx.agent.name, action="spin_up", services=list(requested), problem=problem)
 
         if problem:
-            logs = await _exec(compose_argv("logs", "--tail", "40", *requested), SHORT_TIMEOUT_S, cwd=ctx.target_app)
+            logs = await _exec(compose_argv("logs", "--tail", "40", *requested), SHORT_TIMEOUT_S, cwd=ctx.target_root)
             return err(
                 f"Environment did not come up cleanly: {problem}. "
                 f"Status: {json.dumps(report)}. Last log lines: {logs.tail(2000)}"
@@ -613,11 +613,11 @@ def build_tools(ctx: ToolContext) -> list:
         fixture = str(args.get("fixture") or state.get("fixture") or "default")
 
         deadline = asyncio.get_running_loop().time() + DEFAULT_UP_TIMEOUT_S
-        down = await _exec(compose_argv("rm", "--stop", "--force", "--volumes", db_name), SHORT_TIMEOUT_S * 2, cwd=ctx.target_app)
+        down = await _exec(compose_argv("rm", "--stop", "--force", "--volumes", db_name), SHORT_TIMEOUT_S * 2, cwd=ctx.target_root)
         if not down.okay and not down.timed_out:
             return err(f"Could not remove the '{db_name}' container: {down.tail()}")
 
-        up = await _exec(compose_argv("up", "-d", db_name), SHORT_TIMEOUT_S * 4, cwd=ctx.target_app)
+        up = await _exec(compose_argv("up", "-d", db_name), SHORT_TIMEOUT_S * 4, cwd=ctx.target_root)
         if not up.okay:
             return err(f"Could not restart '{db_name}': {up.tail()}")
 
@@ -636,7 +636,7 @@ def build_tools(ctx: ToolContext) -> list:
             if str(r.get("Service") or "") not in ("", db_name) and _service_state(r)[0].startswith(("running", "up"))
         ]
         if api_services:
-            restart = await _exec(compose_argv("restart", *api_services), SHORT_TIMEOUT_S * 2, cwd=ctx.target_app)
+            restart = await _exec(compose_argv("restart", *api_services), SHORT_TIMEOUT_S * 2, cwd=ctx.target_root)
             restarted = restart.okay
             _, problem = await wait_ready(api_services, asyncio.get_running_loop().time() + DEFAULT_UP_TIMEOUT_S)
             if problem:
@@ -848,7 +848,7 @@ def build_tools(ctx: ToolContext) -> list:
         payload = {
             "services": services,
             "fixture": env_state.get("fixture"),
-            "branch": env_state.get("branch") or _current_branch(ctx.repo_root),
+            "branch": env_state.get("branch") or _current_branch(ctx.target_root),
             "flags": flags.get("flags", {}),
             "clock": flags.get("clock"),
         }
@@ -866,7 +866,7 @@ def build_tools(ctx: ToolContext) -> list:
         gate = preflight()
         if gate:
             return gate
-        proc = await _exec(compose_argv("down", "-v"), SHORT_TIMEOUT_S * 4, cwd=ctx.target_app)
+        proc = await _exec(compose_argv("down", "-v"), SHORT_TIMEOUT_S * 4, cwd=ctx.target_root)
         if proc.timed_out:
             return err(f"`docker compose down -v` timed out after {SHORT_TIMEOUT_S * 4}s; containers may still be up.")
         if not proc.okay:

@@ -41,7 +41,7 @@ def ctx_for(cfg, tmp_path):
             maps=SystemMapStore(tmp_path),
             config=cfg,
             agent=cfg.agents[agent_name],
-            repo_root=REPO,
+            target_root=REPO,
         )
     return build
 

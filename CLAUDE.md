@@ -134,6 +134,21 @@ field: `none` (static reads only), `external` (exercise but never reset), or
 usefully run — `qaas doctor` reports this. Credentials are never in a profile;
 it names environment variables.
 
+**The qaas project and the target are two different roots.** `paths.Workspace`
+owns "where qaas lives"; `SystemConfig.target_root()` → `profile.root_path()`
+owns "the application under test". `ToolContext.target_root` carries the second,
+and it is what the write-path allowlist, the test runner's cwd, the vcs sandbox
+and the SDK subprocess `cwd` are all anchored on. They coincide only for the
+bundled demo. A policy's `write_paths`, `protected_paths` and `forbidden_paths`
+are **target-relative** — a pattern written `*/x/*` will not match a repository's
+own root-level `x/`. Target profiles layer by filename across config dirs
+(`config.target_files`), like agents and skills.
+
+`qaas run --repo <path-or-url>` clones into `.qaas/targets/<slug>` and
+provisions a profile through the same helper as `qaas init` (`_provision_target`
+in `cli.py`). Keep it one code path — two ways to decide what is under test is
+two sets of rules about where someone else's code lands on disk.
+
 ### Runtime state
 
 `.qaas/` (gitignored): `runs/<id>/ledger.jsonl` (append-only audit trail —
@@ -179,6 +194,11 @@ vs `matcher=/hooks=`) — trust the installed package, not the docs.
   delete those; they are the reason the code looks the way it does.
 - New agent capability goes in a skill or a prompt, not in Python. New
   *enforcement* goes in Python, never in a prompt.
-- `setting_sources=["project"]` only: `~/.claude` must never poison a run.
+- `setting_sources=[]` — nothing is loaded from the filesystem. It was
+  `["project"]`, defended on reproducibility grounds, and that held only while
+  `cwd` was *our* repo. `cwd` is the target now, and with `qaas run --repo` it
+  can be a repository cloned seconds ago from a pasted URL; "project" would load
+  its `.claude/settings.json`, hooks and MCP servers into a process holding
+  Anthropic, Jira and GitHub credentials. It must be an explicit `[]`, not None.
 - No merge path exists anywhere, and force-push is not a parameter. Merge is a
   human decision (§8.4), and `FORBIDDEN_BASH` enforces it.

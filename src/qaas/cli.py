@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from qaas.paths import Workspace
-from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config
+from qaas.paths import Workspace, project_root
+from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config, target_files
 from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
 
 #: Where skills are found, in precedence order. This used to be
@@ -54,7 +57,7 @@ def _ledger_path(cfg) -> Path | None:
     """
     profile = getattr(cfg, "profile", None)
     declared = getattr(profile, "ledger", None) if profile else None
-    root = Path(profile.root) if profile else Path(cfg.target_app)
+    root = cfg.target_root()
     if declared:
         return root / declared
     fallback = root / "defects.yaml"
@@ -70,22 +73,194 @@ def _system_yaml(config_dir: Path | str | None) -> Path:
     return found or (ws.state_root / "config" / "system.yaml")
 
 
-def _targets_dir(config_dir: Path | str | None, *, writable: bool = False) -> Path:
-    """Where target profiles live, honouring --config and the workspace.
+def _writable_targets_dir(config_dir: Path | str | None) -> Path:
+    """Where `qaas init` and `qaas run --repo` write a generated profile.
 
-    Reads search every config layer -- a user's own profiles shadow the bundled
-    demo. Writes go to the project (`.qaas/config/targets/`), never into an
-    installed package: `qaas init` must not try to write inside site-packages.
+    The project (`.qaas/config/targets/`), never an installed package: `qaas
+    init` must not try to write inside site-packages. Reading does NOT come
+    through here -- profiles layer across every config directory, see
+    `_target_files`.
     """
     if config_dir is not None:
         return Path(config_dir) / "targets"
-    ws = Workspace.resolve()
-    if writable:
-        return ws.state_root / "config" / "targets"
-    for d in ws.config_dirs:
-        if (d / "targets").is_dir():
-            return d / "targets"
-    return ws.state_root / "config" / "targets"
+    return Workspace.resolve().state_root / "config" / "targets"
+
+
+def _target_files(config_dir: Path | str | None) -> dict[str, Path]:
+    """Every target profile visible, by name, nearest config layer winning.
+
+    Reading used to be "the first config layer that has a `targets/` directory",
+    which is not layering at all: the moment a generated profile landed in
+    `.qaas/config/targets/`, every profile in `<project>/config/targets/`
+    disappeared from `qaas targets` and from `--target`. Profiles union by
+    filename, exactly as agents and skills do.
+    """
+    dirs = [Path(config_dir)] if config_dir is not None else list(Workspace.resolve().config_dirs)
+    return target_files(dirs)
+
+
+def _load_target(name: str, config_dir: Path | str | None):
+    """One profile by name, from wherever the layers put it."""
+    from qaas.target import load_target
+
+    found = _target_files(config_dir)
+    if name not in found:
+        raise typer.BadParameter(
+            f"no target profile '{name}'. Available: {', '.join(sorted(found)) or 'none'}. "
+            "Create one with `qaas init <path-to-repo>`."
+        )
+    return load_target(name, found[name].parent)
+
+
+#: A repo argument that is a URL rather than a directory. `git@` has no scheme,
+#: so this cannot be a urlparse.
+_REPO_URL = re.compile(r"^(https?://|git@|ssh://)")
+
+
+def _clone_root(clone_to: Path | str | None) -> Path:
+    """Where a cloned target goes.
+
+    Under `.qaas/targets/`, never into the caller's source tree. `qaas init`
+    used to default to a bare `targets/` -- relative to the process cwd -- so
+    pointing the tool at a URL from inside your own repository dropped a foreign
+    checkout in the middle of it. Run state belongs in the state directory, and
+    a clone is run state.
+    """
+    if clone_to is not None:
+        return Path(clone_to).expanduser()
+    return Workspace.resolve().state_root / "targets"
+
+
+def _slug(text: str) -> str:
+    """A target name: lowercase, sluggified, bounded. Also names the clone dir."""
+    return re.sub(r"[^a-z0-9-]+", "-", text.lower()).strip("-")[:40] or "target"
+
+
+def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str | None]:
+    """A repo argument -> (local directory, origin url or None), cloning a URL.
+
+    Shared by `qaas init` and `qaas run --repo` so a URL means exactly the same
+    thing to both: one clone, in one place, reused on the next invocation. A
+    second implementation of this would be a second set of rules about where
+    someone else's code lands on your disk.
+    """
+    if not _REPO_URL.match(repo):
+        root = Path(repo).expanduser()
+        if not root.is_dir():
+            console.print(f"[red]not a directory:[/red] {root}")
+            raise typer.Exit(1)
+        return root, None
+
+    slug = _slug(re.sub(r"\.git$", "", repo.rstrip("/").split("/")[-1]))
+    root = _clone_root(clone_to) / slug
+    if root.exists():
+        console.print(f"[dim]using existing clone at {root}[/dim]")
+        return root, repo
+
+    root.parent.mkdir(parents=True, exist_ok=True)
+    console.print(f"cloning {repo} -> {root}")
+    result = subprocess.run(
+        ["git", "clone", "--depth", "50", repo, str(root)],
+        capture_output=True, text=True, timeout=600,
+    )
+    if result.returncode != 0:
+        console.print(f"[red]clone failed:[/red] {result.stderr.strip()[:400]}")
+        raise typer.Exit(1)
+    return root, repo
+
+
+def _default_branch(root: Path) -> str:
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True,
+    )
+    return head.stdout.strip() if head.returncode == 0 and head.stdout.strip() else "main"
+
+
+def _profile_root_value(root: Path) -> str:
+    """How a generated profile should spell its `root`.
+
+    Relative when the target sits inside the qaas project (portable, and what a
+    committed profile wants), absolute otherwise. `build_profile` records
+    whatever path it was handed, which may be `../thing` or `./thing` -- and a
+    target root that means different things from different working directories
+    is not acceptable, because it is what the write-path allowlist is anchored
+    on.
+    """
+    resolved = root.resolve()
+    base = project_root()
+    return (
+        resolved.relative_to(base).as_posix()
+        if resolved.is_relative_to(base)
+        else str(resolved)
+    )
+
+
+def _write_profile(profile, out: Path) -> None:
+    """Persist a generated profile."""
+    import yaml as _yaml
+
+    payload = profile.model_dump(exclude_none=True, exclude_defaults=False)
+    payload.pop("ledger", None)
+    payload["root"] = _profile_root_value(Path(profile.root))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        "# Target profile. Everything here was guessed by inspection — review it.\n"
+        "# Credentials never belong in this file: reference environment variables.\n\n"
+        + _yaml.safe_dump(payload, sort_keys=False, width=88)
+    )
+
+
+def _provision_target(
+    repo: str,
+    *,
+    name: str | None = None,
+    api_url: str | None = None,
+    web_url: str | None = None,
+    clone_to: Path | str | None = None,
+    config_dir: Path | str | None = None,
+    force: bool = False,
+    reuse_existing: bool = False,
+) -> tuple[Any, str, Path, list[str], bool]:
+    """Make sure a target profile exists for `repo`, cloning it if it is a URL.
+
+    Returns `(profile, target_name, profile_path, notes, wrote)`.
+
+    `reuse_existing` is the whole difference between the two callers. `qaas
+    init` is a setup command and refuses to clobber a profile you may have spent
+    time correcting; `qaas run --repo <url>` has to be idempotent, because
+    pointing it at the same URL twice should run twice rather than fail the
+    second time. Both go through here so a URL, a clone location and a target
+    name mean one thing in this system rather than two.
+    """
+    from qaas.discover import build_profile
+    from qaas.target import Environment, load_target
+
+    root, repo_url = _materialise_repo(repo, clone_to)
+    target_name = _slug(name or root.resolve().name)
+    out = _writable_targets_dir(config_dir) / f"{target_name}.yaml"
+
+    # Any layer, not just the writable one: a profile the user hand-wrote in
+    # `<project>/config/targets/` is exactly the kind that must not be clobbered.
+    existing = _target_files(config_dir).get(target_name)
+    if existing is not None and not force:
+        if reuse_existing:
+            return load_target(target_name, existing.parent), target_name, existing, [], False
+        console.print(f"[red]{existing} already exists.[/red] Use --force to overwrite.")
+        raise typer.Exit(1)
+
+    profile, notes = build_profile(
+        target_name, root, repo_url=repo_url, default_branch=_default_branch(root)
+    )
+    if api_url or web_url:
+        profile = profile.model_copy(
+            update={"environment": Environment(mode="external", api_url=api_url, web_url=web_url)}
+        )
+    _write_profile(profile, out)
+    # Re-read it: the file is what every later command loads, and a profile that
+    # round-trips differently from the one in memory is a bug that only shows up
+    # on the *next* invocation.
+    return load_target(target_name, out.parent), target_name, out, notes, True
 
 
 app = typer.Typer(add_completion=False, help="Multi-agent QA & remediation system.")
@@ -104,7 +279,7 @@ def init(
     name: str = typer.Option(None, "--name", "-n", help="Target name. Defaults to the directory name."),
     api_url: str = typer.Option(None, "--api-url", help="Base URL of a running API, if there is one."),
     web_url: str = typer.Option(None, "--web-url", help="Base URL of a running UI, if there is one."),
-    clone_to: Path = typer.Option(Path("targets"), "--clone-to", help="Where to clone, for a git URL."),
+    clone_to: Path = typer.Option(None, "--clone-to", help="Where to clone, for a git URL. Default: <state>/targets/."),
     config_dir: Path | None = ConfigDir,
     force: bool = typer.Option(False, "--force", help="Overwrite an existing profile."),
 ) -> None:
@@ -113,68 +288,14 @@ def init(
     Everything it writes is a guess you are expected to review. Nothing runs and
     nothing is called until you do.
     """
-    import re
-    import subprocess
-
-    import yaml as _yaml
-
-    from qaas.discover import build_profile
-    from qaas.target import Environment
-
-    repo_url = None
-    if re.match(r"^(https?://|git@|ssh://)", repo):
-        repo_url = repo
-        slug = re.sub(r"\.git$", "", repo.rstrip("/").split("/")[-1])
-        root = Path(clone_to) / slug
-        if root.exists():
-            console.print(f"[dim]using existing clone at {root}[/dim]")
-        else:
-            root.parent.mkdir(parents=True, exist_ok=True)
-            console.print(f"cloning {repo_url} -> {root}")
-            result = subprocess.run(
-                ["git", "clone", "--depth", "50", repo_url, str(root)],
-                capture_output=True, text=True, timeout=600,
-            )
-            if result.returncode != 0:
-                console.print(f"[red]clone failed:[/red] {result.stderr.strip()[:400]}")
-                raise typer.Exit(1)
-    else:
-        root = Path(repo).expanduser()
-        if not root.is_dir():
-            console.print(f"[red]not a directory:[/red] {root}")
-            raise typer.Exit(1)
-
-    target_name = (name or root.resolve().name).lower()
-    target_name = re.sub(r"[^a-z0-9-]+", "-", target_name).strip("-")[:40] or "target"
-
-    out = _targets_dir(config_dir, writable=True) / f"{target_name}.yaml"
-    if out.exists() and not force:
-        console.print(f"[red]{out} already exists.[/red] Use --force to overwrite.")
-        raise typer.Exit(1)
-
-    branch = "main"
-    head = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True,
-    )
-    if head.returncode == 0 and head.stdout.strip():
-        branch = head.stdout.strip()
-
-    profile, notes = build_profile(
-        target_name, root, repo_url=repo_url, default_branch=branch
-    )
-    if api_url or web_url:
-        profile = profile.model_copy(
-            update={"environment": Environment(mode="external", api_url=api_url, web_url=web_url)}
-        )
-
-    payload = profile.model_dump(exclude_none=True, exclude_defaults=False)
-    payload.pop("ledger", None)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(
-        "# Target profile. Everything here was guessed by inspection — review it.\n"
-        "# Credentials never belong in this file: reference environment variables.\n\n"
-        + _yaml.safe_dump(payload, sort_keys=False, width=88)
+    profile, target_name, out, notes, _ = _provision_target(
+        repo,
+        name=name,
+        api_url=api_url,
+        web_url=web_url,
+        clone_to=clone_to,
+        config_dir=config_dir,
+        force=force,
     )
 
     # Activate the profile. This used to be step 3 of a printed checklist --
@@ -242,18 +363,18 @@ def init(
 @app.command()
 def targets(config_dir: Path | None = ConfigDir) -> None:
     """List the target profiles this system knows about."""
-    from qaas.target import list_targets, load_target
+    from qaas.target import load_target
 
-    names = list_targets(_targets_dir(config_dir))
-    if not names:
+    found = _target_files(config_dir)
+    if not found:
         console.print("[dim]no targets yet — run `qaas init <path-to-repo>`[/dim]")
         return
     active = load_config(config_dir).target
     table = Table(header_style="bold")
     for col in ("target", "root", "environment", "scored"):
         table.add_column(col)
-    for n in names:
-        p = load_target(n, _targets_dir(config_dir))
+    for n in sorted(found):
+        p = load_target(n, found[n].parent)
         table.add_row(
             f"[bold]{n}[/bold] (active)" if n == active else n,
             p.root,
@@ -269,10 +390,8 @@ def doctor(
     target: str = typer.Option(None, "--target", "-t", help="Check this profile instead of the active one."),
 ) -> None:
     """Check whether a target is ready to run against."""
-    from qaas.target import load_target
-
-    cfg = load_config(config_dir)
-    profile = load_target(target, _targets_dir(config_dir)) if target else cfg.profile
+    cfg = load_config(config_dir, target=target)
+    profile = _load_target(target, config_dir) if target else cfg.profile
     if profile is None:
         console.print("[red]no target profile loaded[/red]")
         raise typer.Exit(1)
@@ -517,21 +636,63 @@ def run(
     root: Path = Root,
     only: list[str] = typer.Option(None, "--only", help="Restrict the run to these agents."),
     target: str = typer.Option(None, "--target", "-t", help="Target profile to run against. Overrides system.yaml."),
+    repo: str = typer.Option(None, "--repo", help="A local path or git URL to run against directly. Clones and profiles it if needed."),
+    clone_to: Path = typer.Option(None, "--clone-to", help="Where to clone, for a git URL. Default: <state>/targets/."),
     run_id: str = typer.Option(None, "--run-id", help="Continue an existing run rather than starting one."),
     ticket: list[str] = typer.Option(None, "--ticket", help="Restrict a fix-cycle to these tickets."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Render the plan without calling the API."),
+    force: bool = typer.Option(False, "--force", help="With --repo: regenerate the target profile instead of reusing it."),
 ) -> None:
     """Execute a run. Costs real money unless --dry-run."""
     import asyncio
 
     from qaas.conductor import Conductor
     from qaas.registry import describe
-    from qaas.target import load_target
 
-    cfg = load_config(config_dir)
+    if repo and target:
+        console.print("[red]--repo and --target name two different targets.[/red] Pass one.")
+        raise typer.Exit(1)
+
+    # `--repo` is sugar over `--target`, not a second way to run. It provisions
+    # a profile the same way `qaas init` does and then falls into the ordinary
+    # path, so a URL gets exactly the guardrails, readiness checks and target
+    # root that a hand-written profile gets. It deliberately does NOT rewrite
+    # system.yaml: a one-off run against someone else's repository is not a
+    # decision to repoint the whole installation at it.
+    #
+    # Before the config load, because provisioning is what decides which target
+    # this run is about -- and a stale `target:` in system.yaml naming a profile
+    # that no longer exists would otherwise kill the run inside `load_config`,
+    # before the override just typed on the command line was ever read.
+    profile = None
+    if repo:
+        profile, target, path, notes, wrote = _provision_target(
+            repo,
+            clone_to=clone_to,
+            config_dir=config_dir,
+            force=force,
+            reuse_existing=True,
+        )
+        for note in notes:
+            console.print(f"[yellow]note:[/yellow] {note}")
+        console.print(
+            f"[green]wrote {path}[/green]" if wrote
+            else f"[dim]reusing the existing profile at {path} (--force to regenerate)[/dim]"
+        )
+
+    cfg = load_config(config_dir, target=target)
     if target:
-        profile = load_target(target, _targets_dir(config_dir))
-        cfg = cfg.model_copy(update={"target": target, "profile": profile, "target_app": profile.root})
+        # The profile object we already hold, rather than a second lookup by
+        # name: `_provision_target` may have written into the writable config
+        # layer (`.qaas/config/targets/`) while `load_config` resolves profiles
+        # from a different one, and this run must be about the repository the
+        # operator named, not a same-named profile from another layer.
+        cfg = cfg.model_copy(
+            update={
+                "target": target,
+                "profile": profile or _load_target(target, config_dir),
+            }
+        )
     if cfg.profile:
         problems = cfg.profile.readiness()
         blocking = [p for p in problems if "does not exist" in p or "not a directory" in p]
@@ -589,7 +750,7 @@ def run(
         elif kind == "stopped":
             console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
 
-    conductor = Conductor(cfg, repo_root=Path.cwd(), root=root, on_event=on_event, tickets=list(ticket) if ticket else None)
+    conductor = Conductor(cfg, root=root, on_event=on_event, tickets=list(ticket) if ticket else None)
     report = asyncio.run(conductor.run(mode, run_id=run_id))
 
     console.print()
@@ -692,7 +853,7 @@ def sweep(
     from qaas.scorecard import GoldenLedger, score as score_run
 
     cfg = load_config(config_dir)
-    conductor = Conductor(cfg, repo_root=Path.cwd(), root=root)
+    conductor = Conductor(cfg, root=root)
     report = asyncio.run(conductor.run(mode))
     console.print_json(data=report.summary())
 

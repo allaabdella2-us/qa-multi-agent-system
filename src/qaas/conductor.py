@@ -101,14 +101,17 @@ class Conductor:
     def __init__(
         self,
         config: SystemConfig,
-        repo_root: Path,
+        target_root: Path | None = None,
         *,
         root: Path | str = ".qaas",
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         tickets: list[str] | None = None,
     ):
         self.config = config
-        self.repo_root = repo_root
+        #: The application under test. Defaults to whatever the active profile
+        #: says, which is the answer every caller wants; an explicit path is for
+        #: tests and for a run pointed at a clone that has no profile yet.
+        self.target_root = Path(target_root) if target_root is not None else config.target_root()
         self.maps = SystemMapStore(root)
         self.root = Path(root)
         self.on_event = on_event
@@ -127,7 +130,7 @@ class Conductor:
             maps=self.maps,
             config=self.config,
             agent=spec,
-            repo_root=self.repo_root,
+            target_root=self.target_root,
             map_version=map_version,
         )
 
@@ -449,4 +452,4 @@ class Conductor:
 
 def build(config_dir: Path | str = "config", root: Path | str = ".qaas") -> Conductor:
     config = load_config(config_dir)
-    return Conductor(config, repo_root=Path.cwd(), root=root)
+    return Conductor(config, root=root)
