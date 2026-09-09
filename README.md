@@ -322,6 +322,6 @@ point, the five phases, what moves between agents, and what the guardrails stop.
 
 <div align="center">
 
-**MIT licensed** · [LICENSE](LICENSE) · Built on the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview)
+**MIT licensed** · [LICENSE](LICENSE) 
 
 </div>
