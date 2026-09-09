@@ -82,7 +82,8 @@ export QAAS_PASSWORD=...
 qaas doctor --target your-app        # what is possible, and what is missing
 qaas run --mode pr-check --target your-app --dry-run
 qaas run --mode pr-check --target your-app
-qaas show <run-id>
+qaas show <run-id>                   # findings, cost, tickets, escalations
+qaas trace <run-id>                  # the whole ledger as a timeline
 ```
 
 `doctor` tells you which agents can do useful work against this target and which

@@ -2,15 +2,30 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from qaas import trace as trace_mod
 from qaas.paths import Workspace
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config
 from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
+
+#: Colour by what a line *means*, not by which subsystem wrote it: a refusal and
+#: a regression should catch the eye at the same speed in a 2000-line timeline.
+KIND_STYLE = {
+    "run_started": "bold", "run_finished": "bold",
+    "agent_started": "cyan", "agent_finished": "cyan",
+    "denial": "yellow", "stop_blocked": "yellow", "contract_unmet": "yellow",
+    "skipped": "dim", "tool_call": "dim", "dry_run": "dim",
+    "escalation": "red", "agent_error": "red", "tool_error": "red",
+    "regression": "red", "reopened": "red",
+    "envelope": "magenta", "reproduction": "magenta", "ticket": "magenta",
+    "verdict": "green", "verified": "green", "review": "green",
+}
 
 #: Where skills are found, in precedence order. This used to be
 #: `Path(__file__).resolve().parents[2] / ".claude" / "skills"` -- a climb that
@@ -480,22 +495,130 @@ def runs(root: Path = Root, limit: int = 10) -> None:
     console.print(table)
 
 
+#: A verdict is the answer to "did the fix work"; colour it like one.
+VERDICT_STYLE = {
+    "VERIFIED": "green",
+    "NOT_FIXED": "yellow",
+    "REGRESSED": "red",
+}
+
+
 @app.command()
 def show(run_id: str, root: Path = Root) -> None:
-    """Show one run's findings and ledger."""
+    """Show one run's findings and ledger: cost, duration, tickets, escalations."""
     store = RunStore(run_id, root)
-    for env in store.envelopes():
+    # One pass over the ledger, shared by the header and the denial list -- each
+    # `store.ledger(kind)` call is a full-file scan of a file that reaches tens
+    # of thousands of lines on a real run.
+    entries = trace_mod.read_ledger(store)
+    summary = trace_mod.summarise(store, entries)
+
+    console.print(f"[bold]{summary.run_id}[/bold]")
+    header = [f"mode {summary.mode or '?'}"]
+    if summary.started:
+        header.append(f"started {summary.started:%Y-%m-%d %H:%M:%S}Z")
+    if summary.duration_s is not None:
+        header.append(f"duration {summary.duration_s:.0f}s")
+    header.append(f"cost ${summary.cost_usd:.2f}")
+    if summary.budget_usd:
+        header.append(f"of ${summary.budget_usd:.2f} budget")
+    console.print("  " + "  ".join(header))
+    if summary.target_sha:
+        dirty = " [yellow](dirty tree)[/yellow]" if summary.target_dirty else ""
+        console.print(f"  target {summary.target_sha[:12]}{dirty}")
+    else:
+        # Not a warning: `environment.mode: none` targets and non-git checkouts
+        # are supported, and runs recorded before this was added have no sha.
+        console.print("  [dim]target commit not recorded[/dim]")
+    if not summary.completed:
+        console.print("  [yellow]no run_finished — this run did not complete[/yellow]")
+    if summary.stopped_early:
+        console.print(f"  [yellow]stopped early: {summary.stopped_early}[/yellow]")
+
+    envelopes = store.envelopes()
+    if envelopes:
+        console.print(f"\n[bold]findings ({len(envelopes)})[/bold]")
+    for env in envelopes:
         ok, reason = env.is_fileable()
         gate = "[green]fileable[/green]" if ok else f"[yellow]held: {reason}[/yellow]"
         console.print(
             f"[bold]{env.severity.value:8s}[/bold] {env.domain.value:12s} "
             f"{env.title}  [dim]({env.discovered_by}, conf {env.confidence:.2f})[/dim]  {gate}"
         )
-    denials = list(store.ledger("denial"))
+
+    if summary.tickets:
+        console.print(f"\n[bold]tickets filed ({len(summary.tickets)})[/bold]")
+        for key, verdict in summary.tickets.items():
+            if verdict is None:
+                console.print(f"  {key}  [dim]no verdict[/dim]")
+            else:
+                style = VERDICT_STYLE.get(verdict, "white")
+                console.print(f"  {key}  [{style}]{verdict}[/{style}]")
+
+    if summary.escalations:
+        console.print(f"\n[bold red]escalations ({len(summary.escalations)})[/bold red]")
+        for reason in summary.escalations:
+            console.print(f"  {reason}")
+
+    denials = [e for e in entries if e.kind == "denial"]
     if denials:
         console.print(f"\n[bold]guardrail denials ({len(denials)})[/bold]")
         for d in denials:
             console.print(f"  {d.agent}: {d.detail.get('tool')} — {d.detail.get('reason')}")
+
+    console.print(f"\n[dim]{len(entries)} ledger entries — qaas trace {run_id}[/dim]")
+
+
+@app.command()
+def trace(
+    run_id: str,
+    root: Path = Root,
+    agent: str | None = typer.Option(None, "--agent", "-a", help="Only this agent's entries."),
+    kind: list[str] = typer.Option(None, "--kind", "-k", help="Only these ledger kinds (repeatable)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the filtered entries as JSON."),
+) -> None:
+    """Print one run's ledger as a timeline: dispatches, tools, denials, verdicts, cost."""
+    store = RunStore(run_id, root)
+    if not store.ledger_path.exists():
+        console.print(f"[red]no ledger for run {run_id}[/red] — try `qaas runs`")
+        raise typer.Exit(1)
+
+    try:
+        kinds = trace_mod.parse_kinds(kind or [])
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from None
+
+    entries = trace_mod.select(trace_mod.read_ledger(store), agent=agent, kinds=kinds)
+
+    if as_json:
+        # Plain stdout, not `console.print_json`: rich soft-wraps at the console
+        # width, which puts newlines inside long string values and hands the
+        # caller JSON that no parser will accept. `--json` exists to be piped.
+        typer.echo(json.dumps([e.model_dump(mode="json") for e in entries], indent=2))
+        return
+
+    if not entries:
+        console.print("[dim]no ledger entries match[/dim]")
+        return
+
+    table = Table(header_style="bold", box=None, pad_edge=False)
+    table.add_column("t+", justify="right", style="dim")
+    table.add_column("agent", style="cyan")
+    table.add_column("kind")
+    table.add_column("detail", overflow="fold")
+    table.add_column("cost", justify="right", style="dim")
+    for row in trace_mod.timeline(entries):
+        label = f"{row.kind} ×{row.count}" if row.count > 1 else row.kind
+        table.add_row(
+            f"{row.offset_s:.0f}s",
+            row.agent,
+            f"[{KIND_STYLE.get(row.kind, 'white')}]{label}[/]",
+            row.detail,
+            f"${row.cost_usd:.2f}" if row.cost_usd is not None else "",
+        )
+    console.print(table)
+    console.print(f"\n[dim]{len(entries)} entries[/dim]")
 
 
 @app.command()

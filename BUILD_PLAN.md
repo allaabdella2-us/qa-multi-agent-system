@@ -215,6 +215,36 @@ CORVID-7 remains escalated, correctly — shipping it alone makes orders 26-30
 unreachable in a UI with no pager (UI-08, filed as CORVID-16). That is a product
 decision, which is what escalation is for.
 
+### Phase D — the run trace is legible ✅ done
+
+The ledger was the richest thing a run produced and nothing could read it. 28
+distinct `kind` values were written across `src/`; `LedgerEntry.kind` was a bare
+`str` whose comment named 7 of them, and `qaas show` — docstring: "findings and
+ledger" — read exactly one (`denial`), printing no cost, no mode, no duration, no
+verdicts, no escalations, no tickets. The audit trail existed; the audit did not.
+
+- `qaas trace <run-id>` renders the ledger as a timeline with cost accumulating,
+  filtered by `--agent` / `--kind` (repeatable, validated against the enum) and
+  exportable with `--json`. Consecutive tool calls by one agent fold into a
+  single row: a real run logs ~2400 `tool_call` lines against ~150 of everything
+  else, and one row each buries the dispatches and verdicts worth reading.
+- `qaas show` now leads with mode, target commit, duration, cost against budget,
+  every ticket and its latest verdict, and the escalations.
+- `LedgerKind` (a `StrEnum`, so the wire format and every `== "denial"`
+  comparison are unchanged) closes the set: a typo now raises at the `store.log`
+  call instead of inventing a 29th kind no reader looks for.
+- **Two provenance gaps closed.** `agent_started` recorded `task_chars=len(task)`
+  — the length of the prompt, not the prompt — so the instruction an agent
+  actually received was unrecoverable and five FORGE dispatches differed only by
+  character count; the task now goes to the artifact store with a preview inline.
+  And `run_started` recorded no commit, so a run was not pinned to the code it
+  examined; it now carries the target's sha, branch and dirty flag.
+
+**Verify:** `pytest tests/test_trace.py` — 29 tests over a synthetic ledger and a
+scripted conductor, offline. Includes an AST sweep asserting every literal passed
+to `store.log()` anywhere in `src/qaas/**` is a `LedgerKind` member, so the next
+kind added cannot go missing from the readers.
+
 ### Adding agents 7–15 afterwards
 A new discovery agent should be a prompt file plus a `config/agents/<NAME>.yaml` naming its allowlist — no changes to conductor, runner, or guardrails. Whether that holds is the real test of M3, so the first Phase-2 agent (VAULT) will be added as a smoke test of the extension path before this build is called done.
 

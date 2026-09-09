@@ -17,6 +17,7 @@ Within a phase, agents are independent and run concurrently up to the mode's cap
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,49 @@ from qaas import tasks
 
 class BudgetExceeded(RuntimeError):
     """The run hit its spend or wall-clock cap. Not an error — a control working."""
+
+
+def target_revision(root: Path | str | None) -> dict[str, Any]:
+    """What commit of the target this run is looking at, for `run_started`.
+
+    Without this a run is not pinned to any code: the ledger said which agents
+    ran and what they spent, but nothing said *what they read*, so a finding
+    could never be replayed against the tree that produced it. Now `qaas show`
+    can name the commit.
+
+    `dirty` is not decoration — a run against an edited working tree is not
+    pinned by its sha either, and that has to be visible rather than implied.
+
+    Never raises. A target that is not a git checkout (or has no git at all) is
+    an ordinary, supported state: the fields come back None and the run
+    proceeds. Provenance is worth recording, never worth failing a run for.
+    """
+    if root is None:
+        return {"target_root": None, "target_sha": None, "target_dirty": None}
+    root = Path(root)
+    info: dict[str, Any] = {"target_root": str(root), "target_sha": None, "target_dirty": None}
+
+    def git(*args: str) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(root), *args],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout if proc.returncode == 0 else None
+
+    sha = git("rev-parse", "HEAD")
+    if sha is None:
+        return info  # not a repo, no git, or an empty repo with no commits yet
+    info["target_sha"] = sha.strip()
+    status = git("status", "--porcelain")
+    if status is not None:
+        info["target_dirty"] = bool(status.strip())
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch:
+        info["target_branch"] = branch.strip()
+    return info
 
 
 @dataclass
@@ -117,6 +161,18 @@ class Conductor:
         #: almost always want one.
         self.tickets = set(tickets) if tickets else None
 
+    def _target_root(self) -> Path | None:
+        """The checkout under examination, or None when nothing is configured.
+
+        Deliberately the same expression `ToolContext.target_app` uses, so the
+        commit recorded in the ledger is the commit the agents' tools were
+        pointed at. `config.target_app` is `profile.root`, and `Path.__truediv__`
+        keeps an absolute right-hand side, so both spellings of `root` land in
+        the same place.
+        """
+        target = getattr(self.config, "target_app", None)
+        return self.repo_root / target if target else None
+
     def _emit(self, kind: str, **detail: Any) -> None:
         if self.on_event:
             self.on_event(kind, detail)
@@ -146,6 +202,7 @@ class Conductor:
             agents=sorted(specs),
             budget_usd=run_mode.max_budget_usd,
             wall_clock_s=run_mode.max_wall_clock_s,
+            **target_revision(self._target_root()),
         )
         self._emit("run_started", run_id=store.run_id, mode=mode, agents=sorted(specs))
 

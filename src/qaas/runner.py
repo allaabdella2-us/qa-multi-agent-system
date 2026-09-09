@@ -75,6 +75,39 @@ def _check_skills_loaded(spec: AgentSpec, ctx: ToolContext, message: Any, emit) 
     emit("skills_missing", agent=spec.name, missing=missing)
 
 
+#: How much of the task goes inline in the ledger line. Enough to tell two
+#: FORGE invocations apart at a glance; the artifact holds the rest.
+TASK_PREVIEW_CHARS = 300
+
+
+def _record_task(ctx: ToolContext, agent: str, task: str) -> dict[str, Any]:
+    """Persist the instruction an agent was actually given, and reference it.
+
+    `agent_started` recorded `task_chars=len(task)` -- the *length* of the
+    prompt. So the one thing needed to explain why an agent did what it did, or
+    to replay it, was the one thing the ledger threw away; FORGE runs once per
+    finding and its five lines were distinguishable only by character count.
+
+    The task goes to the artifact store rather than inline because a task is
+    kilobytes and `qaas trace` has to stay readable. A preview stays on the line
+    so the common case needs no second lookup.
+
+    Never raises: an unwritable artifact store must not stop the agent from
+    running. Provenance degrades to the preview.
+    """
+    detail: dict[str, Any] = {"task_preview": task[:TASK_PREVIEW_CHARS]}
+    try:
+        # Numbered off what is already on disk, not off a ToolContext counter:
+        # the conductor builds a fresh context per dispatch, so an in-memory
+        # counter would restart at 1 and each FORGE invocation would overwrite
+        # the previous one's task. This is the bug `put_result` already had.
+        existing = len(list((ctx.store.dir / "artifacts").glob(f"task-{agent}-*.md")))
+        detail["task_uri"] = ctx.store.put_artifact(f"task-{agent}-{existing + 1:02d}.md", task)
+    except OSError:
+        pass
+    return detail
+
+
 async def run_agent(
     spec: AgentSpec,
     ctx: ToolContext,
@@ -94,7 +127,10 @@ async def run_agent(
     if max_budget_usd is not None:
         options.max_budget_usd = max_budget_usd
     started = time.monotonic()
-    ctx.store.log("agent_started", agent=spec.name, model=spec.model, task_chars=len(task))
+    ctx.store.log(
+        "agent_started", agent=spec.name, model=spec.model, task_chars=len(task),
+        **_record_task(ctx, spec.name, task),
+    )
 
     before = {e.id for e in ctx.store.envelopes()}
     final_text = ""

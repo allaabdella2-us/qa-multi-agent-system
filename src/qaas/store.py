@@ -12,6 +12,7 @@ import os
 import shutil
 import uuid
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -26,13 +27,72 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class LedgerKind(StrEnum):
+    """Every kind of line the ledger may contain.
+
+    This was a bare `str` whose comment named 7 of the 28 kinds actually
+    written, which left the ledger unreadable by anything but grep: nothing
+    could enumerate what a run might contain, and a typo at a `store.log()`
+    call site invented a 29th kind that no reader would ever look for. It is a
+    closed set now, so a misspelling fails at the write instead of vanishing.
+
+    `StrEnum` and not a plain `Enum` on purpose: members *are* their strings, so
+    `entry.kind == "denial"` still holds, `model_dump_json()` still writes
+    `"kind":"denial"`, and every ledger already on disk still parses. Adding a
+    kind means adding a member here -- deliberately a visible act, because the
+    conductor reads several of these back for control flow (`_latest_verdict`,
+    `_latest_review`, `_branch_written_since`), so a rename is a breaking
+    change to a wire format, not a rename.
+    """
+
+    # run lifecycle (conductor)
+    RUN_STARTED = "run_started"
+    RUN_FINISHED = "run_finished"
+    SKIPPED = "skipped"
+    ESCALATION = "escalation"
+
+    # agent lifecycle (runner, store)
+    AGENT_STARTED = "agent_started"
+    AGENT_FINISHED = "agent_finished"
+    AGENT_ERROR = "agent_error"
+    SKILLS_MISSING = "skills_missing"
+
+    # tool traffic and its refusals (guardrails, registry)
+    TOOL_CALL = "tool_call"
+    TOOL_ERROR = "tool_error"
+    DENIAL = "denial"
+    STOP_BLOCKED = "stop_blocked"
+    CONTRACT_UNMET = "contract_unmet"
+
+    # findings and the evidence behind them
+    ENVELOPE = "envelope"
+    REPRODUCTION = "reproduction"
+    CONTRACT_TEST = "contract_test"
+    SYSTEM_MAP = "system_map"
+    DEFECT_MEMORY = "defect_memory"
+    REGRESSION = "regression"
+
+    # the file/verify/fix loop
+    TICKET = "ticket"
+    VERDICT = "verdict"
+    VERIFIED = "verified"
+    REOPENED = "reopened"
+    REVIEW = "review"
+    REVIEW_ROUND_TRIP = "review_round_trip"
+
+    # side effects on the world outside the run
+    VCS = "vcs"
+    ENV = "env"
+    DRY_RUN = "dry_run"
+
+
 class LedgerEntry(BaseModel):
     """One line in the run ledger. Append-only."""
 
     model_config = ConfigDict(extra="forbid")
 
     at: datetime = Field(default_factory=_utcnow)
-    kind: str  # run_started | agent_started | agent_finished | denial | envelope | escalation | run_finished
+    kind: LedgerKind
     agent: str | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
 
@@ -81,13 +141,18 @@ class RunStore:
     def ledger_path(self) -> Path:
         return self.dir / "ledger.jsonl"
 
-    def log(self, kind: str, agent: str | None = None, **detail: Any) -> LedgerEntry:
+    def log(self, kind: LedgerKind | str, agent: str | None = None, **detail: Any) -> LedgerEntry:
+        # `str` stays in the signature because ~60 call sites pass a literal and
+        # reading `store.log("denial", ...)` at the call site beats reading
+        # `store.log(LedgerKind.DENIAL, ...)`. Pydantic converts and, crucially,
+        # rejects: an unknown kind raises here rather than appending a line no
+        # reader will ever ask for.
         entry = LedgerEntry(kind=kind, agent=agent, detail=detail)
         with self.ledger_path.open("a") as fh:
             fh.write(entry.model_dump_json() + "\n")
         return entry
 
-    def ledger(self, kind: str | None = None) -> Iterator[LedgerEntry]:
+    def ledger(self, kind: LedgerKind | str | None = None) -> Iterator[LedgerEntry]:
         if not self.ledger_path.exists():
             return
         for line in self.ledger_path.read_text().splitlines():
