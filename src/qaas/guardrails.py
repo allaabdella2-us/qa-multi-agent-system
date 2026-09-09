@@ -150,6 +150,16 @@ class Guardrail:
             input_data = {}
 
         decision = self.check(tool_name, input_data)
+        # A refused call produces TWO ledger entries, and that is deliberate.
+        # `tool_call` is the universal record -- every call this agent made, in
+        # order, allowed or not -- and it is what a timeline reads. `denial`
+        # below carries the reason and a summary of the arguments, and is the
+        # only place tool arguments are recorded at all.
+        #
+        # It looks like double-counting and has been reported as such. Dropping
+        # either one loses something real: without the `tool_call` the refusal
+        # vanishes from the call sequence, and without the `denial` nobody can
+        # say why. A reader tallying refusals should count `denial`, not both.
         self.ctx.store.log(
             "tool_call",
             agent=self.agent.name,

@@ -1,0 +1,397 @@
+<div align="center">
+
+# 📖 qaas — User Manual
+
+**Everything you can do, in the order you will want to do it.**
+
+[Install](#-install) · [First run](#-your-first-run-free) · [Commands](#-command-reference) · [Workflows](#-workflows) · [Troubleshooting](#-troubleshooting)
+
+</div>
+
+> The [README](README.md) is the pitch and a quickstart. This is the reference.
+> For how the code works, see [`tutorial/`](tutorial/README.md).
+
+---
+
+## 📦 Install
+
+```bash
+pip install qaas-python          # the CLI and import package are both `qaas`
+```
+
+Requires **Python 3.12+**.
+
+### Authentication
+
+qaas drives the Claude Agent SDK. It needs one of:
+
+| option | how |
+|---|---|
+| **Claude Code CLI** (easiest) | `claude` on your `PATH` and signed in — nothing else to do |
+| **API key** | `export ANTHROPIC_API_KEY=sk-ant-...` |
+
+### Optional extras
+
+```bash
+npx playwright install chromium   # only for UI exploration (the SURFACE agent)
+```
+
+---
+
+## 🚀 Your first run (free)
+
+Nothing here contacts an API or costs anything.
+
+```bash
+cd ~/code/your-app
+qaas init .                          # inspect the repo, write + activate a profile
+qaas doctor                          # what is possible against this target
+qaas validate                        # config, prompts, allowlists all coherent
+qaas run --mode pr-check --dry-run   # exactly what each agent would receive
+```
+
+`qaas init` writes `.qaas/config/targets/<name>.yaml` and sets it active.
+
+> [!IMPORTANT]
+> **Every value in that profile is a guess.** `init` reports what it detected and
+> what it could not find. Read it and correct it before a real run — a wrong
+> `layout.backend` makes CARTOGRAPHER explore blind.
+
+Then, when you are ready to spend money:
+
+```bash
+qaas run --mode pr-check
+```
+
+---
+
+## ⚙️ Configuration
+
+Everything lives under `.qaas/` in your project:
+
+```
+.qaas/
+├── config/
+│   ├── system.yaml          run modes, thresholds, tracker, MCP servers
+│   └── targets/<name>.yaml  what your app is and how to reach it
+├── prompts/                 only if you ran `qaas prompts eject`
+├── runs/<run-id>/           ledger, envelopes, artifacts, per-agent costs
+├── tickets/*.json           the local tracker
+└── memory.db                defect fingerprints, for cross-run dedupe
+```
+
+Anything you do not override falls back to what shipped in the package.
+
+### The target profile
+
+The load-bearing field is `environment.mode`:
+
+| mode | meaning | what agents may do |
+|---|---|---|
+| 🔵 `none` | no running instance | read code, schema and spec only |
+| 🟡 `external` | already running (staging, dev server) | read and exercise, **never** reset |
+| 🟢 `compose` | qaas owns the lifecycle | seed, reset, tear down |
+
+```yaml
+name: your-app
+root: .
+default_branch: main
+
+layout:
+  backend:  [src/api]
+  frontend: [web/src]
+  tests:    [tests]
+  spec:     openapi.yaml        # optional; enables contract diffing
+  ownership: CODEOWNERS         # optional; enables ticket assignment
+
+environment:
+  mode: external
+  api_url: https://staging-api.example.com
+  web_url: https://staging.example.com
+  health_path: /healthz
+
+auth:
+  mode: login
+  login_endpoint: POST /api/v1/session
+  username_field: email
+  password_field: password
+  token_path: access_token
+  roles:
+    admin:  { username: qa-admin@example.com,  password_env: APP_ADMIN_PASSWORD }
+    viewer: { username: qa-viewer@example.com, password_env: APP_VIEWER_PASSWORD }
+```
+
+> [!WARNING]
+> **Credentials never go in this file.** It names environment variables; you
+> export the secrets. Use dedicated QA accounts on a non-production environment.
+
+### Environment variables
+
+| variable | what it does |
+|---|---|
+| `ANTHROPIC_API_KEY` | auth, if you are not signed into the Claude Code CLI |
+| `QAAS_TARGET` | run against a different profile without editing config |
+| `QAAS_TRACKER` | `local` (default) or `jira` |
+| `QAAS_VCS` | `local` (default) or `github` |
+| `QAAS_CONFIG_DIR` | use a config directory somewhere else entirely |
+| `JIRA_*` | see [Filing to Jira](#filing-to-jira) |
+
+---
+
+## 🎛️ Run modes
+
+| mode | budget | agents | when |
+|---|--:|---|---|
+| `incident` | $4 | CONDUIT | diagnose one thing, file nothing |
+| `pr-check` | $16 | CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK | on a pull request |
+| `nightly` | $40 | same five | the scheduled sweep |
+| `fix-cycle` | $20 | PROOF, MENDER, ARBITER | take a filed ticket and fix it |
+| `full-loop` | $60 | all eight | discover → file → fix → verify |
+
+Budgets are **caps, not estimates**. The governor checks before every dispatch and
+stops the run rather than exceeding them. The cap survives a resume.
+
+---
+
+## 📋 Command reference
+
+### Setup and inspection — all free
+
+```bash
+qaas init <path-or-url> [--name N] [--api-url U] [--web-url U] [--force]
+qaas targets                    # profiles available, and which is active
+qaas doctor [--target N]        # what this target makes possible, per agent
+qaas validate                   # config, prompts, skills, allowlists, budgets
+```
+
+`qaas doctor` tells you which agents can do useful work here and which cannot —
+SURFACE with no reachable UI has nothing to do and says so rather than
+substituting a weaker static read.
+
+### Running
+
+```bash
+qaas run --mode <mode> [options]
+
+  --dry-run              render every agent's options, call nothing
+  --only AGENT           restrict to these agents (repeatable)
+  --target NAME          override the active profile
+  --repo URL             clone a repository and run against it
+  --run-id ID            continue an existing run
+  --ticket KEY           restrict a fix-cycle to these tickets (repeatable)
+```
+
+```bash
+qaas run --mode pr-check --dry-run                    # free
+qaas run --mode nightly                               # the usual sweep
+qaas run --mode nightly --only CONDUIT                # one agent
+qaas run --repo https://github.com/you/app --dry-run  # clone and inspect
+qaas run --mode fix-cycle --ticket QA-42              # fix one ticket
+```
+
+### Reading what happened — all free
+
+```bash
+qaas runs [--limit N]                    # every run, newest first
+qaas show <run-id>                       # findings, cost, tickets, escalations
+qaas trace <run-id> [--agent A] [--kind K] [--json]
+qaas map [--version V]                   # the system map CARTOGRAPHER built
+```
+
+`qaas trace` is the one to reach for when you want to know *why* something
+happened:
+
+```bash
+qaas trace <run-id>                              # the whole timeline
+qaas trace <run-id> --agent MENDER               # one agent
+qaas trace <run-id> --kind denial                # every refused tool call
+qaas trace <run-id> --kind verdict --kind review # just the decisions
+qaas trace <run-id> --json > run.json            # export
+```
+
+### Measuring
+
+```bash
+qaas score [run-id] [--phase N] [--domain D]   # recall/precision vs a golden ledger
+qaas sweep [--mode M] [--min-precision 0.70]   # run + score + fail below the gate
+```
+
+`qaas score` only works against a **calibration target** — one whose profile names
+a `ledger:`. The bundled demo app has one; your application will not, and that is
+normal.
+
+`qaas sweep` is the cron entry point: it runs, scores, and **exits non-zero** below
+the precision gate, so a scheduled sweep that starts producing noise fails loudly
+instead of quietly filling a backlog nobody reads.
+
+---
+
+## 🔄 Workflows
+
+### Nightly sweep on your own app
+
+```bash
+export APP_ADMIN_PASSWORD=...
+qaas run --mode nightly
+qaas show <run-id>
+```
+
+Start with `tracker: local`. Tickets are written as JSON under `.qaas/tickets/`,
+so you can read what the system *would* file before it files anything into a
+project real people watch.
+
+### Filing to Jira
+
+```bash
+export JIRA_BASE_URL=https://you.atlassian.net
+export JIRA_EMAIL=you@example.com
+export JIRA_API_TOKEN=...              # an API token, not your password
+export JIRA_PROJECT_KEY=QA
+export JIRA_SECURITY_PROJECT_KEY=SEC   # security findings are REFUSED without this
+
+QAAS_TRACKER=jira qaas tracker-check                     # preflight, creates nothing
+QAAS_TRACKER=jira qaas tracker-check --dry-run-ticket    # + the exact JSON it would POST
+QAAS_TRACKER=jira qaas run --mode nightly
+```
+
+Filed tickets carry `qaas-fp-<fingerprint>` and `qaas-envelope-<id>` labels. That
+is how the next run recognises an already-filed defect and increments its
+occurrence count instead of filing it again.
+
+> [!TIP]
+> Keep the committed backend `local` and switch per shell with `QAAS_TRACKER=jira`.
+> Committing `tracker: jira` once broke 18 tests, because the test fixtures build
+> a real Jira client and CI has no credentials.
+
+### Fixing a defect
+
+```bash
+qaas run --mode fix-cycle --ticket QA-42
+```
+
+```
+PROOF   NOT_FIXED  → the defect still reproduces
+MENDER             → writes the minimal fix on a fix/* branch
+ARBITER APPROVE    → adversarial review passed
+PROOF   VERIFIED   → the original failing test now passes
+```
+
+ARBITER may also return `REQUEST_CHANGES` (back to MENDER, capped at two round
+trips) or `ESCALATE_TO_HUMAN` (stop — the fix is correct but shipping it is a
+decision you should make).
+
+> [!NOTE]
+> **Merge is impossible by construction.** No merge method exists anywhere in the
+> codebase, `gh pr merge` is refused, and pull requests open as drafts.
+
+### Customising prompts
+
+```bash
+qaas prompts list              # which prompt is in force, and from where
+qaas prompts eject CONDUIT     # copy to .qaas/prompts/ and edit
+qaas prompts diff              # what you changed vs. what shipped
+```
+
+Prefer **adding** to replacing — drop a `CONDUIT.append.md` next to it and your
+lines are inserted between the agent's prompt and the shared house rules. You keep
+receiving improvements to the base prompt instead of forking it forever.
+
+### Adding your own MCP server
+
+In `.qaas/config/system.yaml`:
+
+```yaml
+mcp_servers:
+  house-lint:
+    type: stdio
+    command: ./tools/lint-mcp
+    args: ["--strict"]
+    env: { LINT_TOKEN: "${ACME_LINT_TOKEN}" }
+```
+
+Then add `house-lint` to an agent's `mcp_servers:` list. Declaring it grants
+nothing; an agent receives it only by naming it. `qaas validate` prints every
+command a run would spawn.
+
+> [!WARNING]
+> A server's tools are allowed **wholesale** once an agent names it. qaas checks
+> that the agent declared the server; it cannot inspect what a third-party
+> server's tools do. **A server you declare is a server you trust.**
+
+---
+
+## 🛡️ What agents may and may not do
+
+Enforced in code, not requested in a prompt:
+
+| rail | effect |
+|---|---|
+| **Path scoping** | Writes checked against that agent's `write_paths`. Most agents cannot write at all. |
+| **Branch scoping** | Git writes must match `qa/repro/*` or `fix/*`. `main` and force-push refused. |
+| **Forbidden classes** | Migrations, auth, payment, secrets, infrastructure, CI — stop at a human. |
+| **Ticket rate limit** | Over the per-run cap the call is denied and the run escalates. |
+| **Immutable test** | The agent fixing a defect may not edit the test that defines it. |
+| **No filesystem settings** | A repository qaas inspects cannot inject settings, hooks or MCP servers into the process running it. |
+
+A denial returns a reason and is logged; it never kills the turn. See them with
+`qaas trace <run-id> --kind denial`.
+
+---
+
+## 🔧 Troubleshooting
+
+| symptom | cause and fix |
+|---|---|
+| `no target profile loaded` | Run `qaas init <path>`, or set `QAAS_TARGET`. With exactly one profile on disk it is used automatically. |
+| `qaas score` says there is no golden ledger | Expected. Scoring needs a calibration target with a `ledger:`; ordinary applications do not have one. |
+| `Role 'x' names environment variable Y ... and it is unset` | Export `Y`. Credentials come from the environment, never the profile. |
+| SURFACE does nothing | It needs a reachable UI. Check `environment.mode` and `web_url`; `qaas doctor` will say so. |
+| `spend cap reached` | Not an error — the governor working. Raise `max_budget_usd` for that mode or narrow with `--only`. |
+| `mode 'x': agents can spend $N but the cap is $M` | The mode cannot finish. Raise its cap or drop an agent. |
+| An agent names an MCP server that does not exist | `qaas validate` names it. Add it under `mcp_servers:` or fix the typo. |
+| Running the bundled demo fails to log in | `export CORVID_PASSWORD=password123` — the demo's credentials come from the environment too. |
+
+### Getting a straight answer about a run
+
+```bash
+qaas show <run-id>                      # the summary
+qaas trace <run-id> --kind denial       # what was refused, and why
+qaas trace <run-id> --agent FORGE       # one agent's whole story
+qaas trace <run-id> --json > run.json   # everything, machine-readable
+```
+
+Every tool call, denial, verdict and escalation is in
+`.qaas/runs/<run-id>/ledger.jsonl`. `qaas trace` is a reader over it, not a
+summary of it — nothing is hidden from you.
+
+---
+
+## 💸 Keeping the bill down
+
+- **`--dry-run` first, always.** It is free and shows exactly what would happen.
+- **`--only AGENT`** while you are tuning. One agent is a fraction of a full run.
+- **FORGE runs once per finding.** A finding-heavy run costs more than an
+  agent-heavy one; that is the main thing that surprises people.
+- **Budgets are caps.** The run stops rather than overrunning, and the cap
+  survives `--run-id` resumption.
+- **`incident` mode files nothing** — useful for diagnosing without paperwork.
+
+Measured medians per dispatch: SURFACE $3.34, MENDER $2.03, CONDUIT $1.97,
+FORGE $1.61 per finding, PROOF/ARBITER ~$1.00, CLERK/CARTOGRAPHER ~$0.70.
+
+---
+
+## 📚 Where to go next
+
+| document | for |
+|---|---|
+| [README](README.md) | what this is and why |
+| [tutorial/](tutorial/README.md) | how the code works, one aspect per page |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | the system in one document |
+| [qa-agent-system-architecture.md](qa-agent-system-architecture.md) | the original design, including the 8 agents not yet built |
+
+---
+
+<div align="center">
+<sub>MIT licensed · Issues and pull requests welcome</sub>
+</div>
