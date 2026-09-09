@@ -2,7 +2,7 @@
 # Distribution name is `qaas-python` (`qaas` was taken); the import package and
 # the CLI are both `qaas`.
 name = "qaas-python"
-version = "0.2.1"
+version = "0.2.2"
 description = "A multi-agent QA system: finds real defects, reproduces them, files tickets, fixes them, and proves the fix"
 readme = "README.md"
 license = "MIT"
@@ -63,7 +63,7 @@ include = [
     # (src/qaas/plugin/skills), so "src/" already carries them. The old
     # ".claude/skills/" entry outlived the directory it named -- hatchling
     # ignores a missing path, so it broke nothing and simply misled.
-    "src/", "config/", "target-app/", "tests/", "tutorial/",
+    "src/", "config/", "target-app/", "tests/",
     "README.md", "LICENSE", "ARCHITECTURE.md", "CLAUDE.md", "BUILD_PLAN.md",
     "pyproject.toml",
 ]

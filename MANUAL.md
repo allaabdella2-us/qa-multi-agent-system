@@ -9,7 +9,7 @@
 </div>
 
 > The [README](README.md) is the pitch and a quickstart. This is the reference.
-> For how the code works, see [`tutorial/`](tutorial/README.md).
+> For how the code works, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
@@ -386,7 +386,6 @@ FORGE $1.61 per finding, PROOF/ARBITER ~$1.00, CLERK/CARTOGRAPHER ~$0.70.
 | document | for |
 |---|---|
 | [README](README.md) | what this is and why |
-| [tutorial/](tutorial/README.md) | how the code works, one aspect per page |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | the system in one document |
 | [qa-agent-system-architecture.md](qa-agent-system-architecture.md) | the original design, including the 8 agents not yet built |
 

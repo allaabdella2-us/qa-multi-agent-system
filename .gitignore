@@ -19,3 +19,6 @@ dist/
 
 # Agent evidence screenshots land here because put_artifact takes only text.
 target-app/*.png
+
+# Personal notes, not published.
+tutorial/
