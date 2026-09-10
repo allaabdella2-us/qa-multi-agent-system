@@ -13,7 +13,7 @@
 [![Tests](https://img.shields.io/badge/tests-767%20offline-success)](#-contributing)
 [![Built on](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-D97757)](https://docs.claude.com/en/api/agent-sdk/overview)
 
-[Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Architecture](ARCHITECTURE.md)
+[Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Roadmap](#️-roadmap) · [Architecture](ARCHITECTURE.md)
 
 </div>
 
@@ -365,6 +365,48 @@ than an opinion.
 > false positives. It does not show that it will find the hard bug in your
 > codebase. Run it on something you know well and judge it on what it finds
 > there.
+
+---
+
+## 🗺️ Roadmap
+
+Today `qaas` runs on the **Claude Agent SDK** only. The next step is making the
+model a choice rather than an assumption — and that is where help is most
+welcome.
+
+- **🔀 Provider abstraction.** Extract a thin runner interface so `runner.py`
+  talks to *a* provider rather than to one. Everything else — the envelope, the
+  guardrails, the ledger, the phase machine — is already provider-agnostic; the
+  coupling is `ClaudeAgentOptions`, the hook events, and `query()`.
+- **🤖 OpenAI SDK.** A second implementation behind that interface, so agents can
+  run on GPT models. The interesting work is not the API call: it is mapping tool
+  definitions, streamed tool calls and a stop condition onto the same
+  `PreToolUse`/`PostToolUse`/`Stop` contract the guardrails and the output
+  contract depend on.
+- **🌐 OpenRouter.** One endpoint, many models — the cheapest way to answer
+  "which model is actually best at *this* agent's job", per agent, with
+  `qaas score` as the referee.
+- **🦙 Ollama.** Local, open-weight models for the agents that do not need a
+  frontier model. Cost per run is the reason discovery fans out so carefully;
+  running MAPPER or LOAD locally changes that arithmetic.
+- **📊 A per-agent model matrix.** Model choice is already per-agent config
+  (`model:` in `config/agents/*.yaml`). Once several providers exist, the honest
+  next question is a scored comparison rather than a preference.
+- **🧰 More MCP servers and skills** — the parts you can add today without
+  touching Python.
+
+### 🙌 Contributions wanted
+
+This is a solo project and the roadmap above is bigger than one person. If any
+of it interests you, **please open an issue or a PR** — especially:
+
+- a provider implementation (OpenAI, OpenRouter, Ollama, anything else)
+- a new agent, which is a prompt plus a YAML file and *no Python*
+- running `qaas` against your own repository and reporting what it got wrong —
+  false positives are the most useful bug report this project can receive
+
+Good first issues: add an agent, add a skill, or point it at a codebase you know
+well and tell us what it missed.
 
 ---
 
