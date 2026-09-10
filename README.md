@@ -25,17 +25,9 @@ Fifteen agents, each with its own context, tool allowlist and budget, coordinate
 a state machine that is ordinary Python — because a model cannot enforce a budget
 it is itself spending.
 
-```
-      DISCOVERY LOOP                                   REMEDIATION LOOP
- ┌──────────────────────────────────────┐        ┌───────────────────────────┐
- │  MAPPER ─▶ API ─┐          │        │   FIXER ─▶ REVIEWER       │
- │   (system map)   BROWSER ─┴─▶ REPRODUCER ─┼─▶ TRIAGE│    (fix)     (review)     │
- │                 (discover)   (repro) │  (file)│                           │
- └──────────────────────────────┬───────┘        └──────────┬────────────────┘
-                                │                           │
-                                ▼                           ▼
-                           [ TICKET ] ◀──────────────  VERIFIER (verify)
-```
+<div align="center">
+  <img src="https://raw.githubusercontent.com/allaabdella2-us/qa-multi-agent-system/main/docs/architecture-loops.png" alt="Two loops: a discovery loop of Mapper, API, Browser, Reproducer and Triage files a ticket; a remediation loop of Fixer, Reviewer and Verifier picks it up and closes it. The ticket is the only thing that crosses between them." width="900">
+</div>
 
 Nothing crosses between the loops except a ticket — which is also the audit trail.
 
