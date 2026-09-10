@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -191,10 +192,27 @@ class RunStore:
 
     # -- artifacts --------------------------------------------------------
 
+    def _artifact_path(self, name: str) -> tuple[str, Path]:
+        """A flat, contained filename for an agent-supplied artifact name.
+
+        `resolve_artifact` does resolve-then-contain, which is the right shape.
+        These two did string replacement instead — `/` and `..` to `_` — which is
+        a denylist, and denylists are wrong here for the ordinary reason: a
+        backslash was not in it, and neither is anything else nobody thought of.
+        The name is agent-supplied, so this keeps the flattening (an artifact
+        store is deliberately one directory deep) and then *checks* the result
+        rather than trusting the substitution.
+        """
+        flat = re.sub(r"[^A-Za-z0-9._-]", "_", name).lstrip(".") or "artifact"
+        base = (self.dir / "artifacts").resolve()
+        path = (base / flat).resolve()
+        if path.parent != base:
+            raise ValueError(f"artifact name escapes the store: {name!r}")
+        return flat, path
+
     def put_artifact(self, name: str, content: str | bytes) -> str:
         """Store evidence and return the artifact:// uri that references it."""
-        safe = name.replace("/", "_").replace("..", "_")
-        path = self.dir / "artifacts" / safe
+        safe, path = self._artifact_path(name)
         if isinstance(content, bytes):
             path.write_bytes(content)
         else:
@@ -202,8 +220,8 @@ class RunStore:
         return f"artifact://{self.run_id}/{safe}"
 
     def copy_artifact(self, name: str, source: Path | str) -> str:
-        safe = name.replace("/", "_").replace("..", "_")
-        shutil.copy2(source, self.dir / "artifacts" / safe)
+        safe, path = self._artifact_path(name)
+        shutil.copy2(source, path)
         return f"artifact://{self.run_id}/{safe}"
 
     def resolve_artifact(self, uri: str) -> Path:

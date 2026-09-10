@@ -136,14 +136,14 @@ class LocalGit(VcsAdapter):
         # was checking.
         args = ["checkout", "-b", _reject_refspec("branch", name)]
         if from_ref:
-            args.append(_reject_flaglike("from_ref", from_ref))
+            args.append(_reject_ref("from_ref", from_ref))
         self._git(*args)
         return self.current_branch()
 
     def checkout(self, ref: str) -> str:
         """Switch to an existing ref. Not part of the abstract surface: only the
         local backend has a working tree to switch."""
-        self._git("checkout", _reject_flaglike("ref", ref))
+        self._git("checkout", _reject_ref("ref", ref))
         return self.current_branch()
 
     def write_files(self, files: Mapping[str, str]) -> list[str]:
@@ -231,6 +231,24 @@ def _reject_flaglike(kind: str, value: str) -> str:
     return text
 
 
+#: git's own refname rules, narrowed to what this system ever needs. Notably it
+#: excludes `?`, `#`, `%` and `..` — which matter because `list_changed_files`
+#: interpolates a ref into a `gh api` *path*, where those characters restructure
+#: the request rather than name a commit.
+_REF_CHARS = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def _reject_ref(kind: str, value: str) -> str:
+    """A ref is letters, digits and a little punctuation. Anything else is not one."""
+    text = _reject_flaglike(kind, value)
+    if ".." in text or not _REF_CHARS.match(text):
+        raise VcsError(
+            f"refusing {kind} '{text}': a git ref is letters, digits, '.', '_', '-' "
+            "and '/', and may not contain '..'."
+        )
+    return text
+
+
 def _reject_refspec(kind: str, value: str) -> str:
     """Refuse a branch name that git would read as a *refspec* rather than a name.
 
@@ -256,7 +274,7 @@ def _reject_refspec(kind: str, value: str) -> str:
             f"refusing {kind} '{text}': a leading '+' is a forced update, "
             "and force-pushing is never permitted (§8.1)."
         )
-    return text
+    return _reject_ref(kind, text)
 
 
 def is_protected_head(branch: str) -> bool:
@@ -392,18 +410,19 @@ class GitHubVcs(LocalGit):
                 "must say on its face what finding it answers."
             )
 
+        # `--flag=value`, not `--flag value`: `title` and `body` are the two
+        # arguments an agent writes freely here, and they were the two with no
+        # shape check at all. The joined form removes the question rather than
+        # answering it — there is no position left for a value to be read as a
+        # flag, and a title may still legitimately begin with a dash.
         args = [
             "pr",
             "create",
             *self._repo_args(),
-            "--head",
-            head,
-            "--base",
-            base_ref,
-            "--title",
-            subject,
-            "--body",
-            self.pr_body(body, key),
+            f"--head={head}",
+            f"--base={base_ref}",
+            f"--title={subject}",
+            f"--body={self.pr_body(body, key)}",
         ]
         if draft:
             args.append("--draft")
@@ -440,8 +459,8 @@ class GitHubVcs(LocalGit):
         Asking GitHub rather than the local tree means this answers for a PR
         whose head was never fetched into this checkout.
         """
-        base_ref = _reject_flaglike("base", base)
-        head_ref = _reject_flaglike("head", head)
+        base_ref = _reject_ref("base", base)
+        head_ref = _reject_ref("head", head)
         out = self._gh(
             "api",
             f"repos/{self._api_repo_path()}/compare/{base_ref}...{head_ref}",

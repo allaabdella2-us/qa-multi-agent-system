@@ -162,3 +162,20 @@ def test_a_denial_reason_round_trips_under_an_ascii_default_encoding(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     assert "ok" in proc.stdout
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../../escape.txt", "nested/path/shot.png", r"..\\windows\\escape.txt", "....//escape", "."],
+)
+def test_an_artifact_name_cannot_reach_outside_its_run(store, name):
+    """The name is agent-supplied, and the old guard was a two-entry denylist.
+
+    `name.replace("/", "_").replace("..", "_")` handled the two spellings someone
+    thought of and nothing else — a backslash went through untouched. Flatten,
+    then check the result, the way `resolve_artifact` already did.
+    """
+    uri = store.put_artifact(name, b"x")
+    path = store.resolve_artifact(uri)
+    assert path.parent == (store.dir / "artifacts").resolve()
+    assert path.read_bytes() == b"x"

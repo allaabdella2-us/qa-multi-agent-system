@@ -30,6 +30,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
@@ -116,13 +117,46 @@ def _fetch_spec(url: str) -> tuple[dict[str, Any] | None, str | None]:
     return (doc, None) if isinstance(doc, dict) else (None, f"{url} did not return an object")
 
 
+def _spec_origin() -> str:
+    """The one origin a spec may be fetched from: the app under test."""
+    base = os.environ.get("QAAS_TARGET_BASE_URL") or DEFAULT_LIVE_SPEC_URL
+    parts = urllib.parse.urlsplit(base)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def _read_spec(ref: str, target_root: Path) -> tuple[dict[str, Any] | None, str | None]:
-    """Load a spec from a URL or a path. Returns (doc, error)."""
+    """Load a spec from the target's URL or a path inside the checkout.
+
+    Both halves were open. A `spec` argument is agent-supplied, and it went
+    either to `urlopen` for any http(s) URL the agent named, or to `read_text`
+    for any path — absolute or `../`-relative — whose contents then came back in
+    the tool result. `find_consumers` had the containment check these two did
+    not, which is the usual shape of this bug: the rule exists one function over.
+
+    The URL half is narrowed to the target app's own origin rather than dropped,
+    because comparing the committed spec against the running one is what the
+    tool is for. Fetching anything else is network research, which `guardrails`
+    already refuses outright (`WebFetch`/`WebSearch`, "findings come from the
+    code and the running app, not the web") — this makes the two agree.
+    """
     if _is_url(ref):
+        allowed = _spec_origin()
+        parts = urllib.parse.urlsplit(ref)
+        if f"{parts.scheme}://{parts.netloc}" != allowed:
+            return None, (
+                f"refusing to fetch {ref}: a spec may only be read from the application "
+                f"under test ({allowed}) or from a file inside the checkout. Findings "
+                "come from the code and the running app, not the web."
+            )
         return _fetch_spec(ref)
-    path = Path(ref)
-    if not path.is_absolute():
-        path = target_root / path
+    root = target_root.resolve()
+    candidate = Path(ref)
+    path = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if path != root and not path.is_relative_to(root):
+        return None, (
+            f"spec '{ref}' resolves to {path}, outside the repository ({root}). "
+            "Specs are read from inside the checkout."
+        )
     if not path.exists():
         return None, f"no such spec file: {path}"
     try:

@@ -116,6 +116,18 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
     return FakeGh(script, log)
 
 
+def flag_value(argv: list[str], name: str) -> str:
+    """The value of `--name=value`, which is how every gh flag is passed.
+
+    Joined rather than positional so a title or body beginning with a dash can
+    never be re-read as a flag; the tests assert the value, not the shape.
+    """
+    prefix = f"{name}="
+    matches = [a[len(prefix):] for a in argv if a.startswith(prefix)]
+    assert matches, f"{name} not in {argv}"
+    return matches[0]
+
+
 def git(repo: Path, *args: str) -> str:
     proc = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True)
     return proc.stdout
@@ -160,9 +172,9 @@ def test_open_pr_builds_a_draft_pr_create(fake_gh, clone):
 
     (argv,) = fake_gh.calls_to("pr", "create")
     assert argv[:2] == ["pr", "create"]
-    assert argv[argv.index("--head") + 1] == "fix/PROJ-1284"
-    assert argv[argv.index("--base") + 1] == "main"
-    assert argv[argv.index("--title") + 1] == "Refund endpoint checks the caller's role"
+    assert flag_value(argv, "--head") == "fix/PROJ-1284"
+    assert flag_value(argv, "--base") == "main"
+    assert flag_value(argv, "--title") == "Refund endpoint checks the caller's role"
     assert "--draft" in argv, "a PR nobody asked for must not request review"
     assert "--repo" not in argv, "with no slug configured, gh infers the repo from the checkout"
     assert not any(a.startswith("--force") or a == "-f" for a in argv)
@@ -181,7 +193,7 @@ def test_open_pr_can_be_told_not_to_be_a_draft(fake_gh, clone):
 def test_open_pr_body_ends_with_the_automated_origin_line(fake_gh, clone):
     GitHubVcs(clone).open_pr("fix/x", "t", "Why this fix is right.", "main", ticket="PROJ-1284")
     (argv,) = fake_gh.calls_to("pr", "create")
-    body = argv[argv.index("--body") + 1]
+    body = flag_value(argv, "--body")
 
     assert body.startswith("Why this fix is right.")
     assert body.rstrip().endswith(AUTOMATION_NOTICE.format(ticket="PROJ-1284"))
@@ -451,7 +463,7 @@ async def test_mender_may_push_and_open_a_draft_pr(fake_gh, clone, tmp_path):
     assert opened["structuredContent"]["draft"] is True
 
     (argv,) = fake_gh.calls_to("pr", "create")
-    assert argv[argv.index("--head") + 1] == "fix/PROJ-1284"
+    assert flag_value(argv, "--head") == "fix/PROJ-1284"
     assert "--draft" in argv
     assert not denials(ctx)
 
@@ -516,3 +528,27 @@ def test_gh_is_installed_and_authenticated_here():
     """Excluded by default. Run with `-m github` to check this machine's setup."""
     proc = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["main?foo=1", "main#frag", "../../other/compare/x", "main%2e%2e", "a b", "refs/heads/x:y"],
+)
+def test_a_ref_that_is_not_ref_shaped_is_refused(fake_gh, clone, ref):
+    """`list_changed_files` interpolates a ref into a `gh api` *path*.
+
+    `_reject_flaglike` only ever looked at the first character, so `?`, `#`, `%`
+    and `..` all passed — enough to leave `/compare/` and reach a different
+    endpoint. git itself allows none of them in a refname, so refusing them
+    costs nothing.
+    """
+    with pytest.raises(VcsError):
+        GitHubVcs(clone, repo_slug="acme/widgets").list_changed_files(ref, "main")
+
+
+def test_a_pr_title_that_looks_like_a_flag_is_passed_as_a_value(fake_gh, clone):
+    """A dash-leading title is legitimate; being re-read as a flag is not."""
+    GitHubVcs(clone).open_pr("fix/x", "--repo=evil/repo", "b", "main", ticket="P-1")
+    (argv,) = fake_gh.calls_to("pr", "create")
+    assert flag_value(argv, "--title") == "--repo=evil/repo"
+    assert "--repo=evil/repo" not in [a for a in argv if not a.startswith("--title=")]

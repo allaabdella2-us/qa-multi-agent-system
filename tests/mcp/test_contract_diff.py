@@ -108,6 +108,27 @@ def specs(tmp_path):
     return tmp_path / "spec_a.yaml", tmp_path / "spec_b.yaml"
 
 
+@pytest.fixture
+def spec_tools(make_ctx, tmp_path):
+    """Tools whose target root is where the spec fixtures live.
+
+    `_read_spec` contains a spec path inside the target root — an agent-supplied
+    path used to read any file on the machine and hand its contents back. So a
+    fixture spec has to sit inside the root too, which is what the
+    `find_consumers` tests below already do.
+    """
+    return handlers(build_tools(make_ctx("CONDUIT", target_root=tmp_path)))
+
+
+@pytest.fixture
+def real_spec(tmp_path):
+    """The demo app's committed spec, copied inside the target root under test."""
+    source = REPO_ROOT / "target-app" / "openapi.yaml"
+    destination = tmp_path / "openapi.yaml"
+    destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    return destination
+
+
 async def _diff(tools, a: Path, b: Path) -> list[dict]:
     result = await tools["diff_openapi"]({"spec_a": str(a), "spec_b": str(b)})
     assert not is_error(result), text_of(result)
@@ -125,8 +146,8 @@ def test_the_server_exposes_the_tools_architecture_5_2_names(make_ctx):
 # -- the diff -------------------------------------------------------------
 
 
-async def test_the_four_kinds_of_change_are_each_detected_once(tools, specs):
-    changes = await _diff(tools, *specs)
+async def test_the_four_kinds_of_change_are_each_detected_once(spec_tools, specs):
+    changes = await _diff(spec_tools, *specs)
     assert {(c["kind"], c["path"]) for c in changes} == {
         ("endpoint_removed", "/v1/legacy"),
         ("response_field_removed", "/v1/things"),
@@ -135,46 +156,46 @@ async def test_the_four_kinds_of_change_are_each_detected_once(tools, specs):
     }
 
 
-async def test_only_the_changes_that_cost_a_consumer_something_are_breaking(tools, specs):
+async def test_only_the_changes_that_cost_a_consumer_something_are_breaking(spec_tools, specs):
     """A removed endpoint and a removed field break callers; growth does not."""
-    changes = await _diff(tools, *specs)
+    changes = await _diff(spec_tools, *specs)
     assert {c["kind"] for c in changes if c["breaking"]} == {"endpoint_removed", "response_field_removed"}
     assert {c["kind"] for c in changes if not c["breaking"]} == {"response_field_added", "response_enum_widened"}
 
 
-async def test_the_removed_field_is_named_by_its_consumer_visible_path(tools, specs):
-    changes = await _diff(tools, *specs)
+async def test_the_removed_field_is_named_by_its_consumer_visible_path(spec_tools, specs):
+    changes = await _diff(spec_tools, *specs)
     removed = next(c for c in changes if c["kind"] == "response_field_removed")
     assert "items[].currency" in removed["detail"]
     assert "required" in removed["detail"]
     assert removed["method"] == "GET"
 
 
-async def test_only_breaking_filters_the_result(tools, specs):
+async def test_only_breaking_filters_the_result(spec_tools, specs):
     a, b = specs
-    result = await tools["diff_openapi"]({"spec_a": str(a), "spec_b": str(b), "only_breaking": True})
+    result = await spec_tools["diff_openapi"]({"spec_a": str(a), "spec_b": str(b), "only_breaking": True})
     assert {c["kind"] for c in structured(result)["changes"]} == {"endpoint_removed", "response_field_removed"}
     assert structured(result)["breaking_count"] == 2
 
 
-async def test_identical_specs_produce_no_changes(tools, specs):
+async def test_identical_specs_produce_no_changes(spec_tools, specs):
     a, _ = specs
-    result = await tools["diff_openapi"]({"spec_a": str(a), "spec_b": str(a)})
+    result = await spec_tools["diff_openapi"]({"spec_a": str(a), "spec_b": str(a)})
     assert not is_error(result)
     assert structured(result)["changes"] == []
 
 
-async def test_a_missing_spec_file_is_a_readable_refusal(tools, specs, tmp_path):
+async def test_a_missing_spec_file_is_a_readable_refusal(spec_tools, specs, tmp_path):
     a, _ = specs
-    result = await tools["diff_openapi"]({"spec_a": str(a), "spec_b": str(tmp_path / "nope.yaml")})
+    result = await spec_tools["diff_openapi"]({"spec_a": str(a), "spec_b": str(tmp_path / "nope.yaml")})
     assert is_error(result)
     assert "nope.yaml" in text_of(result)
 
 
-async def test_an_unreachable_app_says_so_and_offers_the_file_route(tools, specs, monkeypatch):
+async def test_an_unreachable_app_says_so_and_offers_the_file_route(spec_tools, specs, monkeypatch):
     """When the target app is not up, the agent must be told how to proceed."""
     monkeypatch.setenv("QAAS_TARGET_BASE_URL", "http://127.0.0.1:1")
-    result = await tools["diff_openapi"]({"spec_a": str(specs[0])})
+    result = await spec_tools["diff_openapi"]({"spec_a": str(specs[0])})
     assert is_error(result)
     assert "spin_up" in text_of(result) and "file path" in text_of(result)
 
@@ -182,16 +203,16 @@ async def test_an_unreachable_app_says_so_and_offers_the_file_route(tools, specs
 # -- API-06: the seeded defect this server exists to catch ------------------
 
 
-async def test_a_missing_required_response_field_is_detected_against_the_real_spec(tools, tmp_path):
+async def test_a_missing_required_response_field_is_detected_against_the_real_spec(spec_tools, real_spec, tmp_path):
     """Seeded defect API-06: the Invoice response drops the spec-required `currency`."""
-    spec = yaml.safe_load((REPO_ROOT / "target-app" / "openapi.yaml").read_text())
+    spec = yaml.safe_load(real_spec.read_text())
     invoice = spec["components"]["schemas"]["Invoice"]
     invoice["properties"].pop("currency")
     invoice["required"] = [f for f in invoice["required"] if f != "currency"]
     drifted = tmp_path / "implemented.yaml"
     drifted.write_text(yaml.safe_dump(spec))
 
-    changes = await _diff(tools, REPO_ROOT / "target-app" / "openapi.yaml", drifted)
+    changes = await _diff(spec_tools, real_spec, drifted)
     hits = [c for c in changes if c["kind"] == "response_field_removed" and c["path"] == "/v1/invoices"]
     assert len(hits) == 1, changes
     assert "items[].currency" in hits[0]["detail"]
@@ -278,11 +299,11 @@ paths:
 """
 
 
-async def test_fastapi_conventions_are_not_reported_as_drift(tools, tmp_path):
+async def test_fastapi_conventions_are_not_reported_as_drift(spec_tools, tmp_path):
     """The live spec spells auth and validation differently. Only real loss is breaking."""
     (tmp_path / "declared.yaml").write_text(DECLARED)
     (tmp_path / "implemented.yaml").write_text(IMPLEMENTED)
-    changes = await _diff(tools, tmp_path / "declared.yaml", tmp_path / "implemented.yaml")
+    changes = await _diff(spec_tools, tmp_path / "declared.yaml", tmp_path / "implemented.yaml")
 
     assert not [c for c in changes if c["kind"].startswith("security")]  # both require a bearer token
     assert [c["kind"] for c in changes if c["breaking"]] == ["response_field_removed"]
@@ -317,10 +338,10 @@ async def test_classify_breaking_applies_the_consumer_impact_rules(tools, kind, 
     assert structured(result)["reason"]
 
 
-async def test_classification_agrees_with_the_diff_for_every_change_it_emits(tools, specs):
+async def test_classification_agrees_with_the_diff_for_every_change_it_emits(spec_tools, specs):
     """The two tools read one table; this is the test that keeps it that way."""
-    for change in await _diff(tools, *specs):
-        result = await tools["classify_breaking"]({"change": change})
+    for change in await _diff(spec_tools, *specs):
+        result = await spec_tools["classify_breaking"]({"change": change})
         assert structured(result)["breaking"] is change["breaking"], change
 
 
@@ -490,3 +511,40 @@ async def test_the_generated_test_passes_against_a_conforming_server_and_fails_a
         bad.shutdown()
     assert failing.returncode != 0, "a contract test that cannot fail is not evidence"
     assert "currency" in failing.stdout
+
+
+# -- a spec reference is not a way to read the machine ----------------------
+
+
+async def test_a_spec_path_may_not_leave_the_checkout(spec_tools, tmp_path):
+    """`spec` is agent-supplied and went straight to `read_text`.
+
+    An absolute path or a `../` walk read any file the process could reach, and
+    a parse failure echoed the resolved path — and often the content — back into
+    the agent's context. `find_consumers`, two functions over, already contained
+    its `root`.
+    """
+    secret = tmp_path.parent / "outside-secret.yaml"
+    secret.write_text("openapi: 3.1.0\ninfo: {title: private, version: '1'}\npaths: {}\n")
+
+    result = await spec_tools["diff_openapi"]({"spec_a": str(secret), "spec_b": str(secret)})
+
+    assert is_error(result)
+    assert "outside the repository" in text_of(result)
+
+
+async def test_a_spec_url_may_only_be_the_application_under_test(spec_tools, monkeypatch):
+    """Fetching an arbitrary URL is network research, which guardrails refuses.
+
+    The tool needs exactly one origin — the running target — to compare the
+    committed spec against the deployed one. Anything else was an SSRF from a
+    process holding Anthropic, Jira and GitHub credentials.
+    """
+    monkeypatch.setenv("QAAS_TARGET_BASE_URL", "http://127.0.0.1:8000")
+
+    result = await spec_tools["diff_openapi"](
+        {"spec_a": "http://169.254.169.254/latest/meta-data/", "spec_b": "http://127.0.0.1:8000/openapi.json"}
+    )
+
+    assert is_error(result)
+    assert "may only be read from the application under test" in text_of(result)
