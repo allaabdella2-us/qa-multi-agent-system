@@ -205,7 +205,13 @@ class DefectEnvelope(Strict):
     # prompt so an agent cannot talk its way past it.
 
     def has_evidence(self) -> bool:
-        return bool(self.evidence) or self.reproduction.failing_test is not None
+        # Truthiness, not `is not None`: `failing_test` is an optional string,
+        # and an agent filling an optional string with "" is an ordinary model
+        # habit. With the identity test, an envelope carrying no evidence at all
+        # and `failing_test=""` returned True and sailed through `is_fileable` —
+        # turning the one gate a model is not supposed to be able to argue past
+        # into one it could satisfy by typing nothing.
+        return bool(self.evidence) or bool(self.reproduction.failing_test)
 
     def is_fileable(self, min_confidence: float = 0.6) -> tuple[bool, str]:
         """Whether CLERK may file this. Returns (ok, reason-if-not).
@@ -241,6 +247,20 @@ class DefectEnvelope(Strict):
             self.location.ui_route or "",
             "|".join(paths),
         ]
+        # Everything above comes from `location`, which is entirely optional in
+        # EMIT_SCHEMA. With none of it, two unrelated findings that share only a
+        # domain and a class hashed identically — and `defect_memory.record`
+        # then reported the second as "already tracked as PROJ-N, do not file
+        # again", suppressing a real defect and persisting that suppression into
+        # the cross-run store, where it repeats every future run.
+        #
+        # So when there is no structure to hash, fall back to the title. Prose is
+        # what this function otherwise excludes on purpose, and it is still the
+        # right answer here: a weaker identity beats a wrong one, and the
+        # alternative is asserting that two defects are the same on the evidence
+        # that neither said where it lived.
+        if not any(parts[2:]) or not "".join(parts[2:]):
+            parts.append(_normalize_title(self.title))
         digest = hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
         return f"sha256:{digest}"
 
@@ -256,6 +276,14 @@ class DefectEnvelope(Strict):
     @classmethod
     def from_json(cls, raw: str | bytes) -> "DefectEnvelope":
         return cls.model_validate_json(raw)
+
+
+def _normalize_title(title: str) -> str:
+    """A title reduced to its words, so wording drift does not fork the hash.
+
+    Only reached when an envelope carries no location at all — see `fingerprint`.
+    """
+    return " ".join(re.findall(r"[a-z0-9]+", title.lower()))
 
 
 def normalize_path(path: str) -> str:

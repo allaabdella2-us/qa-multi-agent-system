@@ -72,6 +72,12 @@ include = [
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Without this, an interpreter lacking pytest-asyncio collects the suite, skips
+# every `async def` test in it -- the hooks, the conductor loop, the guardrail
+# callbacks and all seven MCP servers -- and exits 0. A suite whose whole job is
+# to prove enforcement works must not be able to report green while silently
+# not running a quarter of itself.
+required_plugins = ["pytest-asyncio"]
 markers = [
     "llm: test makes real Claude API calls (costs money)",
     "docker: test needs a Docker daemon and the target app running",

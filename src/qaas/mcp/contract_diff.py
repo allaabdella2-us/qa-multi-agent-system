@@ -117,6 +117,30 @@ def _fetch_spec(url: str) -> tuple[dict[str, Any] | None, str | None]:
     return (doc, None) if isinstance(doc, dict) else (None, f"{url} did not return an object")
 
 
+def _login_path(ctx: ToolContext) -> str:
+    """The login path this target declares, defaulting to a conventional one.
+
+    `env_control` was repaired for this exact class of bug and records why in
+    its own comment: `profile.auth` has existed since the schema was written and
+    nothing read it, so impersonation was welded to demo accounts and a literal
+    password. These were the last such literals in `src/` — a generated contract
+    test hard-coded `admin@northwind.test` / `password123` and POSTed them at
+    `/v1/auth/login`.
+
+    Against any target but the bundled demo, that made every generated test fail
+    at its `token` fixture, and the envelope then cited a "failing contract test"
+    that was really a login failure. Fabricated evidence is what `qaas score`'s
+    precision metric exists to catch, and it would not have caught this.
+    """
+    profile = getattr(ctx.config, "profile", None)
+    auth = getattr(profile, "auth", None) if profile else None
+    declared = getattr(auth, "login_endpoint", None) if auth else None
+    if not declared:
+        return "/v1/auth/login"
+    path = declared.split(None, 1)[-1].strip() if " " in declared else declared.strip()
+    return path if path.startswith("/") else f"/{path}"
+
+
 def _spec_origin() -> str:
     """The one origin a spec may be fetched from: the app under test."""
     base = os.environ.get("QAAS_TARGET_BASE_URL") or DEFAULT_LIVE_SPEC_URL
@@ -610,8 +634,9 @@ EXPECTED_STATUS = {expected_status}
 REQUIRED_TOP_LEVEL_FIELDS = {required_top!r}
 REQUIRED_ITEM_FIELDS = {required_item!r}
 AUTH_REQUIRED = {auth_required!r}
-LOGIN_EMAIL = "admin@northwind.test"
-LOGIN_PASSWORD = "password123"
+LOGIN_PATH = {login_path!r}
+LOGIN_EMAIL = os.environ.get("QAAS_TARGET_USER", "")
+LOGIN_PASSWORD = os.environ.get("QAAS_TARGET_PASSWORD", "")
 
 
 def _call(path, method="GET", token=None, body=None):
@@ -638,7 +663,12 @@ def token():
     preset = os.environ.get("QAAS_TARGET_TOKEN")
     if preset:
         return preset
-    status, body = _call("/v1/auth/login", "POST", body={{"email": LOGIN_EMAIL, "password": LOGIN_PASSWORD}})
+    if not (LOGIN_EMAIL and LOGIN_PASSWORD):
+        pytest.skip(
+            "This endpoint needs auth. Set QAAS_TARGET_TOKEN, or QAAS_TARGET_USER and "
+            "QAAS_TARGET_PASSWORD for " + LOGIN_PATH + "."
+        )
+    status, body = _call(LOGIN_PATH, "POST", body={{"email": LOGIN_EMAIL, "password": LOGIN_PASSWORD}})
     assert status == 200, "could not log in to fetch a token: HTTP %s %s" % (status, body[:300])
     return json.loads(body)["access_token"]
 
@@ -939,6 +969,7 @@ def build_tools(ctx: ToolContext) -> list:
             # not import. Neutralise it rather than reject the call.
             why=str(args.get("expectation") or "Asserts the published contract for this endpoint.").strip().replace('"""', "'''").replace("\\", "/"),
             default_base=os.environ.get("QAAS_TARGET_BASE_URL", "http://localhost:8000").rstrip("/"),
+            login_path=_login_path(ctx),
             expected_status=expected,
             required_top=required_top,
             required_item=required_item,

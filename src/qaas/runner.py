@@ -123,7 +123,25 @@ async def run_agent(
     that agent's findings, not the whole run — the conductor decides whether to
     retry, skip, or escalate.
     """
-    options = options or build_options(spec, ctx)
+    # Building the options can fail on its own — a missing prompt file
+    # (FileNotFoundError), an MCP server the config names but nothing provides
+    # (UnknownServer), a declared server whose ${VAR} is unset
+    # (MissingServerEnv). Outside the try below, those propagated out of a
+    # function whose contract is "failures are captured, not raised": the
+    # conductor's `_gather` calls `asyncio.gather` without `return_exceptions`
+    # and `run()` catches only BudgetExceeded, so one such agent aborted the
+    # whole run with no `run_finished` line — while its sibling discovery
+    # agents, which gather does not cancel, kept going and kept spending with
+    # nothing recording their cost.
+    try:
+        options = options or build_options(spec, ctx)
+    except Exception as exc:  # noqa: BLE001 — same contract as the query below
+        error = f"{type(exc).__name__}: {exc}"
+        ctx.store.log("agent_error", agent=spec.name, error=error)
+        result = AgentResult(agent=spec.name, subtype="failure", error=error)
+        ctx.store.put_result(result)
+        return RunOutcome(result=result)
+
     if max_budget_usd is not None:
         options.max_budget_usd = max_budget_usd
     started = time.monotonic()

@@ -1354,3 +1354,41 @@ def test_a_same_host_redirect_keeps_the_credential(tracker, stub):
     hop = stub.calls("GET", "/jira/software/c/projects/CORVID/boards/42")
     assert hop and "authorization" in hop[0].headers
     assert resolved and resolved.endswith("/boards/42")
+
+
+def test_search_translates_a_house_status_into_the_projects_own(tracker, stub):
+    """The `search` tool's schema offers house statuses; Jira validates its own.
+
+    CLERK following that schema to dedupe errored on every call, so dedupe
+    degraded to nothing and the duplicate ticket the system exists to prevent
+    got filed.
+    """
+    stub.route("GET", f"{API}/project/CORVID/statuses",
+               (200, [{"name": "Bug", "statuses": [{"name": "To Do"}, {"name": "Done"}]}]))
+    stub.route("POST", f"{API}/search/jql", (200, {"issues": []}))
+
+    tracker.search(status="open")
+
+    jql = stub.calls("POST", f"{API}/search/jql")[0].body["jql"]
+    assert '"To Do"' in jql
+    assert "open" not in jql
+
+
+def test_search_passes_through_a_status_jira_already_understands(tracker, stub):
+    """`Done` is not in STATUSES, so it is the caller's own vocabulary."""
+    stub.route("POST", f"{API}/search/jql", (200, {"issues": []}))
+
+    tracker.search(status="Done")
+
+    jql = stub.calls("POST", f"{API}/search/jql")[0].body["jql"]
+    assert '"Done"' in jql
+    assert stub.calls("GET", f"{API}/project/CORVID/statuses") == []
+
+
+def test_an_unreadable_workflow_does_not_fail_the_search(tracker, stub):
+    stub.route("GET", f"{API}/project/CORVID/statuses", (500, {"errorMessages": ["boom"]}))
+    stub.route("POST", f"{API}/search/jql", (200, {"issues": []}))
+
+    tracker.search(status="open")
+
+    assert stub.calls("POST", f"{API}/search/jql")

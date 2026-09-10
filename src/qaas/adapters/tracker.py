@@ -988,6 +988,33 @@ class JiraTracker(TrackerAdapter):
             for name in self.PROJECT_PERMISSIONS
         }
 
+    def _jira_status_name(self, status: str, project: str | None = None) -> str:
+        """A house status translated into this project's own vocabulary.
+
+        The `search` tool advertises `{"enum": list(STATUSES)}` — the house names
+        — and forwarded them to Jira verbatim, which validates status names and
+        answers 400. So CLERK following its own schema to dedupe
+        (`search(status="open", fingerprint=...)`) errored on every call, dedupe
+        degraded silently, and the duplicate ticket this system exists to prevent
+        got filed. `transition` goes to real trouble to translate via
+        `JIRA_STATUS_ALIASES`; this did not, and `_issue_from_jira` deliberately
+        stores Jira's own status name, so the house vocabulary could never match.
+
+        A name that is already this project's own is passed through untouched:
+        the one existing test for this path searches `status="Done"`, which is
+        Jira vocabulary rather than anything in `STATUSES`.
+        """
+        if status not in STATUSES:
+            return status
+        key = project or self._project
+        try:
+            names = sorted({n for group in self.project_statuses(key).values() for n in group})
+        except TrackerError:
+            # The workflow is unreadable; the caller's word is the best we have,
+            # and a 400 from a search is not worth failing a run over.
+            return status
+        return self.map_house_statuses(names).get(status) or status
+
     def project_statuses(self, key: str) -> dict[str, list[str]]:
         """Issue type name -> the status names its workflow contains.
 
@@ -1606,7 +1633,7 @@ class JiraTracker(TrackerAdapter):
                 "project in (" + ", ".join(self._jql_value(p) for p in scope) + ")"
             )
         if status:
-            clauses.append(f"status = {self._jql_value(status)}")
+            clauses.append(f"status = {self._jql_value(self._jira_status_name(status, project))}")
         for value, prefix in (
             (label, ""),
             (envelope_id, ENVELOPE_LABEL_PREFIX),

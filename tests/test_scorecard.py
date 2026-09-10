@@ -7,6 +7,7 @@ written to be adversarial about the ways a scorer can be too generous.
 from pathlib import Path
 
 import pytest
+import yaml
 
 from qaas.envelope import DefectEnvelope, Domain, Severity
 from qaas.scorecard import GoldenLedger, score, similarity
@@ -401,3 +402,37 @@ def test_retiring_one_defect_does_not_disturb_the_others(tmp_path):
     assert card.missed == ["API-02"]
     assert [g for _, g in card.retired_hits] == ["API-01"]
     assert card.false_positives == []
+
+
+# -- the ledger is checked when it is read, not when it is too late ---------
+
+
+@pytest.mark.parametrize(
+    "field, bad, good",
+    [("domain", "ui", "frontend"), ("severity", "high", "major")],
+)
+def test_a_ledger_value_that_is_not_an_enum_member_fails_at_load(tmp_path, field, bad, good):
+    """Both failures used to be silent, late, or both.
+
+    A bad `domain` scored 0.0 against every envelope forever — permanently
+    missed, recall quietly lower, no error. A bad `severity` raised out of
+    `severity_delta` after a paid run had already finished.
+    """
+    entry = {
+        "id": "X-1", "domain": "api", "severity": "major",
+        "title": "t", "detail": "d", "phase": 1,
+    }
+    entry[field] = bad
+    path = tmp_path / "defects.yaml"
+    path.write_text(yaml.safe_dump({"defects": [entry], "not_defects": []}))
+
+    with pytest.raises(ValueError) as exc:
+        GoldenLedger.load(path)
+    assert "X-1" in str(exc.value) and bad in str(exc.value)
+    assert good in str(exc.value), "the message must name what is allowed"
+
+
+def test_the_shipped_ledger_still_loads():
+    """The obligation this guards is a human's; this is what makes it visible."""
+    ledger = GoldenLedger.load(LEDGER_PATH)
+    assert ledger.defects and ledger.not_defects

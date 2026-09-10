@@ -19,7 +19,7 @@ from typing import Any, Iterable
 
 import yaml
 
-from qaas.envelope import DefectEnvelope, normalize_path, Severity
+from qaas.envelope import DefectEnvelope, Domain, normalize_path, Severity
 
 MATCH_THRESHOLD = 0.5
 
@@ -90,13 +90,36 @@ class GoldenLedger:
         return next((d for d in self.defects if d.id == defect_id), None)
 
 
+def _enum_or_die(kind: type[Domain] | type[Severity], value: Any, defect_id: str, field: str) -> str:
+    """A ledger value that must name an enum member, checked when it is read.
+
+    `domain` and `severity` arrived as free strings and were compared against
+    validated enums downstream, so the two failure modes were both silent and
+    both late. A `domain: ui` (not a `Domain`) scores 0.0 similarity against
+    every envelope forever: the defect is permanently `missed`, recall drops and
+    nothing says why. A `severity: high` (not a `Severity`) raises ValueError out
+    of `Match.severity_delta` — *after* a paid run has finished.
+
+    "A stale ledger silently corrupts every score" is the reason the ledger is a
+    human's responsibility at merge. This makes the failure loud and immediate
+    instead, which is the only part of that a program can help with.
+    """
+    try:
+        return kind(value).value
+    except ValueError:
+        allowed = ", ".join(sorted(m.value for m in kind))
+        raise ValueError(
+            f"{defect_id}: {field} '{value}' is not a {kind.__name__}. Use one of: {allowed}."
+        ) from None
+
+
 def _golden(d: dict[str, Any]) -> GoldenDefect:
     loc = d.get("location", {}) or {}
     return GoldenDefect(
         id=d["id"],
-        domain=d["domain"],
+        domain=_enum_or_die(Domain, d["domain"], d["id"], "domain"),
         defect_class=d.get("class", "bug"),
-        severity=d["severity"],
+        severity=_enum_or_die(Severity, d["severity"], d["id"], "severity"),
         title=d["title"],
         detail=d.get("detail", ""),
         endpoint=loc.get("endpoint"),

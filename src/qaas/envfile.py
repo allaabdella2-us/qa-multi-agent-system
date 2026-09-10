@@ -84,7 +84,15 @@ def load_env_file(start: Path | str | None = None) -> tuple[Path | None, list[st
             return None, []
         applied = []
         for key, value in values.items():
-            if os.environ.get(key):
+            # Presence, not truthiness. `os.environ.get(key)` treated an
+            # exported-but-empty variable as unset, so the file won — the exact
+            # opposite of what this module, CLAUDE.md and
+            # `test_the_real_environment_always_wins` all promise. The case that
+            # matters is a CI job with `JIRA_API_TOKEN: ${{ secrets.X }}` where
+            # the secret is not set: GitHub exports it as "", and a checkout
+            # carrying an old `.env` would then file tickets into whatever
+            # instance that stale token pointed at.
+            if key in os.environ:
                 continue
             os.environ[key] = value
             applied.append(key)

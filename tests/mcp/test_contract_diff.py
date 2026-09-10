@@ -548,3 +548,24 @@ async def test_a_spec_url_may_only_be_the_application_under_test(spec_tools, mon
 
     assert is_error(result)
     assert "may only be read from the application under test" in text_of(result)
+
+
+async def test_a_generated_test_names_no_application(spec_tools, real_spec):
+    """Nothing in a generated artifact may name one app's users or login route.
+
+    These were the last hard-coded demo credentials in `src/`: the template
+    POSTed `admin@northwind.test` / `password123` at `/v1/auth/login`, so against
+    any other target every generated test failed at its `token` fixture — and the
+    envelope citing it claimed a failing contract test when what failed was the
+    login.
+    """
+    result = await spec_tools["generate_contract_test"](
+        {"endpoint": "/v1/invoices", "method": "GET", "expectation": "currency is present",
+         "spec": str(real_spec)}
+    )
+    assert not is_error(result), text_of(result)
+
+    source = (Path(structured(result)["path"])).read_text()
+    assert "northwind" not in source
+    assert "password123" not in source
+    assert "QAAS_TARGET_USER" in source and "QAAS_TARGET_PASSWORD" in source

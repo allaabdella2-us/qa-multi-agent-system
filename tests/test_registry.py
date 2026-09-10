@@ -212,3 +212,34 @@ def test_the_shadowing_warning_is_silenced_because_we_acted_on_it():
         warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
         warnings.warn("shadowed", CanUseToolShadowedWarning)
     assert not seen, "the shadowing warning still reaches the user"
+
+
+async def test_an_agent_whose_options_cannot_be_built_fails_alone(tmp_path):
+    """`build_options` sat outside run_agent's try, so its failures escaped.
+
+    A missing prompt, an unknown MCP server, or a declared server with an unset
+    ${VAR} raised out of a function documented "failures are captured, not
+    raised" — and the conductor gathers discovery agents without
+    `return_exceptions`, so one of these aborted the run while its siblings kept
+    spending with nothing recording their cost.
+    """
+    from qaas.config import load_config
+    from qaas.mcp.context import ToolContext
+    from qaas.runner import run_agent
+    from qaas.store import RunStore, SystemMapStore
+
+    cfg = load_config(search=CONFIG_SEARCH)
+    spec = cfg.agents["CONDUIT"].model_copy(deep=True)
+    spec.prompt = "NO_SUCH_PROMPT_FILE.md"
+    store = RunStore.new(root=tmp_path)
+    ctx = ToolContext(
+        store=store, maps=SystemMapStore(tmp_path), config=cfg,
+        agent=spec, target_root=tmp_path,
+    )
+
+    outcome = await run_agent(spec, ctx, task="anything")
+
+    assert outcome.result.subtype == "failure"
+    assert outcome.result.error
+    assert [e.kind for e in store.ledger("agent_error")] == ["agent_error"]
+    assert [r.agent for r in store.results()] == ["CONDUIT"], "its cost is still recorded"
