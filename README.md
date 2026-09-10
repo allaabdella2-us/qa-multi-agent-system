@@ -10,7 +10,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/qaas-python?color=3776AB&logo=python&logoColor=white)](https://pypi.org/project/qaas-python/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml/badge.svg)](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-686%20offline-success)](#-contributing)
+[![Tests](https://img.shields.io/badge/tests-767%20offline-success)](#-contributing)
 [![Built on](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-D97757)](https://docs.claude.com/en/api/agent-sdk/overview)
 
 [Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Architecture](ARCHITECTURE.md)
@@ -45,7 +45,7 @@ Nothing crosses between the loops except a ticket — which is also the audit tr
 
 | | |
 |---|---|
-| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **686 tests run offline, free, with no API key.** |
+| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **767 tests run offline, free, with no API key.** |
 | 🧱 **Every agent is its own `query()`** | Not subagents of a shared parent. Each gets a real context boundary, an enforceable tool allowlist, and its own cost number. |
 | 🔬 **Evidence or it did not happen** | `has_evidence()` and `is_fileable()` are methods on the envelope model, not requests in a prompt. An agent cannot talk its way past them. |
 | 📊 **Measured, not asserted** | A deliberately buggy demo app ships with a golden ledger of **16 seeded defects + 4 planted non-defects**. `qaas score` reports recall *and* precision, so a prompt change has a number attached. |
@@ -286,12 +286,12 @@ Every tool call, denial, verdict and escalation is on the record.
 $ qaas trace run-20260908T182034-c6ed26
     t+  agent         kind            detail
     0s  -             run_started     mode=nightly  agents=[7]
-    0s  MAPPER  agent_started   model=claude-sonnet-5
-    4s  MAPPER  tool_call ×34   Read×25, Glob×6, ToolSearch×2
-    6s  MAPPER  denial          tool=Bash  reason=Bash is not in MAPPER's
+    0s  MAPPER        agent_started   model=claude-sonnet-5
+    4s  MAPPER        tool_call ×34   Read×25, Glob×6, ToolSearch×2
+    6s  MAPPER        denial          tool=Bash  reason=Bash is not in MAPPER's
                                       tool allowlist (Read, Grep, Glob).
-  146s  MAPPER  system_map      version=20260907T233530  sections=[12]
-  156s  MAPPER  agent_finished  subtype=success  num_turns=45
+  146s  MAPPER        system_map      version=20260907T233530  sections=[12]
+  156s  MAPPER        agent_finished  subtype=success  num_turns=45
 ```
 
 ```bash
@@ -310,11 +310,11 @@ in a second terminal the moment a run begins, or even before, and it waits.
 $ qaas trace run-20260909T163240-83b11c --follow --quiet
 following run-20260909T163240-83b11c — ctrl-c to stop
 16:32:40 -            run_started      mode=pr-check  agents=[8]  target_sha=da19f406
-16:32:40 MAPPER agent_started    model=claude-sonnet-5
-16:32:46 MAPPER denial           tool=Bash  reason=Bash is not in MAPPER's
+16:32:40 MAPPER       agent_started    model=claude-sonnet-5
+16:32:46 MAPPER       denial           tool=Bash  reason=Bash is not in MAPPER's
                                        tool allowlist (Read, Grep, Glob).
-16:36:11 ARCHITECT     envelope         severity=major  domain=architecture
-16:41:03 TRIAGE        ticket           action=created  key=QA-118  severity=major
+16:36:11 ARCHITECT    envelope         severity=major  domain=architecture
+16:41:03 TRIAGE       ticket           action=created  key=QA-118  severity=major
 ```
 
 Drop `--quiet` to see every file the agents read, one line each. Combine with
@@ -375,7 +375,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest                 # 686 tests, offline, free — keep it that way
+pytest                 # 767 tests, offline, free — keep it that way
 pytest -m docker       # needs: cd target-app && docker compose up -d
 qaas validate
 ```

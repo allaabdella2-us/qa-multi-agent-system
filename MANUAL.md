@@ -359,10 +359,10 @@ qaas run --mode fix-cycle --ticket QA-42
 ```
 
 ```
-VERIFIER   NOT_FIXED  → the defect still reproduces
-FIXER             → writes the minimal fix on a fix/* branch
-REVIEWER APPROVE    → adversarial review passed
-VERIFIER   VERIFIED   → the original failing test now passes
+VERIFIER  NOT_FIXED  → the defect still reproduces
+FIXER                → writes the minimal fix on a fix/* branch
+REVIEWER  APPROVE    → adversarial review passed
+VERIFIER  VERIFIED   → the original failing test now passes
 ```
 
 REVIEWER may also return `REQUEST_CHANGES` (back to FIXER, capped at two round

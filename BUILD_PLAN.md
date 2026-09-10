@@ -198,10 +198,10 @@ lesson — never request a change the author is not permitted to make.
 **Closed live on CORVID-8**, 2026-09-08, `fix-cycle`, $6.84, zero escalations:
 
 ```
-VERIFIER   NOT_FIXED   defect confirmed present
-FIXER              currency: str added to InvoiceOut (1 line of product code)
-REVIEWER APPROVE
-VERIFIER   VERIFIED    re-verified on FIXER's branch
+VERIFIER  NOT_FIXED   defect confirmed present
+FIXER                 currency: str added to InvoiceOut (1 line of product code)
+REVIEWER  APPROVE
+VERIFIER  VERIFIED    re-verified on FIXER's branch
 ```
 
 VERIFIER ran the original failing test 5 of 5 times for flake, then the full 22-test
