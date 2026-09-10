@@ -20,7 +20,7 @@ usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (SURFACE) runs
 
-pytest                                   # 733 tests, no API calls, no network
+pytest                                   # 767 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
