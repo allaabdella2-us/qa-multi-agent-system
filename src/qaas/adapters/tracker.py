@@ -1070,7 +1070,7 @@ class JiraTracker(TrackerAdapter):
         `filter/search` returns other people's filters too, and adopting a
         stranger's filter as the run's board would silently repoint it.
         """
-        params = {"filterName": name, "expand": "jql", "maxResults": "50"}
+        params = {"filterName": name, "expand": "jql,owner", "maxResults": "50"}
         account = self._account_id()
         if account:
             # Omitted rather than sent empty: Jira answers an empty accountId
@@ -1078,8 +1078,20 @@ class JiraTracker(TrackerAdapter):
             params["accountId"] = account
         data = self._request("GET", "/filter/search", params=params, retry_on_429=True)
         for entry in data.get("values") or []:
-            if str(entry.get("name") or "").strip() == name:
-                return entry
+            if str(entry.get("name") or "").strip() != name:
+                continue
+            # With no account id the scoping parameter was omitted, so the search
+            # returned everyone's filters and the first name match was adopted --
+            # a stranger's filter, which `ensure_repo_board` now PUTs new JQL
+            # onto. Failing open was survivable while this only read; since the
+            # repair landed it rewrites someone else's saved filter. When the
+            # owner cannot be established, decline to reuse and make our own.
+            owner = (entry.get("owner") or {}).get("accountId")
+            if account and owner and owner != account:
+                continue
+            if not account and owner:
+                continue
+            return entry
         return None
 
     def update_filter_jql(self, filter_id: int, *, name: str, jql: str) -> dict[str, Any]:
@@ -1092,7 +1104,16 @@ class JiraTracker(TrackerAdapter):
         told to watch. That is the same "files fine, invisible" failure the
         `repo-` label exists to prevent, arriving by a different road.
         """
-        return self._request("PUT", f"/filter/{filter_id}", body={"name": name, "jql": jql})
+        # `sharePermissions` is sent again on purpose. A PUT replaces the
+        # filter, so omitting it un-shares the filter this call just repaired --
+        # and Jira refuses to render a board over a private filter, which is the
+        # same "files fine, invisible" outcome two calls later. `create_filter`
+        # below records why the share matters.
+        return self._request(
+            "PUT",
+            f"/filter/{filter_id}",
+            body={"name": name, "jql": jql, "sharePermissions": [{"type": "authenticated"}]},
+        )
 
     def create_filter(self, *, name: str, jql: str, description: str = "") -> dict[str, Any]:
         """A saved filter, shared with authenticated users.

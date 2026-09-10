@@ -36,9 +36,17 @@ class ToolContext:
     map_version: str | None = None
     counters: dict[str, int] = field(default_factory=dict)
 
-    #: Files this agent has modified in this invocation. Backs the §8.2 diff
-    #: budget, which is counted per distinct file rather than per tool call.
-    touched_files: set[str] = field(default_factory=set)
+    @property
+    def touched_files(self) -> set[str]:
+        """Files this agent has modified in this *run*, for the §8.2 diff budget.
+
+        It used to be a field on this context, which is rebuilt per dispatch — so
+        MENDER's "at most 5 files per run" reset on every MENDER/ARBITER round
+        trip and again for every ticket. A budget that resets whenever the thing
+        it is bounding loops is not a budget. The store is the per-run object, so
+        it holds the set and the budget counts what the policy says it counts.
+        """
+        return self.store.touched_files(self.agent.name)
 
     def bump(self, key: str) -> int:
         self.counters[key] = self.counters.get(key, 0) + 1

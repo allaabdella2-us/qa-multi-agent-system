@@ -179,3 +179,14 @@ def test_an_artifact_name_cannot_reach_outside_its_run(store, name):
     path = store.resolve_artifact(uri)
     assert path.parent == (store.dir / "artifacts").resolve()
     assert path.read_bytes() == b"x"
+
+
+def test_reading_a_run_that_does_not_exist_does_not_create_it(tmp_path):
+    """`qaas show <typo>` used to leave a permanent empty run behind.
+
+    Constructing a store mkdir'd unconditionally, so every read-only command was
+    also a writer, and the phantom then showed up in `qaas runs` forever.
+    """
+    RunStore("run-does-not-exist", root=tmp_path, create=False)
+    assert not (tmp_path / "runs" / "run-does-not-exist").exists()
+    assert list_runs(tmp_path) == []

@@ -141,7 +141,16 @@ async def test_a_tool_error_is_logged(wire):
 # -- PreToolUse still enforces ----------------------------------------------
 
 
-async def test_the_pre_tool_hook_still_denies_and_still_counts(wire):
+async def test_a_denied_call_does_not_satisfy_the_output_contract(wire):
+    """A refused attempt is not a deliverable.
+
+    This used to assert the opposite — the attempt counted — because the tally
+    was taken in PreToolUse, before anyone knew whether the call would be denied
+    or would return `isError`. The consequence was at the other end of the run:
+    an errored `record_verdict` satisfied PROOF's `must_call`, so the Stop hook
+    let it stop and the conductor read back no verdict at all. The tally moved to
+    PostToolUse, which a denial never reaches.
+    """
     ctx, record, hooks = wire("CONDUIT")
     await fire(hooks, PRE_TOOL_USE, {
         "hook_event_name": "PreToolUse",
@@ -149,7 +158,24 @@ async def test_the_pre_tool_hook_still_denies_and_still_counts(wire):
         "tool_input": {"file_path": "x.py", "content": "y"},
     })
     assert list(ctx.store.ledger("denial")), "enforcement survived the hook rewrite"
-    assert "Write" in record.called, "and the attempt still counts toward the contract"
+    assert "Write" not in record.called
+
+
+async def test_a_tool_that_errored_does_not_satisfy_the_output_contract(wire):
+    ctx, record, hooks = wire("PROOF")
+    await fire(hooks, POST_TOOL_USE, {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "mcp__envelope__record_fix_verdict",
+        "tool_response": {"isError": True, "content": [{"type": "text", "text": "no such ticket"}]},
+    })
+    assert "mcp__envelope__record_fix_verdict" not in record.called
+
+    await fire(hooks, POST_TOOL_USE, {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "mcp__envelope__record_fix_verdict",
+        "tool_response": {"content": [{"type": "text", "text": "recorded"}]},
+    })
+    assert "mcp__envelope__record_fix_verdict" in record.called
 
 
 # -- skills wiring ----------------------------------------------------------

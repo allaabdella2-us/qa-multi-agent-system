@@ -235,7 +235,17 @@ def _host_port(entry: Any) -> int | None:
         published = entry.get("published")
         return int(published) if str(published).isdigit() else None
     if isinstance(entry, str):
-        head = entry.split(":")[0].split("/")[0]
+        # compose accepts "8000", "8000:8000", "127.0.0.1:8000:8000" and
+        # "8000-8002:8000-8002". Taking the first colon-segment read the *host
+        # address* as the port in the three-part form and answered None, so a
+        # service bound to an explicit interface reported no URL at all. The
+        # host port is the second-from-last segment when there are three, the
+        # first when there are two, and the whole thing when there is one; a
+        # range contributes its lower bound.
+        body = entry.split("/")[0]
+        parts = body.split(":")
+        head = parts[-2] if len(parts) >= 3 else parts[0]
+        head = head.split("-")[0]
         return int(head) if head.isdigit() else None
     return None
 
@@ -614,8 +624,18 @@ def build_tools(ctx: ToolContext) -> list:
 
         deadline = asyncio.get_running_loop().time() + DEFAULT_UP_TIMEOUT_S
         down = await _exec(compose_argv("rm", "--stop", "--force", "--volumes", db_name), SHORT_TIMEOUT_S * 2, cwd=ctx.target_root)
-        if not down.okay and not down.timed_out:
-            return err(f"Could not remove the '{db_name}' container: {down.tail()}")
+        if not down.okay:
+            # `and not down.timed_out` used to be here, so a `compose rm` that
+            # hung was treated as success and the run carried on to report a
+            # wipe that had not happened. Every later finding then rests on
+            # whatever state survived, which is the one outcome a reset exists to
+            # rule out. A timeout is a failure with a different reason attached,
+            # not an exemption.
+            why = "timed out" if down.timed_out else down.tail()
+            return err(
+                f"Could not remove the '{db_name}' container: {why}. The database was NOT "
+                "reset, so do not treat what follows as a clean environment."
+            )
 
         up = await _exec(compose_argv("up", "-d", db_name), SHORT_TIMEOUT_S * 4, cwd=ctx.target_root)
         if not up.okay:

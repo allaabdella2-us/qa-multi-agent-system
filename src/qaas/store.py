@@ -124,12 +124,19 @@ class RunStore:
         .qaas/system-map/latest           (pointer file)
     """
 
-    def __init__(self, run_id: str, root: Path | str = DEFAULT_ROOT):
+    def __init__(self, run_id: str, root: Path | str = DEFAULT_ROOT, *, create: bool = True):
         self.run_id = run_id
         self.root = Path(root)
         self.dir = self.root / "runs" / run_id
-        for sub in ("envelopes", "artifacts", "results"):
-            (self.dir / sub).mkdir(parents=True, exist_ok=True)
+        # `create=False` for the read-only commands. Constructing a store used to
+        # mkdir unconditionally, so `qaas show <typo>` left a permanent empty run
+        # on disk that then appeared in `qaas runs` forever -- a reader that
+        # writes, and the one thing an audit trail must not have.
+        if create:
+            for sub in ("envelopes", "artifacts", "results"):
+                (self.dir / sub).mkdir(parents=True, exist_ok=True)
+        #: agent -> files it has written this run. See `touched_files`.
+        self._touched: dict[str, set[str]] = {}
 
     @classmethod
     def new(cls, root: Path | str = DEFAULT_ROOT, prefix: str = "run") -> "RunStore":
@@ -189,6 +196,14 @@ class RunStore:
     def get_envelope(self, envelope_id: str) -> DefectEnvelope | None:
         path = self.dir / "envelopes" / f"{envelope_id}.json"
         return DefectEnvelope.from_json(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    def touched_files(self, agent: str) -> set[str]:
+        """The distinct files one agent has written this run (§8.2's denominator).
+
+        Held here rather than on `ToolContext` because a context is built per
+        dispatch and a run outlives many of them.
+        """
+        return self._touched.setdefault(agent, set())
 
     # -- artifacts --------------------------------------------------------
 

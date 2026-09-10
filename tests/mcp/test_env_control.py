@@ -307,3 +307,28 @@ async def test_a_full_environment_round_trip(tools, monkeypatch):
         # `Connection refused` -- a collapse that looked like the app, not the
         # suite. Put back what we removed, pass or fail.
         await tools["spin_up"]({})
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        (8000, 8000),
+        ("8000", 8000),
+        ("8000:8000", 8000),
+        ("127.0.0.1:8000:8000", 8000),
+        ("0.0.0.0:5432:5432", 5432),
+        ("8000-8002:8000-8002", 8000),
+        ("8000:8000/tcp", 8000),
+        ({"published": 8000}, 8000),
+        ("not-a-port", None),
+    ],
+)
+def test_a_published_host_port_is_read_in_every_spelling_compose_allows(entry, expected):
+    """The three-part form binds an interface, and its first segment is an address.
+
+    Splitting on the first colon read `127.0.0.1` as the port, so a service bound
+    to an explicit interface reported no reachable URL at all.
+    """
+    from qaas.mcp.env_control import _host_port
+
+    assert _host_port(entry) == expected

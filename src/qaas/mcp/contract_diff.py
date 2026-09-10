@@ -392,7 +392,16 @@ def _compare_value_space(a: dict[str, Any], b: dict[str, Any], prefix: str) -> s
     types_a, types_b = a.get("types") or frozenset(), b.get("types") or frozenset()
     if types_a == types_b:
         return None
-    if types_a and types_b and types_a < types_b:
+    # An empty set is not "no types" — it is a schema with no `type` at all,
+    # which admits *anything*. Treating it as the empty set made a widening to an
+    # untyped schema fall through to narrowed, and the report then said BREAKING
+    # over a detail that read, in as many words, `string -> any`. Untyped is the
+    # top of this lattice, so a move toward it widens and a move away narrows.
+    if not types_b:
+        return f"{prefix}_type_widened"
+    if not types_a:
+        return f"{prefix}_type_narrowed"
+    if types_a < types_b:
         return f"{prefix}_type_widened"
     return f"{prefix}_type_narrowed"
 

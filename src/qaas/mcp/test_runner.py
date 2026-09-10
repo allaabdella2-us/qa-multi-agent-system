@@ -47,6 +47,10 @@ MAX_TIMEOUT_S = 900
 # incident. Twenty runs already resolves a 5%-flaky test most of the time.
 MAX_FLAKE_RUNS = 20
 
+# And a wall clock over the whole investigation: 20 runs of the 900s per-run
+# cap is five hours in one tool call, which nothing else in the system bounds.
+MAX_FLAKE_TOTAL_S = 1_800
+
 # How much raw output to hand back when parsing found nothing useful. Enough to
 # diagnose a collection error, not enough to flood the agent's context.
 OUTPUT_TAIL = 6_000
@@ -582,10 +586,22 @@ def build_tools(ctx: ToolContext) -> list:
                 "5% flake most of the time; more is a budget problem, not better evidence."
             )
 
+        # `n` runs of `timeout_s` each is 20 x 900s = five hours inside a single
+        # tool call, which no budget or turn limit sees. The per-run timeout
+        # bounds a hang; only an aggregate bounds the loop.
+        deadline = asyncio.get_running_loop().time() + min(MAX_FLAKE_TOTAL_S, n * timeout_s)
+
         outcomes: list[str] = []
         messages: list[str] = []
         for attempt in range(n):
-            proc, rows, _ = await _pytest(cwd, [test_id], timeout_s)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if attempt and remaining <= 0:
+                messages.append(
+                    f"Stopped after {attempt} of {n} runs: the {MAX_FLAKE_TOTAL_S}s budget for "
+                    "one flake investigation was reached. Judge the flake on these."
+                )
+                break
+            proc, rows, _ = await _pytest(cwd, [test_id], max(1, int(min(timeout_s, remaining))))
             if not proc.started:
                 return err(proc.stderr)
             if attempt == 0 and _matched_nothing(proc):

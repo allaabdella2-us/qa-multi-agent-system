@@ -569,3 +569,19 @@ async def test_a_generated_test_names_no_application(spec_tools, real_spec):
     assert "northwind" not in source
     assert "password123" not in source
     assert "QAAS_TARGET_USER" in source and "QAAS_TARGET_PASSWORD" in source
+
+
+def test_widening_to_an_untyped_schema_is_not_breaking():
+    """An absent `type` admits anything, so moving to it widens.
+
+    The empty type set was read as "no types" rather than "unconstrained", so
+    this fell through to narrowed and the report said BREAKING over a detail
+    that read, literally, `string -> any`.
+    """
+    from qaas.mcp.contract_diff import _compare_value_space
+
+    string = {"types": frozenset({"string"}), "enum": None}
+    anything = {"types": frozenset(), "enum": None}
+
+    assert _compare_value_space(string, anything, "response") == "response_type_widened"
+    assert _compare_value_space(anything, string, "response") == "response_type_narrowed"

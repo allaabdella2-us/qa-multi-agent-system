@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -175,11 +176,21 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
 
     root.parent.mkdir(parents=True, exist_ok=True)
     console.print(f"cloning {repo} -> {root}")
-    result = subprocess.run(
-        ["git", "clone", "--depth", "50", repo, str(root)],
-        capture_output=True, text=True, timeout=600,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "clone", "--depth", "50", repo, str(root)],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        # git leaves the partial tree behind, and `root.exists()` above then
+        # reports "using existing clone" on the next run -- so a clone that timed
+        # out was silently reused as a complete checkout, and every finding after
+        # it described a repository that was never fully there.
+        shutil.rmtree(root, ignore_errors=True)
+        console.print(f"[red]clone timed out[/red] after 600s; removed the partial checkout at {root}")
+        raise typer.Exit(1) from None
     if result.returncode != 0:
+        shutil.rmtree(root, ignore_errors=True)
         console.print(f"[red]clone failed:[/red] {result.stderr.strip()[:400]}")
         raise typer.Exit(1)
     return root, repo
@@ -857,7 +868,7 @@ def runs(root: Path = Root, limit: int = 10) -> None:
     for col in ("run", "envelopes", "agents"):
         table.add_column(col)
     for run_id in ids:
-        store = RunStore(run_id, root)
+        store = RunStore(run_id, root, create=False)
         results = store.results()
         table.add_row(
             run_id,
@@ -878,7 +889,7 @@ VERDICT_STYLE = {
 @app.command()
 def show(run_id: str, root: Path = Root) -> None:
     """Show one run's findings and ledger: cost, duration, tickets, escalations."""
-    store = RunStore(run_id, root)
+    store = RunStore(run_id, root, create=False)
     # One pass over the ledger, shared by the header and the denial list -- each
     # `store.ledger(kind)` call is a full-file scan of a file that reaches tens
     # of thousands of lines on a real run.
@@ -992,7 +1003,7 @@ def trace(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Drop tool_call lines and show only what an agent decided."),
 ) -> None:
     """Print one run's ledger as a timeline: dispatches, tools, denials, verdicts, cost."""
-    store = RunStore(run_id, root)
+    store = RunStore(run_id, root, create=False)
     if not store.ledger_path.exists() and not follow:
         console.print(f"[red]no ledger for run {run_id}[/red] — try `qaas runs`")
         raise typer.Exit(1)
@@ -1198,11 +1209,21 @@ def score(
     domains: list[str] = typer.Option(
         None, "--domain", help="Restrict scoring to these domains. Use it when a run covered only part of the surface."
     ),
+    target: str = typer.Option(
+        None, "--target", "-t", help="Score against this profile's ledger rather than the active one's."
+    ),
 ) -> None:
     """Score a run against the golden ledger. This is the honest number."""
     from qaas.scorecard import GoldenLedger, score as score_run
 
     cfg = load_config(config_dir)
+    # Every other command that reads a run takes `--target`; this one did not,
+    # so a `--repo` run was scored against whatever profile `system.yaml`
+    # happened to name -- in practice the bundled demo's ledger, which describes
+    # a different application entirely. Recall and precision against the wrong
+    # oracle are worse than no number, because they look like a number.
+    if target:
+        cfg = cfg.model_copy(update={"target": target, "profile": _load_target(target, config_dir)})
     ledger_path = _ledger_path(cfg)
     if ledger_path is None or not ledger_path.exists():
         console.print(
@@ -1222,7 +1243,7 @@ def score(
             raise typer.Exit(1)
         run_id = ids[0]
 
-    store = RunStore(run_id, root)
+    store = RunStore(run_id, root, create=False)
     card = score_run(
         store.envelopes(),
         GoldenLedger.load(ledger_path),

@@ -288,8 +288,14 @@ def build_hooks(
     async def on_pre_tool_record(
         input_data: Any, tool_use_id: str | None, context: Any
     ) -> dict[str, Any]:
-        """Count what was called. Enforcement and logging are guard.pre_tool_use."""
-        record.record(_field(input_data, "tool_name"))
+        """Kept for the ledger's ordering; the contract is counted after the call.
+
+        Counting here marked a tool as called before anyone knew whether it had
+        been *denied* or had returned `isError` — so an errored `record_verdict`
+        satisfied PROOF's `must_call` and the Stop hook let it stop with no
+        verdict. A denial never reaches PostToolUse at all, which is exactly the
+        distinction that matters.
+        """
         return {}
 
     async def on_post_tool(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
@@ -299,6 +305,10 @@ def build_hooks(
         if isinstance(response, dict) and response.get("isError"):
             ctx.store.log("tool_error", agent=ctx.agent.name, tool=tool, tool_use_id=tool_use_id)
             return {}
+
+        # Reached only by a call that was permitted and did not error, which is
+        # the only kind that should satisfy `must_call`.
+        record.record(tool)
 
         # An envelope that was accepted but held tells the agent nothing unless
         # someone says so now. Discovering at the end that none of your findings
