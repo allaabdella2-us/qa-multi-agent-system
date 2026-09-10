@@ -110,7 +110,7 @@ def plugin_name(plugin_dir: Path) -> str:
         try:
             import json
 
-            declared = json.loads(manifest.read_text()).get("name")
+            declared = json.loads(manifest.read_text(encoding="utf-8")).get("name")
             if declared:
                 return str(declared)
         except Exception:  # noqa: BLE001 - a broken manifest falls back, not crashes

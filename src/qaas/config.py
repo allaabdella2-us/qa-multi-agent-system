@@ -310,7 +310,7 @@ def load_config(
         looked = ", ".join(str(d) for d in dirs) or "(nowhere -- no search path)"
         raise FileNotFoundError(f"no system config at {dirs[0] / 'system.yaml'} (looked in: {looked})")
 
-    raw: dict[str, Any] = yaml.safe_load(system_path.read_text()) or {}
+    raw: dict[str, Any] = yaml.safe_load(system_path.read_text(encoding="utf-8")) or {}
 
     # `target_app:` used to name the application's directory relative to the
     # process cwd. The target profile's `root` says the same thing and says it
@@ -348,7 +348,7 @@ def load_config(
 
     agents: dict[str, Any] = {}
     for path in by_stem.values():
-        spec = yaml.safe_load(path.read_text()) or {}
+        spec = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         name = spec.get("name") or path.stem.upper()
         spec["name"] = name
         if name in agents:

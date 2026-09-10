@@ -148,11 +148,11 @@ def build_system_prompt(
         where = ", ".join(str(d) for d in dirs) or "(no prompt directories)"
         raise FileNotFoundError(f"no {SHARED_PROMPT} in: {where}")
 
-    blocks = [own.read_text().rstrip()]
+    blocks = [own.read_text(encoding="utf-8").rstrip()]
     # An empty addendum contributes nothing rather than a stray blank block --
     # `touch CONDUIT.append.md` must not change a single byte of the prompt.
-    blocks += [t for p in append_paths(dirs, spec.prompt) if (t := p.read_text().strip())]
-    blocks.append(shared.read_text().strip())
+    blocks += [t for p in append_paths(dirs, spec.prompt) if (t := p.read_text(encoding="utf-8").strip())]
+    blocks.append(shared.read_text(encoding="utf-8").strip())
     return "\n\n".join(blocks) + "\n"
 
 

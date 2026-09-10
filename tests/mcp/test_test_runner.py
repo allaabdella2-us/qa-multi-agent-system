@@ -142,6 +142,72 @@ async def test_run_suite_refuses_a_cwd_outside_the_repo(tools, ctx):
     assert "outside the repository" in result["content"][0]["text"]
 
 
+async def test_run_suite_refuses_a_selector_outside_the_repo(tools, tmp_path):
+    """`cwd` was contained; the selector beside it decides what actually runs.
+
+    The module writes its marker at *import* time, so the file existing at all
+    proves collection executed code outside the target root — not merely that a
+    test was selected.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = tmp_path / "collected-outside"
+    (outside / "test_evil.py").write_text(
+        f"from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('ran')\n"
+        f"def test_evil():\n    assert True\n"
+    )
+
+    result = await tools["run_suite"]({"selector": "../outside/test_evil.py"})
+
+    assert result["isError"]
+    assert "outside the repository" in result["content"][0]["text"]
+    assert not marker.exists(), "the module was imported despite the refusal"
+
+
+async def test_a_selector_may_not_be_a_pytest_option(tools, tmp_path):
+    """Selectors reach argv with no `--`, so a leading dash is an option.
+
+    `get_coverage` takes a selector through the same helper, but it returns on a
+    missing `coverage` package before it looks at one, so the guard there is
+    covered by `_selector_refusal` directly rather than through the tool.
+    """
+    result = await tools["run_suite"]({"selector": f"-p=evil --rootdir={tmp_path}"})
+    assert result["isError"]
+    assert "may not start with '-'" in result["content"][0]["text"]
+
+
+def test_every_selector_taking_tool_asks_the_same_question():
+    """The guard is one helper, and each call site must actually call it."""
+    import inspect
+
+    from qaas.mcp import test_runner
+
+    source = inspect.getsource(test_runner.build_tools)
+    for tool_name in ("run_suite", "run_single", "run_n_times", "get_coverage"):
+        body = source.split(f"async def {tool_name}(", 1)[1].split("\n    @tool(", 1)[0]
+        assert "_selector_refusal(" in body, f"{tool_name} does not contain its selector"
+
+
+@pytest.mark.parametrize("tool_name", ["run_single", "run_n_times"])
+async def test_a_test_id_may_not_be_a_pytest_option(tools, tool_name):
+    args = {"test_id": "-o=addopts=-p evil"}
+    if tool_name == "run_n_times":
+        args["n"] = 1
+    result = await tools[tool_name](args)
+    assert result["isError"]
+    assert "may not start with '-'" in result["content"][0]["text"]
+
+
+async def test_a_test_id_outside_the_repo_is_refused(tools, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "test_evil.py").write_text("def test_evil():\n    assert True\n")
+    result = await tools["run_single"]({"test_id": "../outside/test_evil.py::test_evil"})
+    assert result["isError"]
+    assert "outside the repository" in result["content"][0]["text"]
+
+
 async def test_run_suite_rejects_an_absurd_timeout(tools):
     result = await tools["run_suite"]({"timeout_s": 5000})
     assert result["isError"]

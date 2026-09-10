@@ -221,7 +221,7 @@ def _default_fixture(ctx: ToolContext) -> str:
 
 def _load_compose(path: Path) -> dict[str, Any]:
     try:
-        doc = yaml.safe_load(path.read_text()) or {}
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
         return {}
     return doc if isinstance(doc, dict) else {}
@@ -336,7 +336,7 @@ def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
     if not path.exists():
         return dict(default)
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return dict(default)
     return doc if isinstance(doc, dict) else dict(default)
@@ -344,7 +344,7 @@ def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _read_flags(ctx: ToolContext) -> dict[str, Any]:

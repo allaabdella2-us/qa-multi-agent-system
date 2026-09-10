@@ -126,7 +126,7 @@ def _read_spec(ref: str, target_root: Path) -> tuple[dict[str, Any] | None, str 
     if not path.exists():
         return None, f"no such spec file: {path}"
     try:
-        doc = yaml.safe_load(path.read_text())
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         return None, f"could not parse {path}: {exc}"
     return (doc, None) if isinstance(doc, dict) else (None, f"{path} does not contain an OpenAPI object")
@@ -915,7 +915,7 @@ def build_tools(ctx: ToolContext) -> list:
         out_dir.mkdir(parents=True, exist_ok=True)
         filename = f"test_contract_{_identifier(method, path)}.py"
         target = out_dir / filename
-        target.write_text(source)
+        target.write_text(source, encoding="utf-8")
         uri = ctx.store.put_artifact(filename, source)
         ctx.store.log("contract_test", agent=ctx.agent.name, endpoint=f"{method} {path}", path=str(target))
 

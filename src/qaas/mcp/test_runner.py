@@ -161,6 +161,47 @@ def _resolve_cwd(ctx: ToolContext, raw: str | None) -> tuple[Path | None, str | 
     return resolved, None
 
 
+def _selector_refusal(ctx: ToolContext, cwd: Path, selector: str) -> str | None:
+    """Why this selector may not reach pytest, if it may not.
+
+    `cwd` was resolved and contained two lines above every call site; the
+    selector beside it was not, and it is the argument that decides what runs.
+    Two holes, both reachable from one tool call:
+
+      * Selectors are appended to pytest's argv with no `--` separator, so one
+        beginning with `-` is parsed as an *option*. `-p`, `-c`, `--rootdir=`
+        and `-o addopts=...` each load code of the caller's choosing.
+      * A path-shaped selector was passed to the collector unchecked, so
+        `run_suite({"selector": "../outside"})` collected and **executed**
+        modules outside the target root. Under `qaas run --repo <url>` the
+        sibling of that root is `.qaas/targets/`, holding every other clone.
+
+    Resolution happens before the containment test, so `..` and a symlink out of
+    the checkout are caught by the same check — the reasoning `_resolve_cwd`
+    already records.
+    """
+    if selector.startswith("-"):
+        return (
+            f"selector '{selector}' may not start with '-': pytest reads it as an "
+            "option rather than a test to run. Name a path, a nodeid, or a -k "
+            "expression without a leading dash."
+        )
+    root = ctx.target_root.resolve()
+    resolved = _selector_head(cwd, selector)
+    if resolved.exists() and not resolved.is_relative_to(root):
+        return (
+            f"selector '{selector}' resolves to {resolved}, outside the repository "
+            f"({root}). Tests are run from inside the checkout, never beside it."
+        )
+    return None
+
+
+def _selector_head(cwd: Path, selector: str) -> Path:
+    """The filesystem part of a selector ('tests/x.py::test_y' -> 'tests/x.py')."""
+    head = Path(selector.split("::", 1)[0])
+    return (head if head.is_absolute() else cwd / head).resolve()
+
+
 def _timeout(args: dict[str, Any]) -> tuple[int, str | None]:
     raw = args.get("timeout_s")
     if raw is None:
@@ -201,7 +242,7 @@ def _base_argv(selectors: list[str], json_report_path: Path | None) -> list[str]
 def _parse_json_report(path: Path) -> list[dict[str, Any]] | None:
     """Per-test rows from pytest-json-report, or None if it wrote nothing usable."""
     try:
-        report = json.loads(path.read_text())
+        report = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     raw_tests = report.get("tests")
@@ -412,8 +453,11 @@ def build_tools(ctx: ToolContext) -> list:
             # A selector that names something on disk is a path; anything else is
             # a -k expression. Guessing wrong wastes a run, so the check is a
             # filesystem question, not a syntax one.
-            head = selector.split("::", 1)[0]
-            selectors = [selector] if (cwd / head).exists() else ["-k", selector]
+            refusal = _selector_refusal(ctx, cwd, selector)
+            if refusal:
+                return err(refusal)
+            head = _selector_head(cwd, selector)
+            selectors = [selector] if head.exists() else ["-k", selector]
 
         proc, rows, parser = await _pytest(cwd, selectors, timeout_s)
         if not proc.started:
@@ -469,6 +513,9 @@ def build_tools(ctx: ToolContext) -> list:
         test_id = str(args["test_id"]).strip()
         if not test_id:
             return err("test_id is required.")
+        refusal = _selector_refusal(ctx, cwd, test_id)
+        if refusal:
+            return err(refusal)
 
         proc, rows, parser = await _pytest(cwd, [test_id], timeout_s)
         if not proc.started:
@@ -520,6 +567,9 @@ def build_tools(ctx: ToolContext) -> list:
         test_id = str(args["test_id"]).strip()
         if not test_id:
             return err("test_id is required.")
+        refusal = _selector_refusal(ctx, cwd, test_id)
+        if refusal:
+            return err(refusal)
         try:
             n = int(args["n"])
         except (TypeError, ValueError):
@@ -641,8 +691,11 @@ def build_tools(ctx: ToolContext) -> list:
         selector = (args.get("selector") or "").strip()
         selectors: list[str] = []
         if selector:
-            head = selector.split("::", 1)[0]
-            selectors = [selector] if (cwd / head).exists() else ["-k", selector]
+            refusal = _selector_refusal(ctx, cwd, selector)
+            if refusal:
+                return err(refusal)
+            head = _selector_head(cwd, selector)
+            selectors = [selector] if head.exists() else ["-k", selector]
 
         with tempfile.TemporaryDirectory(prefix="qaas-coverage-") as tmp:
             data_file = Path(tmp) / ".coverage"
@@ -671,7 +724,7 @@ def build_tools(ctx: ToolContext) -> list:
                     + (_tail(report) or _tail(run) or "no output")
                 )
             try:
-                data = json.loads(json_file.read_text())
+                data = json.loads(json_file.read_text(encoding="utf-8"))
             except ValueError as exc:
                 return err(f"coverage report was not valid JSON: {exc}")
 

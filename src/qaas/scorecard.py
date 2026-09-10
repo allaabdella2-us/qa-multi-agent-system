@@ -77,7 +77,7 @@ class GoldenLedger:
 
     @classmethod
     def load(cls, path: Path | str) -> "GoldenLedger":
-        raw = yaml.safe_load(Path(path).read_text())
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         return cls(
             defects=[_golden(d) for d in raw.get("defects", [])],
             not_defects=[_planted(d) for d in raw.get("not_defects", [])],

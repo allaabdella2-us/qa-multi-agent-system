@@ -295,3 +295,50 @@ def test_build_vcs_selects_by_config_value(repo):
     assert isinstance(build_vcs("github", repo), GitHubVcs)
     with pytest.raises(ValueError):
         build_vcs("perforce", repo)
+
+
+# -- the doors must agree ---------------------------------------------------
+
+
+async def test_write_file_honours_the_forbidden_classes_that_edit_honours(repo, tmp_path):
+    """`_path_refusal` never checked `forbidden_paths`; `_check_write` always did.
+
+    MENDER may write under `api/app` — so the sandbox check passes — while
+    `api/app/auth.py` is a §8.2 forbidden class. The two doors disagreed: `Edit`
+    was refused and `mcp__vcs__write_file` wrote the file. Asserting both here
+    is the point; either alone would have passed throughout the bug.
+    """
+    from qaas.guardrails import Guardrail
+
+    (repo / "api" / "app").mkdir(parents=True)
+    (repo / "api" / "app" / "auth.py").write_text("SECRET = 1\n")
+    ctx = make_ctx("MENDER", repo, tmp_path)
+    ctx.agent.policy.branch_patterns = ["*"]
+
+    edit = Guardrail(ctx).check("Edit", {"file_path": "api/app/auth.py"})
+    assert not edit.allowed
+    assert "autonomy envelope" in edit.reason
+
+    tools = handlers(build_tools(ctx))
+    result = await tools["write_file"]({"path": "api/app/auth.py", "content": "pwned"})
+
+    assert result["isError"]
+    assert "autonomy envelope" in result["content"][0]["text"]
+    assert (repo / "api" / "app" / "auth.py").read_text() == "SECRET = 1\n"
+
+
+async def test_a_glob_write_path_still_resolves_through_the_shared_check(repo, tmp_path):
+    """The vcs server honoured globs in `write_paths` and the guardrail did not.
+
+    Delegating to the guardrail would have silently narrowed this, so the glob
+    support moved with it.
+    """
+    from qaas.guardrails import Guardrail
+
+    ctx = make_ctx("FORGE", repo, tmp_path)
+    ctx.agent.policy.write_paths = ["qa/*/generated/*"]
+    (repo / "qa" / "repro" / "generated").mkdir(parents=True)
+
+    guard = Guardrail(ctx)
+    assert guard.check("Write", {"file_path": "qa/repro/generated/test_x.py"}).allowed
+    assert not guard.check("Write", {"file_path": "qa/repro/other/test_x.py"}).allowed

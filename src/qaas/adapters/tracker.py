@@ -207,12 +207,12 @@ class LocalTracker(TrackerAdapter):
         return self.dir / f"{key}.json"
 
     def _write(self, issue: Issue) -> Issue:
-        self._path(issue.key).write_text(issue.model_dump_json(indent=2))
+        self._path(issue.key).write_text(issue.model_dump_json(indent=2), encoding="utf-8")
         return issue
 
     def get(self, key: str) -> Issue | None:
         path = self._path(key)
-        return Issue.model_validate_json(path.read_text()) if path.exists() else None
+        return Issue.model_validate_json(path.read_text(encoding="utf-8")) if path.exists() else None
 
     def _require(self, key: str) -> Issue:
         issue = self.get(key)
@@ -224,7 +224,7 @@ class LocalTracker(TrackerAdapter):
         found = []
         for path in self.dir.glob("*.json"):
             if _KEY_RE.match(path.stem):
-                found.append(Issue.model_validate_json(path.read_text()))
+                found.append(Issue.model_validate_json(path.read_text(encoding="utf-8")))
         return sorted(found, key=lambda i: i.number)
 
     def _next_key(self, project: str) -> str:
@@ -568,6 +568,43 @@ def _label_slug(value: str | None) -> str | None:
     return slug or None
 
 
+class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """Drop `Authorization` when a redirect leaves the site it was minted for.
+
+    urllib strips credentials across hosts only for the auth *handlers*. A
+    header set by hand on the `Request` — which is how every call here sends
+    `Basic <email:api_token>` — is copied onto the redirected request verbatim:
+    `HTTPRedirectHandler.redirect_request` filters out `content-length` and
+    `content-type` and nothing else.
+
+    That matters because `_resolve_url` deliberately follows Jira's redirects to
+    learn where a board actually lives, and it runs at the top of every
+    Jira-backed run via `cli._ensure_board`. On an SSO-enforced site
+    `/secure/RapidBoard.jspa?rapidView=<id>` answers 302 to the identity
+    provider — a different host — and the bot's API token went with it. The same
+    exposure sits on `_request`, which follows redirects too; both share this
+    one opener, so both are fixed here rather than at either call site.
+
+    Scheme counts as well as host: an https -> http redirect would put the token
+    on the wire in clear.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        before = urllib.parse.urlsplit(req.full_url)
+        after = urllib.parse.urlsplit(new.full_url)
+        if (before.hostname, before.scheme) != (after.hostname, after.scheme):
+            # `Request.headers` is capitalised; `unredirected_hdrs` holds the
+            # ones urllib adds itself. Clear from both so nothing puts it back.
+            new.headers = {k: v for k, v in new.headers.items() if k.lower() != "authorization"}
+            new.unredirected_hdrs = {
+                k: v for k, v in new.unredirected_hdrs.items() if k.lower() != "authorization"
+            }
+        return new
+
+
 @dataclass(frozen=True)
 class BoardInfo:
     """What a per-repository board provisioning attempt produced.
@@ -664,7 +701,8 @@ class JiraTracker(TrackerAdapter):
         self.timeout = timeout
         # Built once, at construction, so proxy settings are read from the
         # environment the tracker was configured in rather than per call.
-        self._opener = urllib.request.build_opener()
+        # `_StripAuthOnRedirect` is not optional: see its docstring.
+        self._opener = urllib.request.build_opener(_StripAuthOnRedirect)
         self._link_type_cache: list[dict[str, Any]] | None = None
         self._account_id_cache: str | None = None
 

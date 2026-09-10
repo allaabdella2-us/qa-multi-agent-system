@@ -148,14 +148,14 @@ class RunStore:
         # rejects: an unknown kind raises here rather than appending a line no
         # reader will ever ask for.
         entry = LedgerEntry(kind=kind, agent=agent, detail=detail)
-        with self.ledger_path.open("a") as fh:
+        with self.ledger_path.open("a", encoding="utf-8") as fh:
             fh.write(entry.model_dump_json() + "\n")
         return entry
 
     def ledger(self, kind: LedgerKind | str | None = None) -> Iterator[LedgerEntry]:
         if not self.ledger_path.exists():
             return
-        for line in self.ledger_path.read_text().splitlines():
+        for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             entry = LedgerEntry.model_validate_json(line)
@@ -169,7 +169,7 @@ class RunStore:
         if envelope.dedupe.fingerprint is None:
             envelope = envelope.with_fingerprint()
         path = self.dir / "envelopes" / f"{envelope.id}.json"
-        path.write_text(envelope.to_json())
+        path.write_text(envelope.to_json(), encoding="utf-8")
         self.log(
             "envelope",
             agent=envelope.discovered_by,
@@ -183,11 +183,11 @@ class RunStore:
 
     def envelopes(self) -> list[DefectEnvelope]:
         paths = sorted((self.dir / "envelopes").glob("*.json"))
-        return [DefectEnvelope.from_json(p.read_text()) for p in paths]
+        return [DefectEnvelope.from_json(p.read_text(encoding="utf-8")) for p in paths]
 
     def get_envelope(self, envelope_id: str) -> DefectEnvelope | None:
         path = self.dir / "envelopes" / f"{envelope_id}.json"
-        return DefectEnvelope.from_json(path.read_text()) if path.exists() else None
+        return DefectEnvelope.from_json(path.read_text(encoding="utf-8")) if path.exists() else None
 
     # -- artifacts --------------------------------------------------------
 
@@ -198,7 +198,7 @@ class RunStore:
         if isinstance(content, bytes):
             path.write_bytes(content)
         else:
-            path.write_text(content)
+            path.write_text(content, encoding="utf-8")
         return f"artifact://{self.run_id}/{safe}"
 
     def copy_artifact(self, name: str, source: Path | str) -> str:
@@ -226,7 +226,7 @@ class RunStore:
         # under-reports by however much the repeated agents actually spent.
         existing = len(list((self.dir / "results").glob(f"{result.agent}-*.json")))
         path = self.dir / "results" / f"{result.agent}-{existing + 1:02d}.json"
-        path.write_text(result.model_dump_json(indent=2))
+        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
         self.log(
             "agent_finished",
             agent=result.agent,
@@ -239,7 +239,7 @@ class RunStore:
 
     def results(self) -> list[AgentResult]:
         paths = sorted((self.dir / "results").glob("*.json"))
-        return [AgentResult.model_validate_json(p.read_text()) for p in paths]
+        return [AgentResult.model_validate_json(p.read_text(encoding="utf-8")) for p in paths]
 
     def total_cost_usd(self) -> float:
         return sum(r.cost_usd for r in self.results())
@@ -264,22 +264,22 @@ class SystemMapStore:
         path = self.dir / f"{version}.json"
         if path.exists():
             raise RuntimeError(f"system map version {version} already exists")
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         tmp = self.dir / "latest.tmp"
-        tmp.write_text(version)
+        tmp.write_text(version, encoding="utf-8")
         os.replace(tmp, self.dir / "latest")
         return version
 
     def latest_version(self) -> str | None:
         pointer = self.dir / "latest"
-        return pointer.read_text().strip() if pointer.exists() else None
+        return pointer.read_text(encoding="utf-8").strip() if pointer.exists() else None
 
     def get(self, version: str | None = None) -> dict[str, Any] | None:
         version = version or self.latest_version()
         if not version:
             return None
         path = self.dir / f"{version}.json"
-        return json.loads(path.read_text()) if path.exists() else None
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
     def versions(self) -> list[str]:
         return sorted(p.stem for p in self.dir.glob("*.json"))

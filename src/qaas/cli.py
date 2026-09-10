@@ -224,7 +224,7 @@ def _write_profile(profile, out: Path) -> None:
         "# Target profile. Everything here was guessed by inspection — review it.\n"
         "# Credentials never belong in this file: reference environment variables.\n\n"
         + _yaml.safe_dump(payload, sort_keys=False, width=88)
-    )
+    , encoding="utf-8")
 
 
 def _provision_target(
@@ -338,15 +338,15 @@ def init(
     system_yaml = project_config / "system.yaml"
     if not system_yaml.exists():
         shipped = Workspace.resolve().config_file("system.yaml")
-        base = shipped.read_text() if shipped else "project: qaas\n"
+        base = shipped.read_text(encoding="utf-8") if shipped else "project: qaas\n"
         system_yaml.write_text(
             _activate_target(base, target_name)
             if shipped
             else f"project: qaas\ntarget: {target_name}\n"
-        )
+        , encoding="utf-8")
         wrote_system = True
     else:
-        system_yaml.write_text(_activate_target(system_yaml.read_text(), target_name))
+        system_yaml.write_text(_activate_target(system_yaml.read_text(encoding="utf-8"), target_name))
         wrote_system = False
 
     # `.qaas/` now holds a user's committed config next to their disposable run
@@ -358,7 +358,7 @@ def init(
             "# Run state: regenerated every run, never worth committing.\n"
             "runs/\ntickets/\ngenerated/\nsystem-map/\nmemory.db\nartifacts/\n"
             "\n# config/ is NOT ignored -- it is yours, and it is the point.\n"
-        )
+        , encoding="utf-8")
 
     console.print(f"\n[green]wrote {out}[/green]")
     console.print(
@@ -720,7 +720,7 @@ def prompts_list(config_dir: Path | None = ConfigDir) -> None:
         SHARED_PROMPT,
         _prompt_origin(shared, ws) if shared else "[red]missing[/red]",
         "-",
-        str(len(shared.read_text())) if shared else "-",
+        str(len(shared.read_text(encoding="utf-8"))) if shared else "-",
     )
     console.print(table)
 
@@ -767,7 +767,7 @@ def prompts_eject(
             skipped.append(dest)
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(src.read_text())
+        dest.write_text(src.read_text(encoding="utf-8"))
         written.append(dest)
 
     for path in written:
@@ -815,8 +815,8 @@ def prompts_diff(
         if in_force is not None and packaged.is_file() and in_force != packaged.resolve():
             diff = list(
                 difflib.unified_diff(
-                    packaged.read_text().splitlines(),
-                    in_force.read_text().splitlines(),
+                    packaged.read_text(encoding="utf-8").splitlines(),
+                    in_force.read_text(encoding="utf-8").splitlines(),
                     fromfile=f"packaged/{filename}",
                     tofile=str(in_force),
                     lineterm="",
@@ -839,7 +839,7 @@ def prompts_diff(
             changed += 1
             console.print(f"\n[bold]{label}[/bold] [dim]+ {append_name(filename)}[/dim]")
             console.print(f"--- {path}", markup=False, highlight=False)
-            for line in path.read_text().splitlines():
+            for line in path.read_text(encoding="utf-8").splitlines():
                 console.print(f"+{line}", style="green", markup=False, highlight=False)
 
     if not changed:

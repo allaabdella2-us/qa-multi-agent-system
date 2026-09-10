@@ -1,5 +1,9 @@
 """M0 verification: run state persists, and the ledger is a real audit trail."""
 
+import os
+import subprocess
+import sys
+
 import pytest
 
 from qaas.envelope import DefectEnvelope, Domain, Severity
@@ -120,3 +124,41 @@ def test_different_agents_are_still_distinguishable(store):
     store.put_result(AgentResult(agent="FORGE", cost_usd=1.0))
     store.put_result(AgentResult(agent="CLERK", cost_usd=0.5))
     assert {r.agent for r in store.results()} == {"FORGE", "CLERK"}
+
+
+# -- the ledger must survive the environment it runs in ---------------------
+
+
+def test_a_denial_reason_round_trips_under_an_ascii_default_encoding(tmp_path):
+    """Every guardrail denial contains `§` and `—`, and the writer named no encoding.
+
+    `trace.py` reads the ledger as utf-8; `RunStore.log` wrote it in whatever the
+    locale said. Where that resolves to ASCII, the first denial raised
+    `UnicodeEncodeError` from inside `Guardrail.pre_tool_use` — the *primary*
+    enforcement point — so the turn died instead of the agent being told why it
+    was refused.
+
+    It has to be a subprocess: the interpreter fixes its default encoding at
+    startup, so setting the environment inside the test proves nothing. And it
+    has to be `PYTHONUTF8=0` as well as `LC_ALL=C`, because PEP 540 coerces a
+    bare C locale to UTF-8 mode and hides the bug. What is left is an honest
+    stand-in for the environments where it does bite: an explicitly disabled
+    UTF-8 mode, or a locale that is neither C nor UTF-8.
+    """
+    script = (
+        "from qaas.store import RunStore\n"
+        "store = RunStore.new(root=__import__('pathlib').Path(%r))\n"
+        "reason = \"api/app/auth.py is outside the envelope (\\u00a78.2) \\u2014 escalate.\"\n"
+        "store.log('denial', agent='MENDER', tool='Edit', reason=reason)\n"
+        "back = list(store.ledger('denial'))\n"
+        "assert back and back[0].detail['reason'] == reason, back\n"
+        "print('ok')\n"
+    ) % str(tmp_path)
+
+    env = {**os.environ, "PYTHONUTF8": "0", "LC_ALL": "C", "LANG": "C"}
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "ok" in proc.stdout

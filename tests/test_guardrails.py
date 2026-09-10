@@ -493,3 +493,111 @@ def test_the_sdk_subprocess_is_started_in_the_target(tmp_path):
     options = build_options(cfg.agents["CONDUIT"], ctx)
     assert options.cwd == str(target)
     assert options.setting_sources == []
+
+
+# -- the shell is not a way round the write matrix --------------------------
+
+
+def _guard(agent_name: str, tmp_path: Path, **policy: object):
+    cfg = load_config(search=CONFIG_SEARCH)
+    spec = cfg.agents[agent_name].model_copy(deep=True)
+    for field, value in policy.items():
+        setattr(spec.policy, field, value)
+    ctx = ToolContext(
+        store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
+        config=cfg, agent=spec, target_root=TARGET,
+    )
+    return Guardrail(ctx)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i '' s/x/y/ api/app/main.py",
+        "echo pwned > api/app/main.py",
+        "echo pwned >> api/app/main.py",
+        "tee /etc/hosts < x",
+        "cp /etc/passwd api/app/leak.py",
+        "mv /tmp/x api/app/main.py",
+        "touch api/app/new.py",
+        "python -c 'open(\"/tmp/x\",\"w\").write(\"1\")'",
+        "ls && echo pwned > api/app/main.py",
+        "patch -p1 < /tmp/evil.patch",
+    ],
+)
+def test_a_read_only_agent_cannot_write_through_the_shell(tmp_path, command):
+    """PROOF holds Bash and no write_paths, so it was read-only only against Write.
+
+    That is the verification gate editing the source it is verifying — §2's
+    finder/fixer separation, gone through a door nobody was watching.
+    """
+    decision = _guard("PROOF", tmp_path).check("Bash", {"command": command})
+    assert not decision.allowed, command
+    assert "read-only" in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("sed -i '' s/x/y/ api/app/auth.py", "autonomy envelope"),
+        ("echo x > api/app/auth.py", "autonomy envelope"),
+        ("echo x > .github/workflows/ci.yml", "autonomy envelope"),
+        ("echo x > /etc/hosts", "sandbox"),
+        ("cp /tmp/x ../elsewhere.py", "sandbox"),
+    ],
+)
+def test_a_write_capable_agent_gets_the_same_answer_through_the_shell(tmp_path, command, expected):
+    """MENDER may write under api/app; auth.py inside it is still a §8.2 class."""
+    decision = _guard("MENDER", tmp_path).check("Bash", {"command": command})
+    assert not decision.allowed, command
+    assert expected in decision.reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i '' s/x/y/ web/src/App.tsx",
+        "echo VALUE = 1 > api/app/service.py",
+        "pytest -q tests/",
+        "pytest -q > /dev/null 2>&1",
+        "git status && ls -la",
+        "grep -rn TODO api/ | head -20",
+        "python -m pytest tests/",
+    ],
+)
+def test_ordinary_and_permitted_commands_still_run(tmp_path, command):
+    """The guard must not cost an agent the shell it legitimately needs.
+
+    `> /dev/null` and `2>&1` are the two that a naive redirect check breaks.
+    """
+    assert _guard("MENDER", tmp_path).check("Bash", {"command": command}).allowed, command
+
+
+def test_a_shell_write_it_cannot_read_is_refused_not_waved_through(tmp_path):
+    """Command parsing is best-effort, so the fallback has to be refusal.
+
+    An inline interpreter script can write anywhere and no parser can say where,
+    which is exactly when guessing is worst. The reason names Write/Edit, so the
+    enforced path is also the easy one.
+    """
+    decision = _guard("MENDER", tmp_path).check(
+        "Bash", {"command": "python -c 'open(\"/etc/hosts\",\"w\")'"}
+    )
+    assert not decision.allowed
+    assert "Use Write or Edit" in decision.reason
+
+
+def test_the_shell_counts_against_the_same_diff_budget(tmp_path):
+    """§8.2 caps files per run; a sed did not count and an Edit did."""
+    guard = _guard("MENDER", tmp_path, max_diff_files=2)
+    assert guard.check("Bash", {"command": "echo a > api/app/one.py"}).allowed
+    assert guard.check("Bash", {"command": "echo b > api/app/two.py"}).allowed
+    third = guard.check("Bash", {"command": "echo c > api/app/three.py"})
+    assert not third.allowed
+    assert "limit of 2" in third.reason
+
+
+@pytest.mark.parametrize("command", ["rm -R build", "rm --recursive build", "rm --force x"])
+def test_the_long_forms_of_a_recursive_delete_are_refused_too(tmp_path, command):
+    """`-[a-zA-Z]*[rf]` matched `-rf` and missed every spelled-out equivalent."""
+    assert not _guard("MENDER", tmp_path).check("Bash", {"command": command}).allowed

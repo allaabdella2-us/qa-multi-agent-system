@@ -251,7 +251,7 @@ def load_target(name: str, targets_dir: Path | str = "config/targets") -> Target
             f"Available: {', '.join(available) or 'none'}. "
             "Create one with `qaas init <path-to-repo>`."
         )
-    raw: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
+    raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     raw.setdefault("name", name)
     return TargetProfile.model_validate(raw)
 

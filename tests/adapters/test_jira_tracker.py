@@ -1307,3 +1307,50 @@ def test_an_unreadable_project_style_does_not_stop_the_board_attempt(tracker, st
     stub.route("GET", f"{API}/project/CORVID", (500, {"errorMessages": ["boom"]}))
 
     assert tracker.ensure_repo_board("claude-code-training").board_id == 42
+
+
+# -- the credential must not leave the site it was minted for ---------------
+
+
+def test_a_cross_host_redirect_does_not_carry_the_api_token(tracker, stub):
+    """`_resolve_url` follows redirects on purpose, and runs on every Jira run.
+
+    urllib strips credentials across hosts only for its auth *handlers*; a header
+    set by hand on the Request — which is how this adapter sends `Basic
+    <email:token>` — is copied onto the redirected request verbatim. On an
+    SSO-enforced site the board URL 302s to the identity provider, and the bot's
+    token went with it.
+
+    `localhost` and `127.0.0.1` are the same socket and different hostnames,
+    which is exactly the distinction the handler makes.
+    """
+    port = stub.base_url.rsplit(":", 1)[1]
+    stub.route(
+        "GET", "/secure/RapidBoard.jspa",
+        (302, {}, {"Location": f"http://localhost:{port}/idp/authorize"}),
+    )
+    stub.route("GET", "/idp/authorize", (200, {}))
+
+    tracker._resolve_url(f"{stub.base_url}/secure/RapidBoard.jspa?rapidView=42")
+
+    first = stub.calls("GET", "/secure/RapidBoard.jspa")[0]
+    assert "authorization" in first.headers, "the first hop is authenticated, as it must be"
+
+    hop = stub.calls("GET", "/idp/authorize")
+    assert hop, "the redirect was not followed, so this proves nothing"
+    assert "authorization" not in hop[0].headers
+
+
+def test_a_same_host_redirect_keeps_the_credential(tracker, stub):
+    """Jira's own redirects are the point of following them; they must still work."""
+    stub.route(
+        "GET", "/secure/RapidBoard.jspa",
+        (302, {}, {"Location": f"{stub.base_url}/jira/software/c/projects/CORVID/boards/42"}),
+    )
+    stub.route("GET", "/jira/software/c/projects/CORVID/boards/42", (200, {}))
+
+    resolved = tracker._resolve_url(f"{stub.base_url}/secure/RapidBoard.jspa?rapidView=42")
+
+    hop = stub.calls("GET", "/jira/software/c/projects/CORVID/boards/42")
+    assert hop and "authorization" in hop[0].headers
+    assert resolved and resolved.endswith("/boards/42")

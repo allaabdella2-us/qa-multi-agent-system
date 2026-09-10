@@ -268,6 +268,63 @@ def test_a_ref_may_not_smuggle_in_an_option(fake_gh, clone):
         GitHubVcs(clone).list_changed_files("main", "--jq=.")
 
 
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "fix/PROJ-1284:main",
+        "fix/PROJ-1284:refs/heads/main",
+        "+fix/PROJ-1284:main",
+        "fix/PROJ-1284:master",
+    ],
+)
+def test_push_refuses_a_branch_that_is_really_a_refspec(fake_gh, clone, tmp_path, branch):
+    """`git push origin <x>` parses <x> as a refspec, not as a name.
+
+    Every gate on this path saw a string that was neither `main` nor outside the
+    agent's patterns — `fnmatch("fix/PROJ-1284:main", "fix/*")` is True and
+    `is_protected_head` tested the whole string — while git pushed the local
+    branch onto the remote's main. The assertion that matters is not the
+    exception: it is that origin's main is still where it was.
+    """
+    origin = tmp_path / "origin.git"
+    before = git(origin, "rev-parse", "refs/heads/main").strip()
+
+    with pytest.raises(VcsError, match="refspec|forced update"):
+        GitHubVcs(clone).push(branch)
+
+    assert git(origin, "rev-parse", "refs/heads/main").strip() == before
+
+
+def test_push_states_its_destination_rather_than_letting_git_infer_one(fake_gh, clone, tmp_path):
+    """The refspec is fully qualified on both sides, and only the head moves."""
+    origin = tmp_path / "origin.git"
+    main_before = git(origin, "rev-parse", "refs/heads/main").strip()
+
+    assert GitHubVcs(clone).push() == "fix/PROJ-1284"
+
+    assert git(origin, "rev-parse", "refs/heads/main").strip() == main_before
+    assert "fix/PROJ-1284" in git(origin, "branch", "--list")
+
+
+def test_a_diff_ref_may_not_smuggle_in_an_option(clone, tmp_path):
+    """`git diff --output=<path>` exits 0 and writes the file it names.
+
+    `pr_diff` and `list_changed_files` already refused a flag-like ref; `diff`,
+    the one tool documented "read-only", did not — and ARBITER holds it with a
+    policy that grants no write access at all.
+    """
+    target = tmp_path / "pwned"
+    with pytest.raises(VcsError, match="may not start with"):
+        LocalGit(clone).diff(f"--output={target}")
+    assert not target.exists()
+
+
+def test_a_branch_start_point_may_not_smuggle_in_an_option(clone):
+    """`name` had two validators; `from_ref`, sitting beside it in argv, had none."""
+    with pytest.raises(VcsError, match="may not start with"):
+        LocalGit(clone).create_branch("qa/repro/x", from_ref="--upload-pack=touch /tmp/pwned")
+
+
 # -- the capabilities that must not exist -----------------------------------
 
 

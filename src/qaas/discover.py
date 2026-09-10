@@ -119,7 +119,7 @@ def inspect(root: Path) -> Discovery:
                 if language == "node" and (directory / "package.json").exists():
                     # package.json alone says nothing; the dependencies do.
                     try:
-                        pkg = (directory / "package.json").read_text()
+                        pkg = (directory / "package.json").read_text(encoding="utf-8")
                     except OSError:
                         pkg = ""
                     if FRONTEND_HINTS.search(pkg):

@@ -18,9 +18,12 @@ Three rules the tools below exist to keep:
     publishing a branch to a shared remote exposes the same work the PR would.
     There is no merge tool: §8.4 makes merging a human act.
 
-This duplicates part of `qaas.guardrails`, which gates the built-in Write/Edit/
-Bash tools. That is intentional: the two see different call paths, and the
-guardrail never sees an MCP tool's arguments.
+The guardrail never sees an MCP tool's arguments, so this module is where the
+matrix is applied to them — but it does not restate it. `_path_refusal` calls
+`Guardrail._check_path`, the same function that answers for Write and Edit.
+It used to hold a near-copy instead, and the copy had drifted: it had never
+learned about `forbidden_paths`, so `write_file` on `api/app/auth.py` was
+allowed at the exact moment `Edit` on it was refused.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from qaas.adapters.vcs import VcsAdapter, VcsError, build_vcs
+from qaas.guardrails import Guardrail
 from qaas.mcp.context import ToolContext, err, ok
 
 # Refused for every agent regardless of policy. A policy that names one of these
@@ -104,45 +108,36 @@ def _path_refusal(ctx: ToolContext, raw: str) -> tuple[Path | None, str | None]:
 
     Resolution happens before the containment check so `..`, an absolute path
     and a symlink pointing out of the sandbox are all caught by the same test.
-    """
-    policy = ctx.agent.policy
-    if not policy.write_paths:
-        return None, (
-            f"{ctx.agent.name} is read-only: its policy declares no write paths. "
-            "Report what you found; fixing is another agent's job (§2)."
-        )
 
+    The *verdict* comes from `Guardrail._check_path` — the same code that answers
+    for `Write` and `Edit`. This used to be a near-copy of it, and the copy had
+    drifted: it honoured `write_paths` and `protected_paths` and had never
+    learned about `forbidden_paths`, so `mcp__vcs__write_file` wrote
+    `api/app/auth.py` happily while `Edit` on that path was refused as outside
+    the §8.2 autonomy envelope. One rule cannot be true at one door and false at
+    another; the way to guarantee that is to have one implementation.
+
+    `Guardrail.check` is deliberately not what is called here: it would also run
+    `_check_declared("Write")`, and an agent holding this server need not carry
+    the `Write` builtin at all — it would be refused for a reason that is not
+    the true one.
+    """
     root = ctx.target_root.resolve()
     candidate = Path(raw)
     resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
 
+    # Kept here rather than deferred: this message names the checkout, which is
+    # the useful thing to say about a path that left it.
     if resolved != root and not resolved.is_relative_to(root):
         return None, (
             f"write refused: '{raw}' resolves to {resolved}, outside the repository "
             f"({root}). Paths must stay inside the checkout."
         )
 
-    relative = resolved.relative_to(root).as_posix()
-    for protected in policy.protected_paths:
-        if fnmatch.fnmatch(relative, protected) or relative.startswith(protected.rstrip("/") + "/"):
-            return None, (
-                f"write refused: '{relative}' is protected. It defines what a fix must "
-                "achieve and may not be edited (§10, symptom fixes)."
-            )
-
-    for allowed in policy.write_paths:
-        if any(ch in allowed for ch in "*?["):
-            if fnmatch.fnmatch(relative, allowed):
-                return resolved, None
-            continue
-        sandbox = (root / allowed).resolve()
-        if resolved == sandbox or resolved.is_relative_to(sandbox):
-            return resolved, None
-
-    return None, (
-        f"write refused: '{relative}' is outside {ctx.agent.name}'s sandbox "
-        f"({', '.join(policy.write_paths)}). Write your repro there instead."
-    )
+    decision = Guardrail(ctx)._check_path(raw)
+    if not decision.allowed:
+        return None, decision.reason
+    return resolved, None
 
 
 def build_tools(ctx: ToolContext) -> list:

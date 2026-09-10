@@ -129,16 +129,21 @@ class LocalGit(VcsAdapter):
         return name or "HEAD"
 
     def create_branch(self, name: str, from_ref: str | None = None) -> str:
-        args = ["checkout", "-b", name]
+        # `from_ref` had no validator of any kind while `name` had two. git
+        # accepts options after positionals, so a start point like
+        # `--upload-pack=...` was a flag in a value's clothing -- the exact
+        # shape `_reject_flaglike` exists to stop, on the one argument nothing
+        # was checking.
+        args = ["checkout", "-b", _reject_refspec("branch", name)]
         if from_ref:
-            args.append(from_ref)
+            args.append(_reject_flaglike("from_ref", from_ref))
         self._git(*args)
         return self.current_branch()
 
     def checkout(self, ref: str) -> str:
         """Switch to an existing ref. Not part of the abstract surface: only the
         local backend has a working tree to switch."""
-        self._git("checkout", ref)
+        self._git("checkout", _reject_flaglike("ref", ref))
         return self.current_branch()
 
     def write_files(self, files: Mapping[str, str]) -> list[str]:
@@ -146,7 +151,7 @@ class LocalGit(VcsAdapter):
         for rel, content in files.items():
             path = self.repo / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
+            path.write_text(content, encoding="utf-8")
             written.append(rel)
         return written
 
@@ -162,9 +167,14 @@ class LocalGit(VcsAdapter):
         return self._git("rev-parse", "HEAD").strip()
 
     def diff(self, ref: str | None = None, paths: Sequence[str] | None = None) -> str:
+        # `ref` reached argv raw while `pr_diff` and `list_changed_files` both
+        # called `_reject_flaglike` on theirs. `git diff --output=<path>` exits 0
+        # and writes the diff to that path, so the one tool documented
+        # "read-only" could create or truncate any file the process can reach --
+        # and ARBITER, whose policy grants no write access at all, holds it.
         args = ["diff"]
         if ref:
-            args.append(ref)
+            args.append(_reject_flaglike("ref", ref))
         if paths:
             args.extend(["--", *paths])
         return self._git(*args)
@@ -218,6 +228,34 @@ def _reject_flaglike(kind: str, value: str) -> str:
         raise VcsError(f"{kind} is required.")
     if text.startswith("-"):
         raise VcsError(f"refusing {kind} '{text}': a ref may not start with '-'.")
+    return text
+
+
+def _reject_refspec(kind: str, value: str) -> str:
+    """Refuse a branch name that git would read as a *refspec* rather than a name.
+
+    `git push origin <x>` parses `<x>` as a refspec, so `qa/repro/x:main` pushes
+    the local branch `qa/repro/x` onto the remote's `main` — while every gate on
+    the way sees a string that is neither `main` nor outside the agent's
+    patterns: `fnmatch("qa/repro/x:main", "qa/repro/*")` is True, and
+    `is_protected_head` tests the whole string. Verified against a real bare
+    remote: exit 0, `qa/repro/x -> main`. A leading `+` is a forced update in the
+    same grammar, which is the other thing this file promises can never happen.
+
+    Git itself forbids `:` in a branch name, so nothing legitimate is lost: the
+    only way one gets here is a caller passing a refspec where a name belongs.
+    """
+    text = _reject_flaglike(kind, value)
+    if ":" in text:
+        raise VcsError(
+            f"refusing {kind} '{text}': a branch name may not contain ':'. "
+            "git would read that as a refspec and push to whatever follows it."
+        )
+    if text.startswith("+"):
+        raise VcsError(
+            f"refusing {kind} '{text}': a leading '+' is a forced update, "
+            "and force-pushing is never permitted (§8.1)."
+        )
     return text
 
 
@@ -299,7 +337,7 @@ class GitHubVcs(LocalGit):
 
     @staticmethod
     def _guard_head(branch: str) -> str:
-        name = _reject_flaglike("branch", branch)
+        name = _reject_refspec("branch", branch)
         if is_protected_head(name):
             raise VcsError(
                 f"refusing to publish '{name}': it is a protected branch (§8.1). "
@@ -317,8 +355,12 @@ class GitHubVcs(LocalGit):
         follow-up `gh pr create` can resolve the head without the agent having
         to know about tracking refs.
         """
-        name = self._guard_head(branch or self.current_branch())
-        self._git("push", "--set-upstream", self.remote, name)
+        name = self._guard_head(branch or self.current_branch()).removeprefix("refs/heads/")
+        # Fully qualified on both sides, so the destination is stated rather than
+        # inferred from a string git is free to re-parse. `_guard_head` already
+        # refuses a `:`; this makes the refspec explicit even if that ever
+        # changes, because the cost of being wrong here is a push to main.
+        self._git("push", "--set-upstream", self.remote, f"refs/heads/{name}:refs/heads/{name}")
         return name
 
     def open_pr(

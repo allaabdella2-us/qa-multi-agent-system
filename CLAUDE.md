@@ -20,7 +20,7 @@ usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (SURFACE) runs
 
-pytest                                   # 688 tests, no API calls, no network
+pytest                                   # 733 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
@@ -147,10 +147,34 @@ silently dead code (this repo had exactly that bug). Primary enforcement is the
 `PreToolUse` hook; `can_use_tool` is a second layer for calls the allowlist did
 not auto-approve. Both call one `check()` so they cannot disagree.
 
+**One `check()` was not enough, because there are more than two doors.** The
+matrix was enforced for `Write`/`Edit` and unenforced for `Bash` and
+`mcp__vcs__*`: `_check_bash` consulted only `FORBIDDEN_BASH`, branch patterns and
+a substring test, so `sed -i` reached what `Write` could not; `check()`
+short-circuits every `mcp__*` call to "is the server declared" without reading
+its arguments, so `mcp/vcs.py`'s own near-copy of the rules was the only gate
+there — and it had never learned about `forbidden_paths`. `Guardrail._check_path`
+is now the single implementation, and all three doors call it. When adding a
+path-taking surface, call it; do not restate it.
+
+Reading a shell command for what it writes is best-effort, so the rule that makes
+it sound is: **a command that mutates and whose destination cannot be resolved is
+refused**, naming `Write`/`Edit` in the reason. Guessing is the one option that
+is not available. `_branch_from_command` only inspects git commands — without
+that it read `python -c` as `switch -c` and refused it as a bad branch name.
+
 `ALWAYS_GRANTED` (ToolSearch, Skill, TodoWrite, Task, Agent) is read by both
 `build_allowed_tools` and the guardrail — a mismatch there silently disables
 every skill. Denying `ToolSearch` breaks MCP access entirely, since MCP tools
 arrive deferred.
+
+Anything an agent supplies that becomes argv is a flag until proven otherwise:
+`_reject_flaglike` refuses a leading `-`, and `_reject_refspec` also refuses `:`
+and a leading `+`, because `git push origin <name>` parses its argument as a
+*refspec* — `qa/repro/x:main` published onto main past every branch-pattern and
+protected-name check. Test-runner selectors reach pytest with no `--` separator,
+so one starting with `-` is an option (`-p`, `-c`, `-o addopts=`), and a
+path-shaped one is contained against `target_root` the way `cwd` already was.
 
 Denials return a reason and are logged to the ledger; they never kill the turn.
 
