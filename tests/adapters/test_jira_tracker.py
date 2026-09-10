@@ -314,7 +314,7 @@ def test_create_issue_posts_adf_to_the_named_project(tracker, stub):
         severity="critical",
         envelope_id="env-1",
         fingerprint="sha256:abc123",
-        reporter="CLERK",
+        reporter="TRIAGE",
     )
     assert isinstance(issue, Issue)
     assert issue.key == "CORVID-1"
@@ -344,9 +344,9 @@ def test_create_issue_posts_adf_to_the_named_project(tracker, stub):
 def test_create_issue_records_the_filing_agent_in_the_body(tracker, stub):
     """Jira sets `reporter` from the credential, so the agent's name must live
     somewhere that stays true."""
-    tracker.create_issue(project="CORVID", title="A defect", body="Repro: x", reporter="CLERK")
+    tracker.create_issue(project="CORVID", title="A defect", body="Repro: x", reporter="TRIAGE")
     text = json.dumps(stub.calls("POST", f"{API}/issue")[0].fields["description"])
-    assert "CLERK" in text
+    assert "TRIAGE" in text
 
 
 def test_create_issue_refuses_an_empty_title_without_calling_jira(tracker, stub):
@@ -451,14 +451,14 @@ def test_transition_resolves_a_status_name_to_an_id(tracker, stub):
     stub.route("POST", f"{API}/issue/CORVID-1/transitions", (204, {}))
     stub.route("POST", f"{API}/issue/CORVID-1/comment", (201, {}))
 
-    tracker.transition("CORVID-1", "done", by="PROOF", comment="test_refund_authz passes")
+    tracker.transition("CORVID-1", "done", by="VERIFIER", comment="test_refund_authz passes")
 
     posted = stub.calls("POST", f"{API}/issue/CORVID-1/transitions")[0]
     assert posted.body == {"transition": {"id": "31"}}
 
     # Who and why: the history is the audit trail (§4.12).
     comment = json.dumps(stub.calls("POST", f"{API}/issue/CORVID-1/comment")[0].body)
-    assert "PROOF" in comment and "test_refund_authz" in comment
+    assert "VERIFIER" in comment and "test_refund_authz" in comment
 
 
 def test_transition_matches_a_house_status_against_a_real_workflow(tracker, stub):
@@ -597,7 +597,7 @@ def test_jiras_own_error_text_is_passed_through(tracker, stub):
 
 
 def jira_ctx(stub, tmp_path: Path, monkeypatch, **env_overrides: str) -> ToolContext:
-    """A CLERK context whose tracker is a Jira pointed at the stub.
+    """A TRIAGE context whose tracker is a Jira pointed at the stub.
 
     The environment is set through monkeypatch so it is torn down with the
     test: leaking JIRA_* into the session would silently change what every
@@ -610,7 +610,7 @@ def jira_ctx(stub, tmp_path: Path, monkeypatch, **env_overrides: str) -> ToolCon
         store=RunStore.new(root=tmp_path / ".qaas"),
         maps=SystemMapStore(root=tmp_path / ".qaas"),
         config=config.model_copy(update={"tracker": "jira"}),
-        agent=config.agents["CLERK"],
+        agent=config.agents["TRIAGE"],
         target_root=REPO_ROOT,
     )
 
@@ -619,7 +619,7 @@ def security_envelope(ctx: ToolContext) -> DefectEnvelope:
     envelope = DefectEnvelope.model_validate(
         {
             "run_id": ctx.store.run_id,
-            "discovered_by": "WARDEN",
+            "discovered_by": "AUDITOR",
             "domain": "security",
             "class": "vulnerability",
             "title": "Refund endpoint accepts any authenticated user",
@@ -732,7 +732,7 @@ def test_a_real_jira_accepts_what_this_adapter_sends():
         body="## Repro\n\n- this ticket was filed by the JiraTracker smoke test\n",
         labels=["agent-found", "qaas-smoke-test"],
         severity="trivial",
-        reporter="CLERK",
+        reporter="TRIAGE",
     )
     assert issue.key.startswith(tracker.default_project)
     assert tracker.get(issue.key) is not None
@@ -1023,9 +1023,9 @@ async def test_dry_run_routes_a_security_finding_to_the_restricted_project(
 async def test_dry_run_transition_and_link_send_nothing(stub, tmp_path, monkeypatch, clean_jira_env):
     monkeypatch.setenv("QAAS_TRACKER_DRY_RUN", "1")
     ctx = jira_ctx(stub, tmp_path, monkeypatch)
-    # PROOF, not CLERK: §8.1 gives the transition right to the agent that
+    # VERIFIER, not TRIAGE: §8.1 gives the transition right to the agent that
     # verifies a fix, and the dry run must not paper over the policy.
-    ctx.agent = load_config(search=CONFIG_SEARCH).agents["PROOF"]
+    ctx.agent = load_config(search=CONFIG_SEARCH).agents["VERIFIER"]
     tools = handlers(build_tools(ctx))
 
     moved = await tools["transition"](
@@ -1359,7 +1359,7 @@ def test_a_same_host_redirect_keeps_the_credential(tracker, stub):
 def test_search_translates_a_house_status_into_the_projects_own(tracker, stub):
     """The `search` tool's schema offers house statuses; Jira validates its own.
 
-    CLERK following that schema to dedupe errored on every call, so dedupe
+    TRIAGE following that schema to dedupe errored on every call, so dedupe
     degraded to nothing and the duplicate ticket the system exists to prevent
     got filed.
     """

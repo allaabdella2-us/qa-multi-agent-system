@@ -135,7 +135,7 @@ async def test_fingerprint_of_an_unknown_envelope_is_a_readable_refusal(tools):
 async def test_a_second_record_increments_rather_than_duplicating(ctx, tools):
     """Two agents finding one defect must leave one row, not two."""
     a = make_envelope(ctx, **REPORT_A)
-    b = make_envelope(ctx, discovered_by="SURFACE", **REPORT_B)
+    b = make_envelope(ctx, discovered_by="BROWSER", **REPORT_B)
     assert a.fingerprint() == b.fingerprint()  # prose differs, structure does not
 
     first = await tools["record"]({"envelope_id": a.id, "ticket_key": "CORVID-1"})
@@ -177,13 +177,13 @@ async def test_get_occurrences_of_an_unknown_fingerprint_refuses(tools):
 
 
 async def test_a_recurrence_after_resolution_is_a_regression_not_a_duplicate(ctx, tools):
-    """The distinction PROOF and CLERK act on: reopen, don't close as duplicate."""
+    """The distinction VERIFIER and TRIAGE act on: reopen, don't close as duplicate."""
     a = make_envelope(ctx, **REPORT_A)
     await tools["record"]({"envelope_id": a.id, "ticket_key": "CORVID-1"})
     await tools["mark_resolved"]({"fingerprint": a.fingerprint(), "ticket_key": "CORVID-1"})
 
     # It comes back, reported by a different agent in different words.
-    b = make_envelope(ctx, discovered_by="SURFACE", **REPORT_B)
+    b = make_envelope(ctx, discovered_by="BROWSER", **REPORT_B)
     result = await tools["record"]({"envelope_id": b.id})
 
     body = result["structuredContent"]
@@ -217,12 +217,12 @@ async def test_mark_resolved_on_an_unknown_fingerprint_refuses(tools):
 
 async def test_memory_outlives_the_run(tmp_path, make_ctx):
     """Dedupe across runs is the entire point: a new run sees last run's defects."""
-    first_ctx = make_ctx("CLERK", root=tmp_path)
+    first_ctx = make_ctx("TRIAGE", root=tmp_path)
     first_tools = handlers(build_tools(first_ctx))
     envelope = make_envelope(first_ctx, **REPORT_A)
     await first_tools["record"]({"envelope_id": envelope.id, "ticket_key": "CORVID-1"})
 
-    later_ctx = make_ctx("CLERK", root=tmp_path)
+    later_ctx = make_ctx("TRIAGE", root=tmp_path)
     assert later_ctx.store.run_id != first_ctx.store.run_id
     later_tools = handlers(build_tools(later_ctx))
 

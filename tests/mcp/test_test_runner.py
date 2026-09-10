@@ -88,7 +88,7 @@ def ctx(project: Path, tmp_path: Path) -> ToolContext:
         store=RunStore("test-runner-run", root=root),
         maps=SystemMapStore(root),
         config=config,
-        agent=config.agents["FORGE"],
+        agent=config.agents["REPRODUCER"],
         target_root=project,
     )
 

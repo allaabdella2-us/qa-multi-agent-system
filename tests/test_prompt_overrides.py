@@ -8,7 +8,7 @@ silently discards.
 
 Two properties carry the weight here:
 
-  * each file resolves **independently**, first hit wins. Overriding `CONDUIT.md`
+  * each file resolves **independently**, first hit wins. Overriding `API.md`
     must not drag a stale `_shared.md` along with it, and replacing `_shared.md`
     must not fork all eight agent prompts.
   * `<AGENT>.append.md` lands **between** the agent block and the shared block.
@@ -38,7 +38,7 @@ from qaas.registry import (
     resolve_prompt_dirs,
 )
 
-AGENT = "CONDUIT"
+AGENT = "API"
 
 
 @pytest.fixture(scope="module")
@@ -188,7 +188,7 @@ def test_appends_accumulate_across_layers_broadest_first(spec, tmp_path):
 
 
 def test_an_empty_append_changes_nothing(spec, overrides):
-    """`touch CONDUIT.append.md` must not move a byte."""
+    """`touch API.append.md` must not move a byte."""
     before = build_system_prompt(spec, (overrides, PACKAGED_PROMPTS))
     (overrides / append_name(spec.prompt)).write_text("\n   \n")
     assert build_system_prompt(spec, (overrides, PACKAGED_PROMPTS)) == before
@@ -196,7 +196,7 @@ def test_an_empty_append_changes_nothing(spec, overrides):
 
 def test_append_name_only_ever_targets_the_agents_own_prompt(cfg):
     names = {append_name(s.prompt) for s in cfg.agents.values()}
-    assert "CONDUIT.append.md" in names
+    assert "API.append.md" in names
     assert SHARED_PROMPT not in names
 
 
@@ -260,7 +260,7 @@ def test_prompts_list_says_which_layer_each_prompt_came_from(runner, tmp_path, m
         if line.count("│") > 3
     }
     assert "project" in rows[AGENT]
-    assert "packaged" in rows["FORGE"]
+    assert "packaged" in rows["REPRODUCER"]
 
 
 def test_eject_writes_a_file_that_then_shadows_the_packaged_one(runner, tmp_path, monkeypatch, spec):

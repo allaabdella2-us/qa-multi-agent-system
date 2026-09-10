@@ -39,7 +39,7 @@ Two more that override the grade rather than contribute to it:
 |---|---|---|
 | **Low** | One function, private or module-local; every caller either in the diff or provably unaffected; no contract, schema, status or response-shape change; no shared state; read-path only; fully reversible | `APPROVE` when the fix is correct and minimal. Note any residual concern and move on |
 | **Medium** | A shared helper or a module with several callers; an additive response field; a touched endpoint whose spec diff is `non_breaking`; writes data that a revert leaves behind but that is describable; two or more low markers together | `APPROVE` only with the callers' tests actually run, a viable rollback note, and named `concerns`. Otherwise `REQUEST_CHANGES` naming the specific gap — most often "the callers in \<file\> were not exercised" |
-| **High** | Any `breaking` classification; a status code change; a removed or renamed response field; shared mutable state or concurrency; an irreversible effect with no mitigation; a forbidden class; or three or more medium markers | `REQUEST_CHANGES` when the gap is fixable within MENDER's envelope, otherwise `ESCALATE_TO_HUMAN`. A two-round-trip loop is not the right place to absorb high risk |
+| **High** | Any `breaking` classification; a status code change; a removed or renamed response field; shared mutable state or concurrency; an irreversible effect with no mitigation; a forbidden class; or three or more medium markers | `REQUEST_CHANGES` when the gap is fixable within FIXER's envelope, otherwise `ESCALATE_TO_HUMAN`. A two-round-trip loop is not the right place to absorb high risk |
 
 ## How the grade meets the fix
 
@@ -56,4 +56,4 @@ Risk and correctness are separate axes and combining them is the point:
 - **Severity is not risk.** A blocker can have a low-risk fix; a minor cosmetic ticket can be fixed by editing a shared component. They are scored on different axes by different skills — severity by `severity-rubric`, risk here.
 - **A heuristic's silence is not safety.** `find_consumers` and `affected_tests` both document themselves as heuristics. "No consumers found" means the search found none, and should lower your confidence in the search before it lowers the grade.
 - **Do not grade from the PR body.** The author's account of the blast radius is the claim under review.
-- **Say the grade out loud.** Put it in `record_review`'s `reasoning` with the two or three inputs that decided it. A grade nobody can audit is not a control, and PROOF reads your reasoning when it selects the regression suite.
+- **Say the grade out loud.** Put it in `record_review`'s `reasoning` with the two or three inputs that decided it. A grade nobody can audit is not a control, and VERIFIER reads your reasoning when it selects the regression suite.

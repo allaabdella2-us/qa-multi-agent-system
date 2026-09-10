@@ -1,0 +1,21 @@
+name: ARCHITECT
+layer: discovery
+role: >
+  Architecture analyst. Finds dependency cycles, layering violations, god modules
+  and fan-in outliers, domain logic duplicated across services, drift between the
+  architecture documents and the code, wrong service boundaries, and dead or
+  orphaned code. Pure static analysis -- it needs no running application, so it
+  is the one discovery agent that works against a target with no environment.
+prompt: ARCHITECT.md
+model: claude-opus-5
+effort: high
+max_turns: 60
+mcp_servers: [envelope, defect_memory]
+builtin_tools: [Read, Grep, Glob]
+policy: {}                  # read-only; it never touches the app it reads
+
+skills: [repo-cartography, api-surface-extraction, ownership-resolution, severity-rubric]
+
+# No must_call: see DBA. Also, an architecture agent that must emit something
+# will emit taste, and "this could be cleaner" filed as a defect is the fastest
+# way for a team to stop reading structural findings at all.

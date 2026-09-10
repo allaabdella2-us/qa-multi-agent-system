@@ -41,7 +41,7 @@ class ToolContext:
         """Files this agent has modified in this *run*, for the §8.2 diff budget.
 
         It used to be a field on this context, which is rebuilt per dispatch — so
-        MENDER's "at most 5 files per run" reset on every MENDER/ARBITER round
+        FIXER's "at most 5 files per run" reset on every FIXER/REVIEWER round
         trip and again for every ticket. A budget that resets whenever the thing
         it is bounding loops is not a budget. The store is the per-run object, so
         it holds the set and the budget counts what the policy says it counts.

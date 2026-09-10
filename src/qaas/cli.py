@@ -476,7 +476,7 @@ def doctor(
 
 
 def _agent_usable(spec, caps: dict[str, bool]) -> bool:
-    """Delegates to `target.agent_usable`, which the conductor also uses.
+    """Delegates to `target.agent_usable`, which the router also uses.
 
     Two copies of this rule meant `qaas doctor` could report an agent unusable
     while a run dispatched it anyway.
@@ -523,7 +523,7 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
     # A mode whose agents cannot fit inside its cap is a mode that stops
     # partway through, every time, and looks like it worked: agents run,
     # findings reach the ledger, nothing errors. `pr-check` shipped that way --
-    # $6 cap against a $15 roster, so discovery spent $6.09 and FORGE and CLERK
+    # $6 cap against a $15 roster, so discovery spent $6.09 and REPRODUCER and TRIAGE
     # never dispatched. The mode meant for every pull request could not file a
     # ticket. It took a live run to notice; this check makes it free.
     for mode_name, mode in sorted(cfg.run_modes.items()):
@@ -1050,11 +1050,11 @@ def trace(
 
 @app.command()
 def map(root: Path = Root, version: str | None = None) -> None:
-    """Show the system map Cartographer produced."""
+    """Show the system map Mapper produced."""
     maps = SystemMapStore(root)
     payload = maps.get(version)
     if payload is None:
-        console.print("[dim]no system map yet — run CARTOGRAPHER[/dim]")
+        console.print("[dim]no system map yet — run MAPPER[/dim]")
         raise typer.Exit(1)
     console.print(f"[bold]version[/bold] {version or maps.latest_version()}")
     console.print_json(data=payload)
@@ -1077,7 +1077,7 @@ def run(
     """Execute a run. Costs real money unless --dry-run."""
     import asyncio
 
-    from qaas.conductor import Conductor
+    from qaas.router import Router
     from qaas.registry import describe
 
     if repo and target:
@@ -1188,8 +1188,8 @@ def run(
         elif kind == "stopped":
             console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
 
-    conductor = Conductor(cfg, root=root, on_event=on_event, tickets=list(ticket) if ticket else None)
-    report = asyncio.run(conductor.run(mode, run_id=run_id))
+    router = Router(cfg, root=root, on_event=on_event, tickets=list(ticket) if ticket else None)
+    report = asyncio.run(router.run(mode, run_id=run_id))
 
     console.print()
     console.print_json(data=report.summary())
@@ -1295,12 +1295,12 @@ def sweep(
     """
     import asyncio
 
-    from qaas.conductor import Conductor
+    from qaas.router import Router
     from qaas.scorecard import GoldenLedger, score as score_run
 
     cfg = load_config(config_dir)
-    conductor = Conductor(cfg, root=root)
-    report = asyncio.run(conductor.run(mode))
+    router = Router(cfg, root=root)
+    report = asyncio.run(router.run(mode))
     console.print_json(data=report.summary())
 
     ledger_path = _ledger_path(cfg)
@@ -1344,12 +1344,12 @@ _JIRA_ENV_HELP: dict[str, str] = {
 _JIRA_SECRET_ENV = frozenset({"JIRA_API_TOKEN"})
 
 #: House statuses this system actually drives. An unmapped one here is a real
-#: failure: PROOF asks for 'closed', nothing in the workflow matches, and the
+#: failure: VERIFIER asks for 'closed', nothing in the workflow matches, and the
 #: ticket stays open while the run reports a clean close. The rest of `STATUSES`
 #: are human dispositions — worth reporting, not worth failing on.
 _DRIVEN_STATUSES = ("open", "in_progress", "resolved", "closed")
 
-#: What `--dry-run-ticket` renders. A realistic CLERK ticket rather than a
+#: What `--dry-run-ticket` renders. A realistic TRIAGE ticket rather than a
 #: placeholder, because the point is to see the ADF, the labels and the
 #: fingerprint an engineer will actually receive.
 _SAMPLE_TICKET: dict[str, object] = {
@@ -1378,7 +1378,7 @@ _SAMPLE_TICKET: dict[str, object] = {
     "severity": "critical",
     "envelope_id": "env-sample-0001",
     "fingerprint": "sha256:" + "ab12cd34" * 8,
-    "reporter": "CLERK",
+    "reporter": "TRIAGE",
 }
 
 

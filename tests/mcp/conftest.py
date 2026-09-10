@@ -5,7 +5,7 @@ temporary path and an agent spec; no MCP transport is involved anywhere here.
 
 `make_ctx` accepts an agent either positionally or by keyword, and either a real
 agent from `config/agents/` or a synthetic one, because the two halves of these
-tests want different things: the policy tests need CLERK's and FORGE's actual
+tests want different things: the policy tests need TRIAGE's and REPRODUCER's actual
 declared permissions, while the degradation tests just need some agent and an
 empty directory to point at.
 """
@@ -54,13 +54,13 @@ def structured(result: dict[str, Any]) -> dict[str, Any]:
 def make_ctx(tmp_path):
     """Build a ToolContext.
 
-    Call it as `make_ctx("CLERK")` for a real configured agent, or with
+    Call it as `make_ctx("TRIAGE")` for a real configured agent, or with
     `target_root=` / `agent=` for a synthetic one. `root=` shares a store root
     between two contexts, which is how the cross-run persistence tests work.
     """
 
     def _make(
-        agent: str = "CONDUIT",
+        agent: str = "API",
         *,
         target_root: Path = TARGET_ROOT,
         root: Path | None = None,
@@ -85,7 +85,7 @@ def make_envelope(ctx: ToolContext, **overrides: Any) -> DefectEnvelope:
     """Persist a plausible finding in `ctx`'s store and return it."""
     payload: dict[str, Any] = dict(
         run_id=ctx.store.run_id,
-        discovered_by="CONDUIT",
+        discovered_by="API",
         domain="api",
         **{"class": "bug"},
         title="Refund endpoint accepts any authenticated user",
@@ -106,9 +106,9 @@ def make_envelope(ctx: ToolContext, **overrides: Any) -> DefectEnvelope:
 
 @pytest.fixture
 def ctx(make_ctx):
-    """A CLERK context — the agent that holds tracker and memory write access.
+    """A TRIAGE context — the agent that holds tracker and memory write access.
 
     Most of these tests exercise what a privileged agent can do; the refusal
     tests build their own read-only context from `make_ctx` instead.
     """
-    return make_ctx("CLERK")
+    return make_ctx("TRIAGE")

@@ -214,7 +214,7 @@ class DefectEnvelope(Strict):
         return bool(self.evidence) or bool(self.reproduction.failing_test)
 
     def is_fileable(self, min_confidence: float = 0.6) -> tuple[bool, str]:
-        """Whether CLERK may file this. Returns (ok, reason-if-not).
+        """Whether TRIAGE may file this. Returns (ok, reason-if-not).
 
         The confidence gate is §7; the evidence gate is §2. Anything that fails
         goes to the human review queue instead of the tracker.
@@ -301,7 +301,7 @@ def normalize_path(path: str) -> str:
     The visible damage was that `occurrence_count` never left 1: the same defect
     reported across three runs produced three identities, so `get_occurrences`
     could never say a defect was recurring. Deduplication itself survived only
-    because CLERK matches on similarity rather than on this hash.
+    because TRIAGE matches on similarity rather than on this hash.
 
     `scorecard._norm_path` delegates here. They must not drift: a scorer that
     considers two paths equal while the fingerprint considers them distinct is

@@ -1,0 +1,19 @@
+name: MAPPER
+layer: control
+role: >
+  Builds and maintains the shared system map every other agent reads: services,
+  routes, API surface, schema, dependency graph, ownership.
+prompt: MAPPER.md
+model: claude-sonnet-5      # extraction, not judgment
+effort: medium
+max_turns: 60
+mcp_servers: [envelope]
+builtin_tools: [Read, Grep, Glob]
+policy: {}                  # read-only
+
+# Procedure lives in skills; the prompt carries role and standards.
+skills: [repo-cartography, api-surface-extraction, ownership-resolution, product-task-graph]
+
+# The map is the deliverable. An agent that finishes without publishing one has
+# not done the job, and the Stop hook says so while it can still act on that.
+must_call: [mcp__envelope__put_system_map]

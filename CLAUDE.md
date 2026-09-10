@@ -18,7 +18,7 @@ usually outdates those too.
 
 ```bash
 uv venv && uv pip install -e ".[dev]"    # setup
-npx playwright install chromium          # only for UI (SURFACE) runs
+npx playwright install chromium          # only for UI (BROWSER) runs
 
 pytest                                   # 767 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
@@ -32,7 +32,7 @@ qaas doctor --target corvid              # what a target makes possible
 qaas prompts list / eject / diff         # prompt overrides in .qaas/prompts/
 qaas tracker-check                       # Jira credentials, before spending anything
 qaas run --mode pr-check --dry-run       # renders each agent's options, no API call
-qaas run --mode nightly --only CONDUIT   # real run, costs money
+qaas run --mode nightly --only API   # real run, costs money
 qaas runs / qaas show <run-id> / qaas map
 qaas trace <run-id> --follow --quiet     # watch a live run's decisions
 qaas board                               # find-or-create this target's Jira board
@@ -50,7 +50,7 @@ default `pytest` run is offline and free, and must stay that way.
 
 ### Two things that shape everything
 
-1. **CONDUCTOR is Python, not a prompt.** `conductor.py` is an ordinary state
+1. **ROUTER is Python, not a prompt.** `router.py` is an ordinary state
    machine: phase ordering, concurrency, the budget governor, loop breakers,
    escalation. A model cannot enforce a budget it is itself spending.
 2. **Each agent is its own top-level `query()`**, not an SDK subagent. That is
@@ -58,29 +58,29 @@ default `pytest` run is offline and free, and must stay that way.
    per-agent cost number. `agents=`/`AgentDefinition` is only for intra-agent
    fan-out.
 
-### Phase pipeline (`conductor.py`)
+### Phase pipeline (`router.py`)
 
 ```
-map -> discover -> reproduce -> file -> verify -> report
-CARTOGRAPHER   CONDUIT/SURFACE/…   FORGE   CLERK   PROOF   CHRONICLE
+map    -> discover        -> reproduce  -> file   -> verify   -> report
+MAPPER    API/BROWSER/…      REPRODUCER    TRIAGE    VERIFIER    REPORTER
 ```
 
-Discovery agents run concurrently up to the mode's cap; FORGE runs **once per
-finding** in a fresh context (so cost scales with findings, not agents); PROOF
+Discovery agents run concurrently up to the mode's cap; REPRODUCER runs **once per
+finding** in a fresh context (so cost scales with findings, not agents); VERIFIER
 loops with bounded reopens and escalates rather than cycling. `Budget.check()`
 runs before every dispatch and raises `BudgetExceeded`, which is a control
 working, not an error.
 
-`verify` is a loop, not a step. `_verify_loop` dispatches PROOF; on `NOT_FIXED`
-it calls `_remediate` (MENDER -> ARBITER, bounded by
-`max_mender_arbiter_round_trips`) and re-runs PROOF, bounded by
-`max_proof_reopens`. Two facts there are bug-derived. PROOF must re-verify **the
-branch MENDER wrote**, read back out of the ledger by `_branch_written_since`
+`verify` is a loop, not a step. `_verify_loop` dispatches VERIFIER; on `NOT_FIXED`
+it calls `_remediate` (FIXER -> REVIEWER, bounded by
+`max_mender_arbiter_round_trips`) and re-runs VERIFIER, bounded by
+`max_proof_reopens`. Two facts there are bug-derived. VERIFIER must re-verify **the
+branch FIXER wrote**, read back out of the ledger by `_branch_written_since`
 and scoped to entries since a mark — the envelope names the *repro* branch,
-which by construction carries a failing test and no fix, and sending PROOF back
-there made VERIFIED unreachable in a live run. And a roster with no MENDER
+which by construction carries a failing test and no fix, and sending VERIFIER back
+there made VERIFIED unreachable in a live run. And a roster with no FIXER
 escalates `NOT_FIXED` to a human immediately, which is right: the alternative is
-re-running PROOF against unchanged code.
+re-running VERIFIER against unchanged code.
 
 ### The DefectEnvelope is the only inter-agent type
 
@@ -99,7 +99,7 @@ A file of the same name under `<project>/config/agents/` or
 `.qaas/config/agents/` *shadows* the packaged one; this checkout's `config/`
 holds only `targets/`, so adding to the roster means the packaged directory and
 not an override. Adding one should require **no change** to
-conductor, runner, registry or guardrails — treat a change to those files while
+router, runner, registry or guardrails — treat a change to those files while
 adding an agent as a sign something is wrong. Constraints enforced in
 `config.py`: at most 6 MCP servers per agent (§5.3, tool-selection accuracy),
 and every `must_call` tool must name a server the agent actually has.
@@ -108,13 +108,13 @@ Discovery AND reporting agents dispatch **by layer**; every other phase
 dispatches by name. So adding a discovery or reporting agent is a prompt file
 plus a YAML file and no Python --
 `_phase_discover` falls back to `tasks.discovery` for anything without a
-bespoke builder. VAULT and WARDEN were added that way and found that it was
+bespoke builder. DBA and AUDITOR were added that way and found that it was
 not true before them.
 
 `prompts/_shared.md` is appended to every agent prompt — house rules go there,
 not copy-pasted into six prompts. Prompts resolve through `Workspace.prompt_dirs`
 (`.qaas/prompts/` beats the packaged copy), **file by file and independently**, so
-overriding `CONDUIT.md` keeps the house `_shared.md`. A `<AGENT>.append.md` is
+overriding `API.md` keeps the house `_shared.md`. A `<AGENT>.append.md` is
 inserted between the agent block and the shared block — never after it, because
 the house rules must stay the last word. `qaas prompts list/eject/diff`.
 Role and standards live in the system prompt;
@@ -181,7 +181,7 @@ Denials return a reason and are logged to the ledger; they never kill the turn.
 ### Hooks enforce the output contract
 
 `registry.build_hooks`: the `Stop` hook blocks an agent that has not called its
-`must_call` tools, while it still has a turn to fix it (the conductor would only
+`must_call` tools, while it still has a turn to fix it (the router would only
 find out afterwards). It honours `stop_hook_active` — blocking twice burns the
 budget. The `PostToolUse` hook tells an agent immediately when an emitted
 envelope was **held** rather than filed, since discovering that at the end is
@@ -210,7 +210,7 @@ paid run.
 ### One Jira view per repository, not one project
 
 Every ticket carries `repo-<target>`, stamped by `mcp/tracker.py` rather than
-asked of CLERK. `JiraTracker.ensure_repo_board` finds-or-creates a saved filter
+asked of TRIAGE. `JiraTracker.ensure_repo_board` finds-or-creates a saved filter
 over exactly that label, plus a board over the filter **only where one can
 render**; `cli._ensure_board` calls it at the top of every Jira-backed run. A
 *project* per repo would need admin rights a bot account rarely has; a filter
@@ -275,7 +275,7 @@ cannot half-propagate. Evidence is referenced by `artifact://<run>/<name>` uris;
 `resolve_artifact` rejects paths escaping the store.
 
 The ledger's `kind` is a closed set (`store.LedgerKind`) — **add a member, never
-repurpose one**: the conductor reads `verdict`, `review` and `vcs` back for
+repurpose one**: the router reads `verdict`, `review` and `vcs` back for
 control flow (`_latest_verdict`, `_latest_review`, `_branch_written_since`), so
 these are a wire format, not labels. `trace.py` is the read side (`qaas trace`,
 `qaas show`); it reads the file once and filters in memory, because
@@ -296,9 +296,9 @@ code so precision is measured, not assumed.
 **That obligation is a human's, and lands at merge.** No agent's `write_paths`
 include the ledger, deliberately: an agent that can retire an entry can raise its
 own recall without fixing anything. So a review must never block a fix on the
-ledger being updated — MENDER is not permitted to make that change, and demanding
+ledger being updated — FIXER is not permitted to make that change, and demanding
 it deadlocks the fix loop. That is not hypothetical; CORVID-7 escalated twice,
-ARBITER requiring the edit and the guardrail refusing it, before the contradiction
+REVIEWER requiring the edit and the guardrail refusing it, before the contradiction
 was visible. The general rule this taught, now in `adversarial-review`: **never
 request a change the author is not permitted to make** — route it as separate
 human work instead.
@@ -319,7 +319,7 @@ third that belongs to `TargetProfile.root_path`. Precedence is the ordinary one:
 Layering *granularity* differs by kind, deliberately: `system.yaml` — **first hit
 wins whole**, because merging run-mode dictionaries across layers produces a
 configuration nobody wrote and nobody can read back; `agents/*.yaml`, prompts and
-skills — **union by name, higher layer shadows**, so raising MENDER's budget is
+skills — **union by name, higher layer shadows**, so raising FIXER's budget is
 one dropped-in file rather than a fork of the whole roster.
 
 Distribution name is `qaas-python` (`qaas` was taken); the import package and the

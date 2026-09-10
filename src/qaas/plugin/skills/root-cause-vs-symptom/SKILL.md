@@ -14,7 +14,7 @@ description: >
 
 A symptom fix makes the failing test pass while leaving the defect in the system, usually in a shape that will come back under a slightly different input. §10 names this as the failure mode with the most controls pointed at it, because it is the one that looks most like success.
 
-Both agents use this skill. MENDER reads it **before writing**; ARBITER reads it **before judging**, and records the answer in `record_review`'s `root_cause_addressed`.
+Both agents use this skill. FIXER reads it **before writing**; REVIEWER reads it **before judging**, and records the answer in `record_review`'s `root_cause_addressed`.
 
 ## The two questions
 
@@ -37,7 +37,7 @@ Each of these is a shape you can see in a diff without understanding the domain.
 | `except Exception:` with a `pass` or a `logger.warning` | Every future defect on this path is now invisible | Catch the specific expected exception at the boundary where it is expected; let the rest propagate |
 | A retry, a `sleep`, or a re-fetch added around an intermittent failure | Races do not get slower, they get rarer | Find the ordering or shared-state assumption that is wrong |
 | A snapshot, fixture or expected constant edited to match observed output | The bug has been written down as the spec | The contract decides the expected value; see `test-quality-audit` |
-| The defining test edited in any way | Not a fix at all | Immediate escalation; MENDER may not do this |
+| The defining test edited in any way | Not a fix at all | Immediate escalation; FIXER may not do this |
 
 **Defensive code is not automatically a symptom fix.** A null check, a type coercion or a `try/except` at a *trust boundary* — deserialising external input, a third-party response, a user-supplied payload, a cache miss — is correct engineering. The distinction is whether the bad value was produced *inside* the system by code you control. Inside, a guard hides a bug; at the edge, a guard is the design.
 
@@ -52,16 +52,16 @@ Do this before proposing a fix, and again when reviewing one that skipped it.
 5. **Check the blast radius of the cause.** Ask what else calls the frame you landed on, and what other symptoms that cause could produce. If your fix handles only the symptom in the ticket, you have found the cause and fixed a leaf.
 6. **State cause and mechanism in one line** for the PR body: *"`list_orders` builds its query without the tenant filter, so any session sees every row; the fix adds the filter the sibling `get_order` already applies."* If you cannot write that line, do not open the PR.
 
-## MENDER: using this before you write
+## FIXER: using this before you write
 
-- Do the trace first. The trace is cheap; a rejected round trip is not — the loop breaker allows two MENDER→ARBITER round trips per ticket and then escalates.
+- Do the trace first. The trace is cheap; a rejected round trip is not — the loop breaker allows two FIXER→REVIEWER round trips per ticket and then escalates.
 - When the trace lands on a forbidden class (auth, migrations, payment, billing, infra), stop there. Say what the cause is and what you would change. A symptom fix outside the forbidden path, chosen because the real fix was inside it, is the worst available outcome: it looks compliant and it is not a fix.
 - When the cause is real but the fix is bigger than the budget, that is `minimal-diff-discipline`'s escalation, not a licence to patch the symptom instead.
 
-## ARBITER: using this when you read
+## REVIEWER: using this when you read
 
 - Decide `root_cause_addressed` explicitly. It is a field on `record_review`, and a review that leaves it unconsidered has skipped the one check that separates you from a linter.
 - Demand the cause sentence. If the PR body does not say *why* the defect happens, you cannot judge whether the change addresses it, and `REQUEST_CHANGES` naming that absence is a legitimate, cheap review.
 - Test the fix against a neighbouring input, on paper: same code path, one field different. If your description of what happens then is "it would fail again", the fix is a special case.
 - A symptom fix with real tests and a small diff is still a symptom fix. Minimality and green tests are not evidence about causation.
-- When the diff is a symptom fix and the real fix is outside MENDER's envelope, the verdict is `ESCALATE_TO_HUMAN`, not `REQUEST_CHANGES` — sending it back asks for a change the other agent is not permitted to make.
+- When the diff is a symptom fix and the real fix is outside FIXER's envelope, the verdict is `ESCALATE_TO_HUMAN`, not `REQUEST_CHANGES` — sending it back asks for a change the other agent is not permitted to make.

@@ -17,9 +17,9 @@
 # Keep this file in sync with the code. If *you*, a human, change a seeded
 # defect, change its entry in the same commit — a stale ledger silently corrupts
 # every score. This obligation lands at merge, on the person merging; it is not
-# an obligation on MENDER, and a review must never block a fix on it. MENDER
+# an obligation on FIXER, and a review must never block a fix on it. FIXER
 # cannot write this file, so requiring the change of it deadlocks the fix loop:
-# ARBITER demanded it, the guardrail refused it, and CORVID-7 escalated twice
+# REVIEWER demanded it, the guardrail refused it, and CORVID-7 escalated twice
 # before anyone noticed the two rules contradicted each other.
 #
 # To retire a repaired defect, set `fixed_in: <ref>` on its entry when the fix
@@ -37,7 +37,7 @@ version: 1
 app: corvid
 
 defects:
-  # -- API surface (CONDUIT) ------------------------------------------------
+  # -- API surface (API) ------------------------------------------------
 
   - id: API-01
     domain: api
@@ -187,12 +187,12 @@ defects:
     phase: 1
     discovered_not_seeded: true
     note: >
-      Not planted. CONDUIT found this on its first scored run and it is a genuine
+      Not planted. API found this on its first scored run and it is a genuine
       gap, so it belongs in the ledger. Recorded with its provenance because a
       defect the system found is weaker evidence than one placed for it to find:
       the ledger cannot be treated as a complete oracle, only as a floor.
 
-  # -- Frontend (SURFACE) ---------------------------------------------------
+  # -- Frontend (BROWSER) ---------------------------------------------------
 
   - id: UI-01
     domain: frontend
@@ -303,7 +303,7 @@ defects:
     phase: 1
     discovered_not_seeded: true
     note: >
-      Not planted. SURFACE found it on its first scored run. It follows from a
+      Not planted. BROWSER found it on its first scored run. It follows from a
       real gap between the UI and the API contract, which is exactly the kind of
       defect a seeded ledger tends not to contain.
 

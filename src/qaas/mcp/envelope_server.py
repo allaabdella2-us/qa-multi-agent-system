@@ -61,13 +61,13 @@ EMIT_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": (
                 "The steps you took and the state you observed. You cannot mark a "
-                "finding reproduced — FORGE verifies that independently, which is "
+                "finding reproduced — REPRODUCER verifies that independently, which is "
                 "the point of a separate triage agent."
             ),
             "properties": {
                 "steps": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Exactly what you did, in order, so FORGE can start from it.",
+                    "description": "Exactly what you did, in order, so REPRODUCER can start from it.",
                 },
                 "environment": {
                     "type": "object",
@@ -128,10 +128,10 @@ def build_tools(ctx: ToolContext) -> list:
 
         # A discovery agent does not get to certify its own finding as
         # reproduced (§2: the finder never grades its own homework). Whatever it
-        # claims here, the status is reset and FORGE decides independently.
+        # claims here, the status is reset and REPRODUCER decides independently.
         # Without this the whole triage gate is bypassed by an agent simply
         # asserting it already reproduced the defect — which is exactly what
-        # happened on the first full pipeline run, and FORGE was skipped.
+        # happened on the first full pipeline run, and REPRODUCER was skipped.
         environment = (args.get("reproduction") or {}).get("environment", {})
         steps = (args.get("reproduction") or {}).get("steps", [])
         payload["reproduction"] = {
@@ -172,7 +172,7 @@ def build_tools(ctx: ToolContext) -> list:
     async def get_system_map(args: dict[str, Any]) -> dict[str, Any]:
         payload = ctx.maps.get(ctx.map_version)
         if payload is None:
-            return err("No system map exists yet. CARTOGRAPHER has not run.")
+            return err("No system map exists yet. MAPPER has not run.")
         section = args.get("section")
         if section:
             if section not in payload:
@@ -182,7 +182,7 @@ def build_tools(ctx: ToolContext) -> list:
 
     @tool(
         "put_system_map",
-        "Publish the system map. Call once, with the complete map. Cartographer only.",
+        "Publish the system map. Call once, with the complete map. Mapper only.",
         {
             "type": "object",
             "required": ["map"],
@@ -190,8 +190,8 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def put_system_map(args: dict[str, Any]) -> dict[str, Any]:
-        if ctx.agent.name != "CARTOGRAPHER":
-            return err("Only CARTOGRAPHER may publish the system map.")
+        if ctx.agent.name != "MAPPER":
+            return err("Only MAPPER may publish the system map.")
         payload = args.get("map")
         if not isinstance(payload, dict) or not payload:
             return err("map must be a non-empty object.")
@@ -267,7 +267,7 @@ def build_tools(ctx: ToolContext) -> list:
 
     @tool(
         "record_reproduction",
-        "Record your reproduction verdict on an existing finding. FORGE only. "
+        "Record your reproduction verdict on an existing finding. REPRODUCER only. "
         "This replaces the finding's reproduction block and adjusts its confidence.",
         {
             "type": "object",
@@ -291,8 +291,8 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def record_reproduction(args: dict[str, Any]) -> dict[str, Any]:
-        if ctx.agent.name != "FORGE":
-            return err("Only FORGE records reproduction verdicts.")
+        if ctx.agent.name != "REPRODUCER":
+            return err("Only REPRODUCER records reproduction verdicts.")
 
         envelope = ctx.store.get_envelope(args["envelope_id"])
         if envelope is None:
@@ -304,7 +304,7 @@ def build_tools(ctx: ToolContext) -> list:
             "failing_test": args.get("failing_test"),
             "flake_rate": args.get("flake_rate", 0.0),
             "environment": args.get("environment", {}),
-            "verified_by": "FORGE",
+            "verified_by": "REPRODUCER",
         }
         try:
             updated = envelope.model_copy(
@@ -320,13 +320,13 @@ def build_tools(ctx: ToolContext) -> list:
         fileable, reason = updated.is_fileable(ctx.config.thresholds.min_confidence_to_file)
         ctx.store.log(
             "reproduction",
-            agent="FORGE",
+            agent="REPRODUCER",
             envelope_id=updated.id,
             status=args["status"],
             flake_rate=repro["flake_rate"],
             fileable=fileable,
         )
-        verdict = "will reach CLERK" if fileable else f"held: {reason}"
+        verdict = "will reach TRIAGE" if fileable else f"held: {reason}"
         return ok(
             f"Verdict recorded for {updated.id}: {args['status']}, confidence "
             f"{updated.confidence:.2f} — {verdict}.",
@@ -336,7 +336,7 @@ def build_tools(ctx: ToolContext) -> list:
 
     @tool(
         "record_verdict",
-        "Record your verification verdict on a ticket. PROOF only. Exactly one verdict "
+        "Record your verification verdict on a ticket. VERIFIER only. Exactly one verdict "
         "per ticket: VERIFIED, NOT_FIXED or REGRESSED.",
         {
             "type": "object",
@@ -355,8 +355,8 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def record_verdict(args: dict[str, Any]) -> dict[str, Any]:
-        if ctx.agent.name != "PROOF":
-            return err("Only PROOF records verification verdicts.")
+        if ctx.agent.name != "VERIFIER":
+            return err("Only VERIFIER records verification verdicts.")
 
         verdict = args["verdict"]
         if verdict == "VERIFIED" and not args.get("ran"):
@@ -369,7 +369,7 @@ def build_tools(ctx: ToolContext) -> list:
 
         ctx.store.log(
             "verdict",
-            agent="PROOF",
+            agent="VERIFIER",
             ticket_key=args["ticket_key"],
             verdict=verdict,
             envelope_id=args.get("envelope_id"),
@@ -382,8 +382,8 @@ def build_tools(ctx: ToolContext) -> list:
 
     @tool(
         "record_review",
-        "Record your review decision on a fix. ARBITER only. This is the decision "
-        "the conductor routes on: APPROVE lets the fix proceed to verification, "
+        "Record your review decision on a fix. REVIEWER only. This is the decision "
+        "the router routes on: APPROVE lets the fix proceed to verification, "
         "REQUEST_CHANGES sends it back, ESCALATE_TO_HUMAN stops the loop.",
         {
             "type": "object",
@@ -397,7 +397,7 @@ def build_tools(ctx: ToolContext) -> list:
                 "reasoning": {
                     "type": "string",
                     "description": (
-                        "Why. For REQUEST_CHANGES this goes back to MENDER verbatim, "
+                        "Why. For REQUEST_CHANGES this goes back to FIXER verbatim, "
                         "so be specific enough to act on: name the file and what is wrong."
                     ),
                 },
@@ -414,15 +414,15 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def record_review(args: dict[str, Any]) -> dict[str, Any]:
-        if ctx.agent.name != "ARBITER":
-            return err("Only ARBITER records review decisions.")
+        if ctx.agent.name != "REVIEWER":
+            return err("Only REVIEWER records review decisions.")
 
         decision = args["decision"]
         reasoning = (args.get("reasoning") or "").strip()
 
         # An approval with no reasoning is not a review, and it is the shape a
         # rubber stamp takes. REQUEST_CHANGES with nothing actionable is worse:
-        # it sends MENDER round the loop with no idea what to change.
+        # it sends FIXER round the loop with no idea what to change.
         if len(reasoning) < 40:
             return err(
                 f"{decision} needs reasoning a person can act on — at least a "
@@ -430,13 +430,13 @@ def build_tools(ctx: ToolContext) -> list:
             )
         if decision == "REQUEST_CHANGES" and not args.get("concerns"):
             return err(
-                "REQUEST_CHANGES must list concerns. MENDER gets them verbatim and "
+                "REQUEST_CHANGES must list concerns. FIXER gets them verbatim and "
                 "cannot act on a verdict with no specifics."
             )
 
         ctx.store.log(
             "review",
-            agent="ARBITER",
+            agent="REVIEWER",
             ticket_key=args["ticket_key"],
             decision=decision,
             reasoning=reasoning,

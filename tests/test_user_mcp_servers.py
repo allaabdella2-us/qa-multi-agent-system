@@ -41,7 +41,7 @@ def _cfg_with(servers: dict, agent_servers: list[str] | None = None) -> SystemCo
     update = {"mcp_servers": servers}
     if agent_servers is not None:
         agents = dict(cfg.agents)
-        agents["CARTOGRAPHER"] = agents["CARTOGRAPHER"].model_copy(
+        agents["MAPPER"] = agents["MAPPER"].model_copy(
             update={"mcp_servers": agent_servers}
         )
         update["agents"] = agents
@@ -85,8 +85,8 @@ def test_there_is_no_in_process_python_server_type():
 
 def test_a_declared_server_reaches_the_agents_options(ctx_for):
     cfg = _cfg_with(STDIO, agent_servers=["envelope", "house-lint"])
-    ctx = ctx_for("CARTOGRAPHER", cfg)
-    servers = build_mcp_servers(cfg.agents["CARTOGRAPHER"], ctx)
+    ctx = ctx_for("MAPPER", cfg)
+    servers = build_mcp_servers(cfg.agents["MAPPER"], ctx)
     assert set(servers) == {"envelope", "house-lint"}
     assert servers["house-lint"]["command"] == "./tools/lint-mcp"
     assert servers["house-lint"]["type"] == "stdio"
@@ -98,8 +98,8 @@ def test_a_declared_server_overrides_a_built_in(ctx_for):
     firefox = {"playwright": {"type": "stdio", "command": "npx",
                               "args": ["-y", "@playwright/mcp@latest", "--browser", "firefox"]}}
     cfg = _cfg_with(firefox, agent_servers=["envelope", "playwright"])
-    ctx = ctx_for("CARTOGRAPHER", cfg)
-    servers = build_mcp_servers(cfg.agents["CARTOGRAPHER"], ctx)
+    ctx = ctx_for("MAPPER", cfg)
+    servers = build_mcp_servers(cfg.agents["MAPPER"], ctx)
     assert "firefox" in servers["playwright"]["args"]
     assert "chromium" not in servers["playwright"]["args"]
 
@@ -107,8 +107,8 @@ def test_a_declared_server_overrides_a_built_in(ctx_for):
 def test_declaring_a_server_grants_no_agent_anything(ctx_for):
     """The whole trust posture in one assertion."""
     cfg = _cfg_with(STDIO)  # declared, but no agent names it
-    ctx = ctx_for("CARTOGRAPHER", cfg)
-    servers = build_mcp_servers(cfg.agents["CARTOGRAPHER"], ctx)
+    ctx = ctx_for("MAPPER", cfg)
+    servers = build_mcp_servers(cfg.agents["MAPPER"], ctx)
     assert "house-lint" not in servers
 
 
@@ -127,8 +127,8 @@ def test_env_references_are_expanded(monkeypatch, ctx_for):
         {"lint": {"type": "stdio", "command": "lint", "env": {"TOKEN": "${ACME_LINT_TOKEN}"}}},
         agent_servers=["envelope", "lint"],
     )
-    ctx = ctx_for("CARTOGRAPHER", cfg)
-    servers = build_mcp_servers(cfg.agents["CARTOGRAPHER"], ctx)
+    ctx = ctx_for("MAPPER", cfg)
+    servers = build_mcp_servers(cfg.agents["MAPPER"], ctx)
     assert servers["lint"]["env"]["TOKEN"] == "s3cret"
 
 
@@ -141,9 +141,9 @@ def test_an_unset_reference_is_an_error_not_an_empty_string(monkeypatch, ctx_for
         {"lint": {"type": "stdio", "command": "lint", "env": {"TOKEN": "${ACME_MISSING}"}}},
         agent_servers=["envelope", "lint"],
     )
-    ctx = ctx_for("CARTOGRAPHER", cfg)
+    ctx = ctx_for("MAPPER", cfg)
     with pytest.raises(MissingServerEnv, match="ACME_MISSING"):
-        build_mcp_servers(cfg.agents["CARTOGRAPHER"], ctx)
+        build_mcp_servers(cfg.agents["MAPPER"], ctx)
 
 
 def test_expansion_is_idempotent_with_the_clis_own():

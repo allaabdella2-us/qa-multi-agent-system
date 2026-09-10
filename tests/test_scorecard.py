@@ -22,7 +22,7 @@ def ledger() -> GoldenLedger:
 
 def env(**kw) -> DefectEnvelope:
     base = dict(
-        run_id="r", discovered_by="CONDUIT", domain=Domain.API, **{"class": "bug"},
+        run_id="r", discovered_by="API", domain=Domain.API, **{"class": "bug"},
         title="t", summary="s", severity=Severity.MAJOR, confidence=0.9,
     )
     base.update(kw)
@@ -112,7 +112,7 @@ def test_naming_the_right_file_with_nothing_else_is_not_enough(ledger):
 def test_frontend_defect_matches_on_route_and_keywords(ledger):
     e = env(
         domain=Domain.FRONTEND,
-        discovered_by="SURFACE",
+        discovered_by="BROWSER",
         title="Place order button does nothing with a single item",
         summary="On /checkout/review the submit handler never fires for a one item cart.",
         location={"ui_route": "/checkout/review", "paths": ["web/src/routes/CheckoutReview.tsx"]},
@@ -130,7 +130,7 @@ def test_two_reports_of_one_defect_are_one_find_and_one_duplicate(ledger):
         location={"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
     )
     b = env(
-        discovered_by="SURFACE",
+        discovered_by="BROWSER",
         title="Unbounded pagination on order listing",
         summary="The limit query parameter is ignored so every row is returned.",
         location={"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
@@ -223,7 +223,7 @@ def test_similarity_is_symmetric_across_equivalent_param_names(ledger):
 
 
 def test_a_security_classification_of_a_security_relevant_defect_counts(ledger):
-    """CONDUIT filed the cross-tenant read under `security`. That is not a miss."""
+    """API filed the cross-tenant read under `security`. That is not a miss."""
     e = env(
         domain=Domain.SECURITY,
         title="GET /v1/orders/{order_id} omits the org filter, exposing any org's orders",
@@ -235,10 +235,10 @@ def test_a_security_classification_of_a_security_relevant_defect_counts(ledger):
 
 
 def test_a_ux_classification_of_a_frontend_defect_counts(ledger):
-    """SURFACE filed the missing label under `ux`. Also not a miss."""
+    """BROWSER filed the missing label under `ux`. Also not a miss."""
     e = env(
         domain=Domain.UX,
-        discovered_by="SURFACE",
+        discovered_by="BROWSER",
         title="WCAG 1.3.1: orders search input has no accessible name",
         summary="A bare input with a placeholder: no label, no aria-label. Screen readers announce nothing.",
         severity=Severity.MINOR,
@@ -263,13 +263,13 @@ def test_two_defects_in_one_file_on_one_route_are_both_credited(ledger):
     also resembles the other's entry. Greedy assignment once wrote off whichever
     lost the first pass as a duplicate; both must be matched."""
     rejection = env(
-        domain=Domain.FRONTEND, discovered_by="SURFACE",
+        domain=Domain.FRONTEND, discovered_by="BROWSER",
         title="Failed orders fetch throws an unhandled rejection",
         summary="The fetch has no catch and no error state; a 500 leaves the page blank.",
         location={"ui_route": "/orders", "paths": ["web/src/routes/OrdersList.tsx"]},
     )
     empty = env(
-        domain=Domain.UX, discovered_by="SURFACE", severity=Severity.MINOR,
+        domain=Domain.UX, discovered_by="BROWSER", severity=Severity.MINOR,
         title="Orders list has no empty state",
         summary="Zero matches renders bare table headers with no message at all.",
         location={"ui_route": "/orders", "paths": ["web/src/routes/OrdersList.tsx"]},
@@ -286,7 +286,7 @@ def test_a_genuine_duplicate_is_still_a_duplicate(ledger):
         location={"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
     )
     b = env(
-        discovered_by="SURFACE", title="Unbounded pagination on order listing",
+        discovered_by="BROWSER", title="Unbounded pagination on order listing",
         summary="The limit query parameter is ignored so every row is returned.",
         location={"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
     )
@@ -319,7 +319,7 @@ def test_sharing_a_file_with_a_planted_case_is_not_reporting_it(ledger):
 
 # -- retiring a repaired defect ---------------------------------------------
 #
-# ARBITER escalated a correct one-line fix on CORVID-7 because `defects.yaml`
+# REVIEWER escalated a correct one-line fix on CORVID-7 because `defects.yaml`
 # had no way to record that a seeded defect had been repaired: CLAUDE.md
 # requires the ledger to change in the same commit as the defect, and the only
 # options were to delete the entry (losing the severity/domain expectations a

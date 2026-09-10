@@ -109,17 +109,17 @@ def test_find_project_returns_none_rather_than_guessing(tmp_path):
 
 def test_one_agent_file_can_be_shadowed_without_forking_the_rest(tmp_path):
     """The reason agents layer by filename instead of whole-directory: someone
-    who raises MENDER's budget should keep receiving improvements to the other
+    who raises FIXER's budget should keep receiving improvements to the other
     seven, not freeze on today's roster."""
     override = tmp_path / "config" / "agents"
     override.mkdir(parents=True)
-    shipped = (PACKAGED_CONFIG / "agents" / "mender.yaml").read_text()
-    (override / "mender.yaml").write_text(shipped.replace("max_turns: 80", "max_turns: 99"))
+    shipped = (PACKAGED_CONFIG / "agents" / "fixer.yaml").read_text()
+    (override / "fixer.yaml").write_text(shipped.replace("max_turns: 80", "max_turns: 99"))
 
     cfg = load_config(search=(tmp_path / "config", *CONFIG_SEARCH))
-    assert cfg.agents["MENDER"].max_turns == 99, "the override did not win"
+    assert cfg.agents["FIXER"].max_turns == 99, "the override did not win"
     assert len(cfg.agents) == len(PACKAGED_AGENTS), "shadowing one agent must not drop the others"
-    assert cfg.agents["CONDUIT"].max_turns == 60, "an untouched agent changed"
+    assert cfg.agents["API"].max_turns == 60, "an untouched agent changed"
 
 
 def test_system_yaml_is_taken_whole_from_the_first_layer(tmp_path):

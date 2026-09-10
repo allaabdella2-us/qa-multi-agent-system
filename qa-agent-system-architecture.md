@@ -41,24 +41,24 @@ These drive every decision below. Read them first; they explain why the roster l
 
 ```
 ┌─ LAYER 0 · CONTROL ────────────────────────────────────┐
-│  CONDUCTOR (orchestrator)   CARTOGRAPHER (system map)  │
+│  ROUTER (orchestrator)   MAPPER (system map)  │
 └────────────────────┬───────────────────────────────────┘
                      │ dispatch + shared map
 ┌─ LAYER 1 · DISCOVERY ──────────────────────────────────┐
-│  KEYSTONE   VAULT   CONDUIT   PULSE                    │
-│  SURFACE    USHER   WARDEN    GAUGE                    │
+│  ARCHITECT   DBA   API   SOCKET                    │
+│  BROWSER    GUIDE   AUDITOR    LOAD                    │
 └────────────────────┬───────────────────────────────────┘
                      │ DefectEnvelope (draft)
 ┌─ LAYER 2 · TRIAGE ─────────────────────────────────────┐
-│  FORGE (reproduce)  →  CLERK (dedupe, score, file)     │
+│  REPRODUCER (reproduce)  →  TRIAGE (dedupe, score, file)     │
 └────────────────────┬───────────────────────────────────┘
                      │ Jira ticket  [agent-ready]
 ┌─ LAYER 3 · REMEDIATION ────────────────────────────────┐
-│  MENDER (fix)  →  ARBITER (review)  →  PROOF (verify)  │
+│  FIXER (fix)  →  REVIEWER (review)  →  VERIFIER (verify)  │
 └────────────────────────────────────────────────────────┘
                      │ closed ticket + merged PR
                      ▼
-              CHRONICLE (optional, reporting)
+              REPORTER (optional, reporting)
 ```
 
 ---
@@ -69,13 +69,13 @@ These drive every decision below. Read them first; they explain why the roster l
 
 ---
 
-#### 4.1 CONDUCTOR — Orchestrator
+#### 4.1 ROUTER — Orchestrator
 
 **Role.** Owns the run state machine. Decides which discovery agents fire for a given trigger, allocates budget, enforces concurrency limits, handles retries and dead-letters, and escalates to humans.
 
 **Runs when.** Every trigger: PR opened, nightly sweep, release candidate cut, on-demand request, incident declared.
 
-**Inputs.** Trigger event, change manifest (files/services touched), the Cartographer's system map, prior run history.
+**Inputs.** Trigger event, change manifest (files/services touched), the Mapper's system map, prior run history.
 
 **Outputs.** Work orders to discovery agents; a run ledger; escalations to Slack.
 
@@ -83,13 +83,13 @@ These drive every decision below. Read them first; they explain why the roster l
 
 **Skills.** `run-orchestration`, `budget-governor`, `escalation-policy`, `blast-radius-rules`.
 
-**Why it exists.** Without a single owner of the state machine, agents duplicate work, retry storms happen, and cost is unbounded. Conductor is the only agent allowed to start other agents.
+**Why it exists.** Without a single owner of the state machine, agents duplicate work, retry storms happen, and cost is unbounded. Router is the only agent allowed to start other agents.
 
 **Failure mode to watch.** Becoming a bottleneck that serialises everything. Keep its reasoning shallow — routing, not analysis.
 
 ---
 
-#### 4.2 CARTOGRAPHER — System & Product Mapper
+#### 4.2 MAPPER — System & Product Mapper
 
 **Role.** Builds and maintains the shared ground truth: service catalog, module dependency graph, ownership map (CODEOWNERS → team → Jira component), route inventory, API surface, DB schema snapshot, event/topic catalog, and the product's UI task graph.
 
@@ -113,7 +113,7 @@ Each discovery agent produces **draft** DefectEnvelopes. None of them file ticke
 
 ---
 
-#### 4.3 KEYSTONE — Architecture Analyst
+#### 4.3 ARCHITECT — Architecture Analyst
 
 **Domain.** Structure, boundaries, coupling, drift.
 
@@ -136,7 +136,7 @@ Each discovery agent produces **draft** DefectEnvelopes. None of them file ticke
 
 ---
 
-#### 4.4 VAULT — Database & Data Integrity Analyst
+#### 4.4 DBA — Database & Data Integrity Analyst
 
 **Domain.** Schema, migrations, query behaviour, data correctness.
 
@@ -158,7 +158,7 @@ Each discovery agent produces **draft** DefectEnvelopes. None of them file ticke
 
 ---
 
-#### 4.5 CONDUIT — Backend, API & Contract Analyst
+#### 4.5 API — Backend, API & Contract Analyst
 
 **Domain.** HTTP/gRPC surface, contracts, auth, error behaviour.
 
@@ -177,11 +177,11 @@ Each discovery agent produces **draft** DefectEnvelopes. None of them file ticke
 
 **Skills.** `openapi-diff`, `authz-matrix-check`, `idempotency-review`, `error-taxonomy`, `contract-test-generation`, `rate-limit-audit`.
 
-**Note.** This agent generates *contract tests* as evidence, not just findings. A CONDUIT defect ships with a failing contract test attached.
+**Note.** This agent generates *contract tests* as evidence, not just findings. A API defect ships with a failing contract test attached.
 
 ---
 
-#### 4.6 PULSE — Realtime & WebSocket Analyst
+#### 4.6 SOCKET — Realtime & WebSocket Analyst
 
 **Domain.** Persistent connections, streaming, event ordering.
 
@@ -205,7 +205,7 @@ Each discovery agent produces **draft** DefectEnvelopes. None of them file ticke
 
 ---
 
-#### 4.7 SURFACE — Frontend & UI Explorer
+#### 4.7 BROWSER — Frontend & UI Explorer
 
 **Domain.** The rendered product, as a user experiences it.
 
@@ -224,11 +224,11 @@ Each discovery agent produces **draft** DefectEnvelopes. None of them file ticke
 
 **Skills.** `exploratory-ui-walk`, `a11y-audit`, `visual-diff`, `console-error-triage`, `responsive-matrix`, `form-state-probe`, `interaction-latency`.
 
-**Mode.** Runs two ways: **scripted** (known critical journeys, every PR) and **exploratory** (agent-directed wandering from the Cartographer's task graph, nightly). Exploratory mode is where you find the things nobody wrote a test for.
+**Mode.** Runs two ways: **scripted** (known critical journeys, every PR) and **exploratory** (agent-directed wandering from the Mapper's task graph, nightly). Exploratory mode is where you find the things nobody wrote a test for.
 
 ---
 
-#### 4.8 USHER — Product Navigation & UX Guide
+#### 4.8 GUIDE — Product Navigation & UX Guide
 
 **Domain.** "How do I do X in this product?" — for humans and as a defect signal.
 
@@ -246,7 +246,7 @@ This agent has two jobs and they reinforce each other.
 
 ---
 
-#### 4.9 WARDEN — Security & Dependency Auditor
+#### 4.9 AUDITOR — Security & Dependency Auditor
 
 **Domain.** Vulnerabilities, secrets, supply chain.
 
@@ -256,11 +256,11 @@ This agent has two jobs and they reinforce each other.
 
 **Skills.** `sast-triage`, `secret-scan`, `dependency-reachability`, `security-header-audit`, `cve-severity-contextualisation`.
 
-**Critical rule.** Security findings **never** auto-file into a public Jira project. They route to a restricted project or a private channel. Encode this in CLERK's routing rules, not in WARDEN's prompt.
+**Critical rule.** Security findings **never** auto-file into a public Jira project. They route to a restricted project or a private channel. Encode this in TRIAGE's routing rules, not in AUDITOR's prompt.
 
 ---
 
-#### 4.10 GAUGE — Performance & Load Analyst
+#### 4.10 LOAD — Performance & Load Analyst
 
 **Domain.** Latency, throughput, resource behaviour under load.
 
@@ -278,11 +278,11 @@ This agent has two jobs and they reinforce each other.
 
 ---
 
-#### 4.11 FORGE — Reproduction Engineer
+#### 4.11 REPRODUCER — Reproduction Engineer
 
 **Role.** Turns a finding into a deterministic, minimal reproduction plus a **failing test**. Findings it cannot reproduce are demoted or dropped.
 
-**Runs when.** On every draft DefectEnvelope before it reaches CLERK.
+**Runs when.** On every draft DefectEnvelope before it reaches TRIAGE.
 
 **Outputs.** A repro recipe (exact env, seed data, steps), a failing automated test committed to a scratch branch, and a confidence score. Marks `NOT_REPRODUCIBLE` or `FLAKY` where appropriate.
 
@@ -290,18 +290,18 @@ This agent has two jobs and they reinforce each other.
 
 **Skills.** `repro-minimisation`, `failing-test-authoring`, `flake-detection` (run N times, measure), `environment-pinning`.
 
-**Why it exists.** This is your noise filter and it is non-negotiable. Without FORGE, discovery agents flood Jira with unreproducible findings and engineers stop trusting the system within two weeks. The failing test it writes also becomes the acceptance criterion PROOF checks later. One artifact, three uses.
+**Why it exists.** This is your noise filter and it is non-negotiable. Without REPRODUCER, discovery agents flood Jira with unreproducible findings and engineers stop trusting the system within two weeks. The failing test it writes also becomes the acceptance criterion VERIFIER checks later. One artifact, three uses.
 
 ---
 
-#### 4.12 CLERK — Triage & Jira Scribe
+#### 4.12 TRIAGE — Triage & Jira Scribe
 
 **Role.** The only agent with Jira write access. Dedupes, scores severity, resolves ownership, writes the ticket, links related work, and routes.
 
 **Steps.**
 1. **Dedupe** against the Defect Memory MCP (embedding + fingerprint match). Existing ticket → increment occurrence, add evidence, do not create.
 2. **Score** severity and priority against the rubric (§7).
-3. **Resolve owner** via the Cartographer ownership map → Jira component + assignee group.
+3. **Resolve owner** via the Mapper ownership map → Jira component + assignee group.
 4. **Compose** the ticket: title, repro, evidence links, impact, suggested area, acceptance criteria.
 5. **Route**: security → restricted project; UX friction → product backlog; bug → engineering; tech debt → debt backlog.
 6. **Label** `agent-found`, plus `agent-ready` if the fix is inside the autonomy envelope (§8).
@@ -318,7 +318,7 @@ This agent has two jobs and they reinforce each other.
 
 ---
 
-#### 4.13 MENDER — Remediation Engineer
+#### 4.13 FIXER — Remediation Engineer
 
 **Role.** Picks up `agent-ready` tickets and produces a pull request.
 
@@ -340,29 +340,29 @@ Deliberately **one agent, many skills** rather than five domain-specific fixers.
 
 ---
 
-#### 4.14 ARBITER — Review & Risk Gate
+#### 4.14 REVIEWER — Review & Risk Gate
 
-**Role.** Reviews MENDER's PR as an adversarial reviewer. Judges correctness, scope creep, hidden regressions, and risk.
+**Role.** Reviews FIXER's PR as an adversarial reviewer. Judges correctness, scope creep, hidden regressions, and risk.
 
 **Checks.** Does the fix address the root cause or the symptom? Is the diff minimal? Does it break contracts, schemas, or public API? Does it introduce security or performance regressions? Are regression tests real, or asserted-to-pass? Is the rollback plan viable?
 
-**Outputs.** `APPROVE` / `REQUEST_CHANGES` (with specifics, back to MENDER) / `ESCALATE_TO_HUMAN`.
+**Outputs.** `APPROVE` / `REQUEST_CHANGES` (with specifics, back to FIXER) / `ESCALATE_TO_HUMAN`.
 
 **Tools.** GitHub MCP (read + PR comment), Semgrep MCP, Contract Diff MCP, Filesystem MCP (read). **No write access to code.**
 
 **Skills.** `adversarial-review`, `root-cause-vs-symptom`, `regression-risk-scoring`, `test-quality-audit`.
 
-**Why separate from MENDER.** Same reason as finder/fixer. A model reviewing its own diff in the same context reliably rationalises it.
+**Why separate from FIXER.** Same reason as finder/fixer. A model reviewing its own diff in the same context reliably rationalises it.
 
 ---
 
-#### 4.15 PROOF — Verification & Regression Gate
+#### 4.15 VERIFIER — Verification & Regression Gate
 
-**Role.** The closing authority. Re-runs FORGE's original repro against the patched build and confirms the defect is gone and nothing else broke.
+**Role.** The closing authority. Re-runs REPRODUCER's original repro against the patched build and confirms the defect is gone and nothing else broke.
 
-**Steps.** Deploy PR to an ephemeral environment → run the original failing test (must now pass) → run the full regression suite for affected areas → run a targeted SURFACE/PULSE pass if UI or realtime was touched → compare performance baseline → post verdict to the ticket.
+**Steps.** Deploy PR to an ephemeral environment → run the original failing test (must now pass) → run the full regression suite for affected areas → run a targeted BROWSER/SOCKET pass if UI or realtime was touched → compare performance baseline → post verdict to the ticket.
 
-**Outputs.** `VERIFIED` (ticket → Done, PR ready for human merge) or `NOT_FIXED` (reopen, back to MENDER with the delta) or `REGRESSED` (block, escalate).
+**Outputs.** `VERIFIED` (ticket → Done, PR ready for human merge) or `NOT_FIXED` (reopen, back to FIXER with the delta) or `REGRESSED` (block, escalate).
 
 **Tools.** Test Runner MCP, Playwright MCP, WebSocket Harness MCP, Environment Control MCP, Atlassian MCP (**transition only**, not create), GitHub MCP (status checks).
 
@@ -370,7 +370,7 @@ Deliberately **one agent, many skills** rather than five domain-specific fixers.
 
 ---
 
-#### 4.16 CHRONICLE — Reporting *(optional, phase 4)*
+#### 4.16 REPORTER — Reporting *(optional, phase 4)*
 
 Weekly quality reports, trend analysis, agent performance metrics, hot-spot identification. Read-only across Jira, GitHub, and the Defect Memory. Add it once you have three months of data and not before.
 
@@ -382,18 +382,18 @@ Weekly quality reports, trend analysis, agent performance metrics, hot-spot iden
 
 | # | Server | Purpose | Used by | Access |
 |---|---|---|---|---|
-| 1 | **Playwright MCP** (`@playwright/mcp`, Microsoft) | Browser automation, accessibility tree, screenshots, E2E | SURFACE, USHER, FORGE, PULSE, MENDER, PROOF | Isolated browser profile |
-| 2 | **Chrome DevTools MCP** | Console, network, performance traces, WS frame inspection | SURFACE, GAUGE, PULSE | Clean profile |
-| 3 | **Atlassian MCP** (official Rovo remote server) | Jira issues, transitions, Confluence read | CLERK (write), PROOF (transition), others read | OAuth 2.1, dedicated bot user |
+| 1 | **Playwright MCP** (`@playwright/mcp`, Microsoft) | Browser automation, accessibility tree, screenshots, E2E | BROWSER, GUIDE, REPRODUCER, SOCKET, FIXER, VERIFIER | Isolated browser profile |
+| 2 | **Chrome DevTools MCP** | Console, network, performance traces, WS frame inspection | BROWSER, LOAD, SOCKET | Clean profile |
+| 3 | **Atlassian MCP** (official Rovo remote server) | Jira issues, transitions, Confluence read | TRIAGE (write), VERIFIER (transition), others read | OAuth 2.1, dedicated bot user |
 | 4 | **GitHub MCP** (or GitLab equivalent) | Repos, PRs, issues, checks, advisories | Nearly all | Scoped per agent |
-| 5 | **Sentry MCP** | Production errors, real-world failure shapes | CONDUIT, WARDEN, CLERK | Read, single project via OAuth |
-| 6 | **Postgres MCP Pro** | Query plans, index health, schema | VAULT, CONDUIT, MENDER | Read-only role + restricted mode |
-| 7 | **Semgrep MCP** | SAST, custom rule enforcement | WARDEN, ARBITER, KEYSTONE | Read |
-| 8 | **Figma MCP** (Dev Mode) | Design source of truth for visual diffs | SURFACE, USHER, CARTOGRAPHER | Read |
-| 9 | **Grafana MCP** (or Datadog) | Metrics, dashboards, alerting context | GAUGE, VAULT, PULSE | Read |
-| 10 | **Context7** | Current library/framework docs | KEYSTONE, MENDER | Public docs |
-| 11 | **Slack MCP** | Human-in-loop escalation, notifications | CONDUCTOR, CLERK | Post to specific channels |
-| 12 | **Filesystem MCP** | Local workspace file access | Most | Read; write only for FORGE/MENDER |
+| 5 | **Sentry MCP** | Production errors, real-world failure shapes | API, AUDITOR, TRIAGE | Read, single project via OAuth |
+| 6 | **Postgres MCP Pro** | Query plans, index health, schema | DBA, API, FIXER | Read-only role + restricted mode |
+| 7 | **Semgrep MCP** | SAST, custom rule enforcement | AUDITOR, REVIEWER, ARCHITECT | Read |
+| 8 | **Figma MCP** (Dev Mode) | Design source of truth for visual diffs | BROWSER, GUIDE, MAPPER | Read |
+| 9 | **Grafana MCP** (or Datadog) | Metrics, dashboards, alerting context | LOAD, DBA, SOCKET | Read |
+| 10 | **Context7** | Current library/framework docs | ARCHITECT, FIXER | Public docs |
+| 11 | **Slack MCP** | Human-in-loop escalation, notifications | ROUTER, TRIAGE | Post to specific channels |
+| 12 | **Filesystem MCP** | Local workspace file access | Most | Read; write only for REPRODUCER/FIXER |
 
 **Jira deployment note.** Atlassian's official hosted server is Cloud-only and uses OAuth 2.1. If you are on Jira Server or Data Center, use the community `sooperset/mcp-atlassian` server (self-hosted, Docker, PAT auth) instead. Confirm current endpoints and auth before you wire anything — Atlassian has already deprecated one endpoint in this product's lifetime.
 
@@ -405,33 +405,33 @@ No adequate off-the-shelf option exists for these. Budget real engineering time.
 
 | # | Server | Why you must build it | Core tools to expose |
 |---|---|---|---|
-| 1 | **WebSocket Harness MCP** | Nothing off-the-shelf drives stateful socket testing. This is PULSE's entire capability. | `connect(url, auth)`, `send(frame)`, `assert_ordering(seq)`, `simulate_disconnect(mode)`, `reconnect_storm(n, jitter)`, `stall_consumer(ms)`, `measure_backpressure()`, `capture_frames(duration)` |
+| 1 | **WebSocket Harness MCP** | Nothing off-the-shelf drives stateful socket testing. This is SOCKET's entire capability. | `connect(url, auth)`, `send(frame)`, `assert_ordering(seq)`, `simulate_disconnect(mode)`, `reconnect_storm(n, jitter)`, `stall_consumer(ms)`, `measure_backpressure()`, `capture_frames(duration)` |
 | 2 | **Test Runner MCP** | Agents need structured pass/fail/flake data, not scraped CLI output. | `run_suite(selector)`, `run_single(test)`, `run_n_times(test, n)` (flake detection), `get_coverage(paths)`, `affected_tests(diff)` |
 | 3 | **Environment Control MCP** | Deterministic repro is impossible without controlled state. | `spin_up(branch)`, `seed(fixture)`, `reset()`, `set_flag(k,v)`, `set_clock(t)`, `impersonate(role)`, `tear_down()` |
 | 4 | **Defect Memory MCP** | Dedupe is the difference between a useful system and ticket spam. Needs vector + fingerprint search over historical defects. | `search_similar(envelope)`, `fingerprint(envelope)`, `record(envelope, jira_key)`, `get_occurrences(fp)`, `mark_resolved(fp)` |
 | 5 | **Contract Diff MCP** | Semantic API-change detection, not text diff. | `diff_openapi(a,b)`, `classify_breaking(change)`, `find_consumers(endpoint)`, `generate_contract_test(endpoint)` |
 
-Optionally a sixth, **Load Runner MCP**, wrapping k6 or Artillery for GAUGE. You can start by shelling out to the CLI and promote it to an MCP server later.
+Optionally a sixth, **Load Runner MCP**, wrapping k6 or Artillery for LOAD. You can start by shelling out to the CLI and promote it to an MCP server later.
 
 ### 5.3 Per-agent tool allowlist
 
 | Agent | MCP servers | Count |
 |---|---|---|
-| CONDUCTOR | GitHub, Slack, Defect Memory | 3 |
-| CARTOGRAPHER | GitHub, Filesystem, Postgres, Atlassian, Figma | 5 |
-| KEYSTONE | GitHub, Filesystem, Atlassian, Context7, Semgrep | 5 |
-| VAULT | Postgres, GitHub, Filesystem, Grafana | 4 |
-| CONDUIT | Contract Diff, GitHub, Filesystem, Sentry, Postgres | 5 |
-| PULSE | WS Harness, Playwright, Chrome DevTools, Grafana, GitHub | 5 |
-| SURFACE | Playwright, Chrome DevTools, Figma, Env Control, Filesystem | 5 |
-| USHER | Playwright, Atlassian, Figma, Env Control, Defect Memory | 5 |
-| WARDEN | Semgrep, GitHub, Filesystem, Contract Diff | 4 |
-| GAUGE | Grafana, Chrome DevTools, Load Runner, Postgres | 4 |
-| FORGE | Playwright, Test Runner, Env Control, GitHub, Filesystem, WS Harness | 6 |
-| CLERK | Atlassian, Defect Memory, Slack, GitHub | 4 |
-| MENDER | GitHub, Filesystem, Test Runner, Context7, Postgres, Playwright | 6 |
-| ARBITER | GitHub, Semgrep, Contract Diff, Filesystem | 4 |
-| PROOF | Test Runner, Playwright, WS Harness, Env Control, Atlassian, GitHub | 6 |
+| ROUTER | GitHub, Slack, Defect Memory | 3 |
+| MAPPER | GitHub, Filesystem, Postgres, Atlassian, Figma | 5 |
+| ARCHITECT | GitHub, Filesystem, Atlassian, Context7, Semgrep | 5 |
+| DBA | Postgres, GitHub, Filesystem, Grafana | 4 |
+| API | Contract Diff, GitHub, Filesystem, Sentry, Postgres | 5 |
+| SOCKET | WS Harness, Playwright, Chrome DevTools, Grafana, GitHub | 5 |
+| BROWSER | Playwright, Chrome DevTools, Figma, Env Control, Filesystem | 5 |
+| GUIDE | Playwright, Atlassian, Figma, Env Control, Defect Memory | 5 |
+| AUDITOR | Semgrep, GitHub, Filesystem, Contract Diff | 4 |
+| LOAD | Grafana, Chrome DevTools, Load Runner, Postgres | 4 |
+| REPRODUCER | Playwright, Test Runner, Env Control, GitHub, Filesystem, WS Harness | 6 |
+| TRIAGE | Atlassian, Defect Memory, Slack, GitHub | 4 |
+| FIXER | GitHub, Filesystem, Test Runner, Context7, Postgres, Playwright | 6 |
+| REVIEWER | GitHub, Semgrep, Contract Diff, Filesystem | 4 |
+| VERIFIER | Test Runner, Playwright, WS Harness, Env Control, Atlassian, GitHub | 6 |
 
 None exceeds 6. That is intentional.
 
@@ -446,7 +446,7 @@ The one contract every agent speaks. Validate on write and on read; reject malfo
   "envelope_version": "1.0",
   "id": "uuid",
   "run_id": "uuid",
-  "discovered_by": "PULSE",
+  "discovered_by": "SOCKET",
   "discovered_at": "ISO8601",
 
   "domain": "architecture|database|api|websocket|frontend|ux|security|performance",
@@ -474,7 +474,7 @@ The one contract every agent speaks. Validate on write and on read; reject malfo
     "steps": ["..."],
     "failing_test": "tests/ws/reconnect.spec.ts::resumes_after_drop",
     "flake_rate": 0.0,
-    "verified_by": "FORGE"
+    "verified_by": "REPRODUCER"
   },
 
   "impact": {
@@ -526,18 +526,18 @@ Write this down and make it the `severity-rubric` skill. Agents scoring severity
 
 | Resource | Who can write | Constraint |
 |---|---|---|
-| Jira (create) | CLERK only | Rate-limited; restricted routing for security |
-| Jira (transition) | CLERK, PROOF | PROOF may only close verified |
-| Git branches | FORGE (`qa/repro/*`), MENDER (`fix/*`) | Never main, never force-push |
-| Pull requests | MENDER (open only) | Merge is always human |
-| Filesystem | FORGE, MENDER | Sandboxed workspace only |
+| Jira (create) | TRIAGE only | Rate-limited; restricted routing for security |
+| Jira (transition) | TRIAGE, VERIFIER | VERIFIER may only close verified |
+| Git branches | REPRODUCER (`qa/repro/*`), FIXER (`fix/*`) | Never main, never force-push |
+| Pull requests | FIXER (open only) | Merge is always human |
+| Filesystem | REPRODUCER, FIXER | Sandboxed workspace only |
 | Database | Nobody | Read-only replicas across the board |
 | Production | Nobody | Ever |
 | Infra / secrets | Nobody | Ever |
 
 ### 8.2 Autonomy envelope
 
-MENDER may act without human pre-approval only when **all** hold:
+FIXER may act without human pre-approval only when **all** hold:
 
 - Severity is Major or below, or Critical with an unambiguous single-line fix
 - The diff touches fewer than N files and fewer than M lines (start with 5 / 150)
@@ -550,9 +550,9 @@ Everything else stops at a human. Tighten these limits at first; loosen them fro
 
 ### 8.3 Loop breakers
 
-- Max 2 MENDER→ARBITER round trips per ticket, then escalate
-- Max 1 reopen from PROOF per ticket, then escalate
-- Global per-run token and wall-clock budget, enforced by CONDUCTOR
+- Max 2 FIXER→REVIEWER round trips per ticket, then escalate
+- Max 1 reopen from VERIFIER per ticket, then escalate
+- Global per-run token and wall-clock budget, enforced by ROUTER
 - If a discovery agent produces more than K findings in one run, pause and escalate rather than file
 
 ### 8.4 Human-in-loop gates
@@ -565,12 +565,12 @@ Mandatory human touch at: PR merge, Blocker/Critical triage, any security ticket
 
 | Mode | Trigger | Agents | Budget |
 |---|---|---|---|
-| **PR check** | PR opened/updated | CONDUIT, VAULT, WARDEN, SURFACE (scripted), KEYSTONE | Fast, ~10 min |
-| **Nightly sweep** | Cron | All discovery, SURFACE + USHER in exploratory mode | Deep, ~2 h |
-| **Pre-release** | RC cut | All discovery + GAUGE full load profile | Full, blocking |
-| **On-demand** | Human asks | CONDUCTOR selects by question | Scoped |
-| **Incident** | Alert fires | CONDUIT + VAULT + PULSE + GAUGE, read-only, no filing | Fast, diagnostic |
-| **Fix cycle** | `agent-ready` ticket | MENDER → ARBITER → PROOF | Per ticket |
+| **PR check** | PR opened/updated | API, DBA, AUDITOR, BROWSER (scripted), ARCHITECT | Fast, ~10 min |
+| **Nightly sweep** | Cron | All discovery, BROWSER + GUIDE in exploratory mode | Deep, ~2 h |
+| **Pre-release** | RC cut | All discovery + LOAD full load profile | Full, blocking |
+| **On-demand** | Human asks | ROUTER selects by question | Scoped |
+| **Incident** | Alert fires | API + DBA + SOCKET + LOAD, read-only, no filing | Fast, diagnostic |
+| **Fix cycle** | `agent-ready` ticket | FIXER → REVIEWER → VERIFIER | Per ticket |
 
 ---
 
@@ -578,34 +578,34 @@ Mandatory human touch at: PR merge, Blocker/Critical triage, any security ticket
 
 | Failure | Control |
 |---|---|
-| **Ticket spam** — hundreds of low-value tickets, team disengages | FORGE gate, confidence threshold, per-run creation caps, dedupe |
+| **Ticket spam** — hundreds of low-value tickets, team disengages | REPRODUCER gate, confidence threshold, per-run creation caps, dedupe |
 | **Duplicate storms** — same defect filed under different phrasings | Defect Memory MCP with fingerprint + embedding dedupe, mandatory |
-| **Symptom fixes** — MENDER patches the test, not the bug | ARBITER root-cause check; MENDER cannot edit the defining test |
-| **Flaky tests become defects** | FORGE runs N times and records flake rate; flakes route to a separate quarantine queue |
-| **Agents disagree, work stalls** | Explicit tiebreaker: PROOF's verdict is final; ARBITER escalates rather than loops |
-| **Context poisoning** — bad map propagates everywhere | Cartographer output is versioned and validated; agents pin a map version per run |
-| **Cost blowup** | CONDUCTOR budget governor; expensive agents (GAUGE) on schedule only |
+| **Symptom fixes** — FIXER patches the test, not the bug | REVIEWER root-cause check; FIXER cannot edit the defining test |
+| **Flaky tests become defects** | REPRODUCER runs N times and records flake rate; flakes route to a separate quarantine queue |
+| **Agents disagree, work stalls** | Explicit tiebreaker: VERIFIER's verdict is final; REVIEWER escalates rather than loops |
+| **Context poisoning** — bad map propagates everywhere | Mapper output is versioned and validated; agents pin a map version per run |
+| **Cost blowup** | ROUTER budget governor; expensive agents (LOAD) on schedule only |
 | **Tool sprawl degrades reasoning** | Hard per-agent allowlists (§5.3), reviewed whenever an agent is added |
-| **Security findings leak into public tickets** | CLERK routing rules, enforced before the Jira call |
+| **Security findings leak into public tickets** | TRIAGE routing rules, enforced before the Jira call |
 
 ---
 
 ## 11. Phased rollout
 
 **Phase 1 — Prove the loop (weeks 1–6). 6 agents.**
-CARTOGRAPHER, SURFACE, CONDUIT, FORGE, CLERK, PROOF.
+MAPPER, BROWSER, API, REPRODUCER, TRIAGE, VERIFIER.
 Discovery on two surfaces only. No auto-fix at all. Goal: does the system file tickets an engineer is glad to receive? Measure precision. If under 70% accepted, stop and tune before adding anything.
 
 **Phase 2 — Add depth (weeks 7–12). +4 → 10 agents.**
-VAULT, PULSE, WARDEN, CONDUCTOR.
+DBA, SOCKET, AUDITOR, ROUTER.
 Build the WebSocket Harness and Environment Control MCP servers here. Still no auto-fix.
 
 **Phase 3 — Close the loop (weeks 13–20). +3 → 13 agents.**
-MENDER, ARBITER, plus KEYSTONE.
+FIXER, REVIEWER, plus ARCHITECT.
 Auto-fix enabled with the tightest possible autonomy envelope: trivial and minor only, human merge always.
 
 **Phase 4 — Scale (week 21+). +2 → 15 agents.**
-USHER, GAUGE, optionally CHRONICLE. Widen the autonomy envelope based on measured ARBITER approval and PROOF verification rates.
+GUIDE, LOAD, optionally REPORTER. Widen the autonomy envelope based on measured REVIEWER approval and VERIFIER verification rates.
 
 ---
 
@@ -615,7 +615,7 @@ USHER, GAUGE, optionally CHRONICLE. Widen the autonomy envelope based on measure
 
 **Triage quality.** Reproduction success rate, severity agreement with human reviewers, ownership routing accuracy.
 
-**Remediation quality.** ARBITER first-pass approval rate, PROOF verification rate, human merge rate without changes, regression rate of agent-authored fixes (this is the one that decides whether you widen autonomy).
+**Remediation quality.** REVIEWER first-pass approval rate, VERIFIER verification rate, human merge rate without changes, regression rate of agent-authored fixes (this is the one that decides whether you widen autonomy).
 
 **System health.** Cost per accepted ticket, cost per verified fix, mean time from discovery to verified fix, human escalation rate.
 
@@ -626,10 +626,10 @@ Track ticket acceptance rate from day one. It is the single number that tells yo
 ## 13. Open decisions for you
 
 1. **Jira Cloud or Data Center?** Determines official vs community MCP server and the whole auth story.
-2. **Monorepo or polyrepo?** Changes CARTOGRAPHER's design substantially.
+2. **Monorepo or polyrepo?** Changes MAPPER's design substantially.
 3. **Do ephemeral environments exist today?** If not, Environment Control MCP is the long pole and Phase 1 slips.
-4. **Which database?** The spec assumes Postgres. MySQL/Mongo change VAULT's tooling.
-5. **Existing E2E suite?** If yes, SURFACE bootstraps from it. If no, add 3–4 weeks.
+4. **Which database?** The spec assumes Postgres. MySQL/Mongo change DBA's tooling.
+5. **Existing E2E suite?** If yes, BROWSER bootstraps from it. If no, add 3–4 weeks.
 6. **Where does agent execution run?** CI runners, a dedicated orchestration service, or Claude Code sessions — this shapes concurrency and cost control.
 7. **What is the tolerable false-positive rate for your team?** This sets every threshold in §7 and §8.
 

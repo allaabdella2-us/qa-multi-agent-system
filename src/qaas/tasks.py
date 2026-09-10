@@ -92,7 +92,7 @@ def _auth_brief(profile: TargetProfile) -> str:
     )
 
 
-def cartographer(config: SystemConfig) -> str:
+def mapper(config: SystemConfig) -> str:
     p = _profile(config)
     spec = (
         f"`{p.layout.spec}` is the declared API contract — read it for the intended "
@@ -130,7 +130,7 @@ read of any one handler.
 Publish the map once, when it is complete."""
 
 
-def conduit(config: SystemConfig, mode: str) -> str:
+def api(config: SystemConfig, mode: str) -> str:
     p = _profile(config)
     spec_line = (
         f"Compare the implementation against `{p.layout.spec}` with `diff_openapi`, "
@@ -178,7 +178,7 @@ file that disagree with each other are where the defects are.
 {filing}"""
 
 
-def surface(config: SystemConfig, mode: str) -> str:
+def browser(config: SystemConfig, mode: str) -> str:
     p = _profile(config)
     if not p.environment.is_reachable or not p.environment.web_url:
         return f"""There is no running UI for the application at `{_where(config)}`, so there is
@@ -225,12 +225,12 @@ def discovery(config: SystemConfig, mode: str, spec: "AgentSpec") -> str:
     YAML file and no Python. That was not true: `_phase_discover` dispatched
     from a hardcoded dict of builders, so a new discovery agent was silently
     skipped with `no task builder` -- it validated, it assembled, it appeared in
-    `--dry-run`, and then it did nothing. VAULT and WARDEN were added exactly
+    `--dry-run`, and then it did nothing. DBA and AUDITOR were added exactly
     that way and this is the bug they found.
 
     What an agent should be told is: which application, what it can reach, and
     what its own prompt says its domain is. Everything specific to a domain
-    belongs in that agent's prompt, not here -- CONDUIT and SURFACE keep their
+    belongs in that agent's prompt, not here -- API and BROWSER keep their
     bespoke builders because they name tools (`diff_openapi`, the browser) that
     only they have.
     """
@@ -295,7 +295,7 @@ account of what was not looked at.
 Mode: {mode}."""
 
 
-def forge(envelope: DefectEnvelope, config: SystemConfig, flake_runs: int) -> str:
+def reproducer(envelope: DefectEnvelope, config: SystemConfig, flake_runs: int) -> str:
     p = _profile(config)
     evidence = "\n".join(f"  - {e.type.value}: {e.uri} {e.note}".rstrip() for e in envelope.evidence)
     managed = p.environment.is_managed
@@ -331,7 +331,7 @@ passing through a finding you could not reproduce costs more than dropping a
 real one."""
 
 
-def clerk(config: SystemConfig, cap: int) -> str:
+def triage(config: SystemConfig, cap: int) -> str:
     p = _profile(config)
     owners = (
         f"Resolve component and team from the system map's ownership section, which "
@@ -352,7 +352,7 @@ For each one, in this order:
    evidence and an incremented count, not a second ticket.
 2. Score severity against the rubric, by consequence to users.
 3. {owners}
-4. Compose the ticket in the house format, with FORGE's steps verbatim and the
+4. Compose the ticket in the house format, with REPRODUCER's steps verbatim and the
    failing test as the acceptance criterion.
 5. Route by class. Security findings go to the restricted project.
 6. `record` the defect in memory with its ticket key, so the next run dedupes
@@ -362,7 +362,7 @@ You may file at most {cap} tickets in this run. If you reach that, stop and
 escalate rather than filing more."""
 
 
-def proof(ticket_key: str, envelope: DefectEnvelope | None, branch: str) -> str:
+def verifier(ticket_key: str, envelope: DefectEnvelope | None, branch: str) -> str:
     repro = ""
     if envelope:
         steps = "\n".join(f"    {i}. {s}" for i, s in enumerate(envelope.reproduction.steps, 1))
@@ -388,12 +388,12 @@ the ticket accordingly. Say what you actually observed, including anything you
 skipped or could not run."""
 
 
-def mender(
+def fixer(
     ticket_key: str,
     envelope: DefectEnvelope | None,
     config: SystemConfig | None = None,
 ) -> str:
-    """The fix task. MENDER is Phase 3; the conductor's loop calls this once it exists."""
+    """The fix task. FIXER is Phase 3; the router's loop calls this once it exists."""
     where = f"the application at `{_where(config)}`" if config and config.profile else "the target application"
     detail = ""
     if envelope:
@@ -419,8 +419,8 @@ Work on a `fix/*` branch. Open the pull request as a draft with a rollback note.
 Never merge — merge is a human decision."""
 
 
-def arbiter(ticket_key: str, envelope: DefectEnvelope | None = None) -> str:
-    """The adversarial review task. ARBITER is Phase 3."""
+def reviewer(ticket_key: str, envelope: DefectEnvelope | None = None) -> str:
+    """The adversarial review task. REVIEWER is Phase 3."""
     context = ""
     if envelope:
         context = (

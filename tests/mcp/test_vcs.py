@@ -60,15 +60,15 @@ def make_ctx(agent_name: str, repo: Path, tmp_path: Path) -> ToolContext:
 
 
 @pytest.fixture
-def forge(repo: Path, tmp_path: Path) -> ToolContext:
-    """FORGE: write_paths ['qa/repro'], branch_patterns ['qa/repro/*'] (§8.1)."""
-    return make_ctx("FORGE", repo, tmp_path)
+def reproducer(repo: Path, tmp_path: Path) -> ToolContext:
+    """REPRODUCER: write_paths ['qa/repro'], branch_patterns ['qa/repro/*'] (§8.1)."""
+    return make_ctx("REPRODUCER", repo, tmp_path)
 
 
 @pytest.fixture
-def conduit(repo: Path, tmp_path: Path) -> ToolContext:
-    """CONDUIT: a discovery agent, so read-only by policy."""
-    return make_ctx("CONDUIT", repo, tmp_path)
+def api(repo: Path, tmp_path: Path) -> ToolContext:
+    """API: a discovery agent, so read-only by policy."""
+    return make_ctx("API", repo, tmp_path)
 
 
 def tools_for(ctx: ToolContext) -> dict:
@@ -86,17 +86,17 @@ def denied_tools(ctx: ToolContext) -> list[str]:
 # -- the policy is not vacuous ----------------------------------------------
 
 
-def test_forge_policy_matches_the_architecture(forge, conduit):
-    assert forge.agent.policy.branch_patterns == ["qa/repro/*"]
-    assert forge.agent.policy.write_paths == ["qa/repro"]
-    assert conduit.agent.policy.read_only
+def test_forge_policy_matches_the_architecture(reproducer, api):
+    assert reproducer.agent.policy.branch_patterns == ["qa/repro/*"]
+    assert reproducer.agent.policy.write_paths == ["qa/repro"]
+    assert api.agent.policy.read_only
 
 
-# -- what FORGE may do ------------------------------------------------------
+# -- what REPRODUCER may do ------------------------------------------------------
 
 
-async def test_forge_can_branch_write_and_commit(forge, repo):
-    tools = tools_for(forge)
+async def test_forge_can_branch_write_and_commit(reproducer, repo):
+    tools = tools_for(reproducer)
 
     created = await tools["create_branch"]({"name": "qa/repro/x"})
     assert not created.get("isError"), created
@@ -116,11 +116,11 @@ async def test_forge_can_branch_write_and_commit(forge, repo):
     sha = committed["structuredContent"]["sha"]
     assert len(sha) == 40
     assert "test_case.py" in git(repo, "show", "--name-only", "--format=", sha)
-    assert not denials(forge)
+    assert not denials(reproducer)
 
 
-async def test_diff_and_list_branches_are_readable(forge, repo):
-    tools = tools_for(forge)
+async def test_diff_and_list_branches_are_readable(reproducer, repo):
+    tools = tools_for(reproducer)
     await tools["create_branch"]({"name": "qa/repro/y"})
     (repo / "src" / "app.py").write_text("VALUE = 2\n")
 
@@ -131,56 +131,56 @@ async def test_diff_and_list_branches_are_readable(forge, repo):
     assert set(branches["structuredContent"]["branches"]) == {"main", "qa/repro/y"}
 
 
-# -- what FORGE may not do --------------------------------------------------
+# -- what REPRODUCER may not do --------------------------------------------------
 
 
-async def test_forge_is_refused_main(forge):
-    tools = tools_for(forge)
+async def test_forge_is_refused_main(reproducer):
+    tools = tools_for(reproducer)
     result = await tools["create_branch"]({"name": "main"})
     assert result["isError"]
     assert "protected" in result["content"][0]["text"]
-    assert denied_tools(forge) == ["create_branch"]
+    assert denied_tools(reproducer) == ["create_branch"]
 
 
-async def test_forge_is_refused_a_branch_outside_its_patterns(forge):
-    tools = tools_for(forge)
+async def test_forge_is_refused_a_branch_outside_its_patterns(reproducer):
+    tools = tools_for(reproducer)
     result = await tools["create_branch"]({"name": "fix/PROJ-1"})
     assert result["isError"]
     assert "qa/repro/*" in result["content"][0]["text"]
-    assert denied_tools(forge) == ["create_branch"]
+    assert denied_tools(reproducer) == ["create_branch"]
 
 
-async def test_forge_cannot_commit_on_main(forge, repo):
+async def test_forge_cannot_commit_on_main(reproducer, repo):
     """Being on a branch it may not write to is enough; no file is even staged."""
-    tools = tools_for(forge)
+    tools = tools_for(reproducer)
     (repo / "qa" / "repro" / "sneaky.py").write_text("x = 1\n")
     result = await tools["commit"]({"message": "on main"})
     assert result["isError"]
     assert "main" in result["content"][0]["text"]
     assert git(repo, "log", "--oneline").count("\n") == 1
-    assert denied_tools(forge) == ["commit"]
+    assert denied_tools(reproducer) == ["commit"]
 
 
-async def test_forge_cannot_write_outside_the_repository(forge):
-    tools = tools_for(forge)
+async def test_forge_cannot_write_outside_the_repository(reproducer):
+    tools = tools_for(reproducer)
     await tools["create_branch"]({"name": "qa/repro/x"})
     result = await tools["write_file"]({"path": "../../etc/passwd", "content": "pwned"})
     assert result["isError"]
     assert "outside the repository" in result["content"][0]["text"]
-    assert denied_tools(forge) == ["write_file"]
+    assert denied_tools(reproducer) == ["write_file"]
 
 
-async def test_forge_cannot_write_outside_its_sandbox(forge, repo):
-    tools = tools_for(forge)
+async def test_forge_cannot_write_outside_its_sandbox(reproducer, repo):
+    tools = tools_for(reproducer)
     await tools["create_branch"]({"name": "qa/repro/x"})
     result = await tools["write_file"]({"path": "src/app.py", "content": "VALUE = 99\n"})
     assert result["isError"]
     assert "sandbox" in result["content"][0]["text"]
     assert (repo / "src" / "app.py").read_text() == "VALUE = 1\n"
-    assert denied_tools(forge) == ["write_file"]
+    assert denied_tools(reproducer) == ["write_file"]
 
 
-async def test_forge_cannot_write_through_a_symlink_out_of_the_sandbox(forge, repo, tmp_path):
+async def test_forge_cannot_write_through_a_symlink_out_of_the_sandbox(reproducer, repo, tmp_path):
     """A path that looks sandboxed but resolves elsewhere is the interesting case:
     the check happens after resolution precisely so this fails."""
     outside = tmp_path / "outside"
@@ -188,30 +188,30 @@ async def test_forge_cannot_write_through_a_symlink_out_of_the_sandbox(forge, re
     (outside / "target.py").write_text("original\n")
     (repo / "qa" / "repro" / "escape").symlink_to(outside)
 
-    tools = tools_for(forge)
+    tools = tools_for(reproducer)
     await tools["create_branch"]({"name": "qa/repro/x"})
     result = await tools["write_file"]({"path": "qa/repro/escape/target.py", "content": "pwned"})
 
     assert result["isError"]
     assert (outside / "target.py").read_text() == "original\n"
-    assert denied_tools(forge) == ["write_file"]
+    assert denied_tools(reproducer) == ["write_file"]
 
 
-async def test_forge_cannot_write_an_absolute_path_elsewhere(forge, tmp_path):
-    tools = tools_for(forge)
+async def test_forge_cannot_write_an_absolute_path_elsewhere(reproducer, tmp_path):
+    tools = tools_for(reproducer)
     await tools["create_branch"]({"name": "qa/repro/x"})
     result = await tools["write_file"]({"path": str(tmp_path / "elsewhere.py"), "content": "x"})
     assert result["isError"]
     assert not (tmp_path / "elsewhere.py").exists()
 
 
-async def test_forge_cannot_stage_files_outside_its_sandbox(forge, repo):
-    tools = tools_for(forge)
+async def test_forge_cannot_stage_files_outside_its_sandbox(reproducer, repo):
+    tools = tools_for(reproducer)
     await tools["create_branch"]({"name": "qa/repro/x"})
     (repo / "src" / "app.py").write_text("VALUE = 2\n")
     result = await tools["commit"]({"message": "sneak in a source change", "paths": ["src/app.py"]})
     assert result["isError"]
-    assert denied_tools(forge) == ["commit"]
+    assert denied_tools(reproducer) == ["commit"]
 
 
 # -- a read-only agent ------------------------------------------------------
@@ -221,42 +221,42 @@ async def test_forge_cannot_stage_files_outside_its_sandbox(forge, repo):
     "tool_name, args",
     [
         ("create_branch", {"name": "qa/repro/x"}),
-        ("create_branch", {"name": "conduit/notes"}),
+        ("create_branch", {"name": "api/notes"}),
         ("write_file", {"path": "qa/repro/note.py", "content": "x = 1\n"}),
         ("write_file", {"path": "src/app.py", "content": "x = 1\n"}),
         ("commit", {"message": "anything"}),
     ],
 )
-async def test_conduit_is_refused_every_write(conduit, repo, tool_name, args):
+async def test_conduit_is_refused_every_write(api, repo, tool_name, args):
     """Empty write_paths and empty branch_patterns means no write path exists."""
-    tools = tools_for(conduit)
+    tools = tools_for(api)
     result = await tools[tool_name](args)
     assert result["isError"], result
-    assert denied_tools(conduit) == [tool_name]
+    assert denied_tools(api) == [tool_name]
     assert not (repo / "qa" / "repro" / "note.py").exists()
     assert git(repo, "branch", "--show-current").strip() == "main"
 
 
-async def test_conduit_may_still_read(conduit):
-    tools = tools_for(conduit)
+async def test_conduit_may_still_read(api):
+    tools = tools_for(api)
     current = await tools["current_branch"]({})
     assert current["structuredContent"] == {"branch": "main", "writable": False}
     assert not (await tools["list_branches"]({})).get("isError")
-    assert not denials(conduit)
+    assert not denials(api)
 
 
 # -- the refusal is auditable -----------------------------------------------
 
 
-async def test_every_refusal_carries_agent_tool_and_reason(forge):
-    tools = tools_for(forge)
+async def test_every_refusal_carries_agent_tool_and_reason(reproducer):
+    tools = tools_for(reproducer)
     await tools["create_branch"]({"name": "master"})
     await tools["write_file"]({"path": "/etc/passwd", "content": "pwned"})
 
-    entries = list(forge.store.ledger("denial"))
+    entries = list(reproducer.store.ledger("denial"))
     assert len(entries) == 2
     for entry in entries:
-        assert entry.agent == "FORGE"
+        assert entry.agent == "REPRODUCER"
         assert entry.detail["tool"] in {"create_branch", "write_file"}
         assert entry.detail["reason"]
 
@@ -303,7 +303,7 @@ def test_build_vcs_selects_by_config_value(repo):
 async def test_write_file_honours_the_forbidden_classes_that_edit_honours(repo, tmp_path):
     """`_path_refusal` never checked `forbidden_paths`; `_check_write` always did.
 
-    MENDER may write under `api/app` — so the sandbox check passes — while
+    FIXER may write under `api/app` — so the sandbox check passes — while
     `api/app/auth.py` is a §8.2 forbidden class. The two doors disagreed: `Edit`
     was refused and `mcp__vcs__write_file` wrote the file. Asserting both here
     is the point; either alone would have passed throughout the bug.
@@ -312,7 +312,7 @@ async def test_write_file_honours_the_forbidden_classes_that_edit_honours(repo, 
 
     (repo / "api" / "app").mkdir(parents=True)
     (repo / "api" / "app" / "auth.py").write_text("SECRET = 1\n")
-    ctx = make_ctx("MENDER", repo, tmp_path)
+    ctx = make_ctx("FIXER", repo, tmp_path)
     ctx.agent.policy.branch_patterns = ["*"]
 
     edit = Guardrail(ctx).check("Edit", {"file_path": "api/app/auth.py"})
@@ -335,7 +335,7 @@ async def test_a_glob_write_path_still_resolves_through_the_shared_check(repo, t
     """
     from qaas.guardrails import Guardrail
 
-    ctx = make_ctx("FORGE", repo, tmp_path)
+    ctx = make_ctx("REPRODUCER", repo, tmp_path)
     ctx.agent.policy.write_paths = ["qa/*/generated/*"]
     (repo / "qa" / "repro" / "generated").mkdir(parents=True)
 

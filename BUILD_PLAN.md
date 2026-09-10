@@ -6,8 +6,8 @@
 
 This plan turns that design into a running system. Per the answers given:
 
-- **Runtime** — a Python service on the **Claude Agent SDK** (`claude-agent-sdk`). CONDUCTOR is a real state machine in code; each agent is a `query()` invocation with a hard tool allowlist.
-- **Scope** — the doc's own Phase 1 loop (CARTOGRAPHER, SURFACE, CONDUIT, FORGE, CLERK, PROOF), genuinely end-to-end, on a framework where agents 7–15 are config rather than code.
+- **Runtime** — a Python service on the **Claude Agent SDK** (`claude-agent-sdk`). ROUTER is a real state machine in code; each agent is a `query()` invocation with a hard tool allowlist.
+- **Scope** — the doc's own Phase 1 loop (MAPPER, BROWSER, API, REPRODUCER, TRIAGE, VERIFIER), genuinely end-to-end, on a framework where agents 7–15 are config rather than code.
 - **Target** — a bundled, deliberately-buggy demo app as the system under test, with a golden defect ledger so precision/recall is measurable, not asserted.
 - **Integrations** — every external system behind an adapter with a local fake. The loop runs offline; real Jira/GitHub is a config swap.
 
@@ -19,9 +19,9 @@ Status: plan approved, no code written yet. The milestone table below is the wor
 
 ## Two design decisions that shape everything
 
-**1. CONDUCTOR is Python, not a prompt.** §4.1 says "keep its reasoning shallow — routing, not analysis," and §10 makes it the enforcement point for budget and concurrency. A model cannot enforce a budget it is spending. So the run state machine, dispatch, retries, dead-letter queue, and the §8.3 loop breakers are ordinary code. This also makes runs reproducible and cheap to test.
+**1. ROUTER is Python, not a prompt.** §4.1 says "keep its reasoning shallow — routing, not analysis," and §10 makes it the enforcement point for budget and concurrency. A model cannot enforce a budget it is spending. So the run state machine, dispatch, retries, dead-letter queue, and the §8.3 loop breakers are ordinary code. This also makes runs reproducible and cheap to test.
 
-**2. Every agent is its own top-level `query()`, not a subagent of a parent.** The SDK's `agents=` parameter nests subagents under one conversation; that blurs the per-agent tool allowlist §5.3 depends on and pools cost into one number. Running each agent as a separate `query()` gives a genuine context boundary (design principle §2), an enforceable per-agent allowlist, and per-agent `total_cost_usd` from its `ResultMessage`. `AgentDefinition`/`agents=` stays available for *intra-agent* fan-out (e.g. SURFACE exploring several routes in parallel).
+**2. Every agent is its own top-level `query()`, not a subagent of a parent.** The SDK's `agents=` parameter nests subagents under one conversation; that blurs the per-agent tool allowlist §5.3 depends on and pools cost into one number. Running each agent as a separate `query()` gives a genuine context boundary (design principle §2), an enforceable per-agent allowlist, and per-agent `total_cost_usd` from its `ResultMessage`. `AgentDefinition`/`agents=` stays available for *intra-agent* fan-out (e.g. BROWSER exploring several routes in parallel).
 
 ---
 
@@ -39,7 +39,7 @@ qa-multi-agent-system/
 ├── src/qaas/
 │   ├── envelope.py        # Pydantic DefectEnvelope v1.0 (§6) — the only inter-agent type
 │   ├── registry.py        # AgentSpec (YAML) -> ClaudeAgentOptions
-│   ├── conductor.py       # run state machine, budget governor, concurrency, dead-letter
+│   ├── router.py       # run state machine, budget governor, concurrency, dead-letter
 │   ├── runner.py          # invoke one agent, stream messages, record cost/usage/artifacts
 │   ├── guardrails.py      # can_use_tool + hooks = the §8.1 permission matrix, in code
 │   ├── store.py           # run ledger, artifact store, versioned system-map
@@ -70,22 +70,22 @@ qa-multi-agent-system/
 | `contract_diff` | `diff_openapi`, `classify_breaking`, `find_consumers`, `generate_contract_test` | `openapi.yaml` vs. live routes |
 | `tracker` | `create_issue`, `transition`, `link`, `search` | adapter: local JSON tickets or Atlassian |
 
-WebSocket Harness MCP is deferred — PULSE is Phase 2. Off-the-shelf servers (Playwright, Filesystem, GitHub) are declared as stdio configs in `config/agents/*.yaml`, so adding one is a YAML edit.
+WebSocket Harness MCP is deferred — SOCKET is Phase 2. Off-the-shelf servers (Playwright, Filesystem, GitHub) are declared as stdio configs in `config/agents/*.yaml`, so adding one is a YAML edit.
 
 ### Guardrails are code, not prompting
 
 §8.1's matrix becomes a `Policy` per agent, enforced in `can_use_tool` and a `preToolUse` hook — both of which see the tool name and arguments before execution:
 
-- **Path scoping** — Filesystem/Edit/Write calls resolved and checked against the agent's allowed roots. FORGE and MENDER only; everyone else denied.
+- **Path scoping** — Filesystem/Edit/Write calls resolved and checked against the agent's allowed roots. REPRODUCER and FIXER only; everyone else denied.
 - **Branch scoping** — git writes matched against the agent's branch regex (`qa/repro/*`, `fix/*`); `main` and any force-push denied outright.
-- **Ticket rate limit** — `tracker.create_issue` counted per run/project/day; over cap the call is denied with a reason and CONDUCTOR escalates instead of filing (§4.12).
-- **Immutable test** — MENDER (Phase 3) denied any edit to the test path recorded on the envelope (§10).
+- **Ticket rate limit** — `tracker.create_issue` counted per run/project/day; over cap the call is denied with a reason and ROUTER escalates instead of filing (§4.12).
+- **Immutable test** — FIXER (Phase 3) denied any edit to the test path recorded on the envelope (§10).
 
 Denials return `PermissionResultDeny` with a message, so the agent gets feedback and adapts rather than dying. Every denial is written to the run ledger — that log is the audit trail the doc asks for.
 
 ### The envelope is the only contract
 
-`envelope.py` is a Pydantic model of §6, and agents cannot emit anything else: their sole write path is `envelope.emit_envelope`, which validates and rejects with field-level errors on failure. Prose never crosses an agent boundary. `confidence < 0.6` routes to a human queue instead of CLERK (§7).
+`envelope.py` is a Pydantic model of §6, and agents cannot emit anything else: their sole write path is `envelope.emit_envelope`, which validates and rejects with field-level errors on failure. Prose never crosses an agent boundary. `confidence < 0.6` routes to a human queue instead of TRIAGE (§7).
 
 ---
 
@@ -105,21 +105,21 @@ FastAPI + Postgres + React UI + one WS endpoint. Seed ~14 defects spanning the P
 The six servers above plus local tracker/vcs adapters.
 **Verify:** `pytest tests/mcp` — every tool exercised directly, zero API calls. `defect_memory` proven to dedupe two differently-worded reports of the same defect.
 
-### M3 — Agent runtime + CARTOGRAPHER ✅ done
-`registry.py`, `runner.py`, `guardrails.py`, then the first real agent. CARTOGRAPHER goes first because §4.2 is right that everything downstream gets cheaper once the map exists.
-**Verify:** `qaas run --agent CARTOGRAPHER` writes a versioned `system-map.json` covering the target app's services, routes, schema, and ownership; schema-validated. Guardrail tests assert a write attempt from a read-only agent is denied and logged.
+### M3 — Agent runtime + MAPPER ✅ done
+`registry.py`, `runner.py`, `guardrails.py`, then the first real agent. MAPPER goes first because §4.2 is right that everything downstream gets cheaper once the map exists.
+**Verify:** `qaas run --agent MAPPER` writes a versioned `system-map.json` covering the target app's services, routes, schema, and ownership; schema-validated. Guardrail tests assert a write attempt from a read-only agent is denied and logged.
 
-### M4 — Discovery: CONDUIT + SURFACE ✅ done
-CONDUIT gets `contract_diff` and ships a failing contract test as evidence (§4.5). SURFACE runs scripted journeys first, then exploratory from the Cartographer task graph.
+### M4 — Discovery: API + BROWSER ✅ done
+API gets `contract_diff` and ships a failing contract test as evidence (§4.5). BROWSER runs scripted journeys first, then exploratory from the Mapper task graph.
 **Verify:** `qaas run --mode pr-check` emits envelopes; `qaas score` reports how many golden defects in those two domains were found and how many findings were not in the ledger.
 
-### M5 — Triage: FORGE + CLERK ✅ done
-FORGE reproduces, minimizes, runs N times for flake rate, and commits a failing test to `qa/repro/*`. CLERK dedupes, scores against the rubric, resolves owner from the map, routes, and files — the only agent holding tracker write.
+### M5 — Triage: REPRODUCER + TRIAGE ✅ done
+REPRODUCER reproduces, minimizes, runs N times for flake rate, and commits a failing test to `qa/repro/*`. TRIAGE dedupes, scores against the rubric, resolves owner from the map, routes, and files — the only agent holding tracker write.
 **Verify:** full discovery→triage run produces local tickets with real repro steps and attached failing tests; a second run on the same code files **zero** new tickets and increments occurrence counts instead.
 
-### M6 — Close the loop: PROOF + CONDUCTOR run modes ✅ done, verified live
-PROOF re-runs FORGE's test against a patched build and returns `VERIFIED`/`NOT_FIXED`/`REGRESSED`. CONDUCTOR gains all five discovery run modes, budget governor, concurrency caps, and escalation.
-**Verify:** the acceptance test for the whole system — fix one seeded defect by hand on a branch, run `qaas run --mode fix-cycle --ticket <id>`, and PROOF returns `VERIFIED`; revert the fix and it returns `NOT_FIXED`. Then `qaas run --mode nightly && qaas score` prints the §12 scorecard: acceptance rate, duplicate rate, false-positive rate, cost per accepted ticket.
+### M6 — Close the loop: VERIFIER + ROUTER run modes ✅ done, verified live
+VERIFIER re-runs REPRODUCER's test against a patched build and returns `VERIFIED`/`NOT_FIXED`/`REGRESSED`. ROUTER gains all five discovery run modes, budget governor, concurrency caps, and escalation.
+**Verify:** the acceptance test for the whole system — fix one seeded defect by hand on a branch, run `qaas run --mode fix-cycle --ticket <id>`, and VERIFIER returns `VERIFIED`; revert the fix and it returns `NOT_FIXED`. Then `qaas run --mode nightly && qaas score` prints the §12 scorecard: acceptance rate, duplicate rate, false-positive rate, cost per accepted ticket.
 
 ### Skills, hooks and loops ✅ done
 
@@ -141,17 +141,17 @@ that nothing counted. `Stop` blocks an agent that skipped its declared
 deliverable (`must_call` in its config), honouring `stop_hook_active` so a
 genuinely stuck agent cannot loop the budget away.
 
-**Loops** — `_phase_verify` is now a bounded remediation loop: PROOF → NOT_FIXED
-→ MENDER → ARBITER → PROOF, enforcing `max_proof_reopens` and
-`max_mender_arbiter_round_trips` from §8.3. PROOF's verdict is a typed ledger
-entry (`record_verdict`), never parsed from prose. With no MENDER in the Phase 1
-roster a NOT_FIXED escalates immediately instead of re-running PROOF against
+**Loops** — `_phase_verify` is now a bounded remediation loop: VERIFIER → NOT_FIXED
+→ FIXER → REVIEWER → VERIFIER, enforcing `max_proof_reopens` and
+`max_mender_arbiter_round_trips` from §8.3. VERIFIER's verdict is a typed ledger
+entry (`record_verdict`), never parsed from prose. With no FIXER in the Phase 1
+roster a NOT_FIXED escalates immediately instead of re-running VERIFIER against
 unchanged code. `qaas sweep` is the cron entry point: run, score, and exit
 non-zero below the §11 precision gate.
 
 ### M7 — Phase 3: the fix loop (beyond the original plan)
 
-MENDER and ARBITER, with the §8.2 autonomy envelope enforced in `guardrails.py`
+FIXER and REVIEWER, with the §8.2 autonomy envelope enforced in `guardrails.py`
 rather than requested in a prompt: a diff budget counted per distinct file, and
 forbidden path classes (migrations, auth, payment, secrets, infrastructure, CI)
 that stop at a human however small the change looks. `record_review` refuses a
@@ -161,8 +161,8 @@ review. Two new run modes: `fix-cycle` and `full-loop`.
 Merge remains impossible by construction: no merge method exists anywhere in the
 codebase, `gh pr merge` is refused, and pull requests open as drafts.
 
-**Verify:** conductor tests prove the bounded loop (PROOF → MENDER → ARBITER →
-PROOF, capped by `max_mender_arbiter_round_trips` and `max_proof_reopens`), and
+**Verify:** router tests prove the bounded loop (VERIFIER → FIXER → REVIEWER →
+VERIFIER, capped by `max_mender_arbiter_round_trips` and `max_proof_reopens`), and
 guardrail tests prove every forbidden class and the diff budget. Live: a
 `full-loop` run on the demo app that ends in a VERIFIED ticket.
 
@@ -175,9 +175,9 @@ turned up two defects in this system rather than one in the target:
    reporting no fixture and no way to pin a reproduction's environment. It
    truncates first now.
 2. `_verify_loop` re-read the branch off the envelope on every pass. That is the
-   *repro* branch, written before a fix exists, so PROOF was sent back to the
+   *repro* branch, written before a fix exists, so VERIFIER was sent back to the
    unfixed branch it had just failed on. VERIFIED was unreachable by
-   construction. The loop now reads MENDER's branch out of the ledger, scoped to
+   construction. The loop now reads FIXER's branch out of the ledger, scoped to
    the entries one remediation round appended.
 
 Both are the point of running the thing live: neither was visible to 528 offline
@@ -185,10 +185,10 @@ tests, and (2) meant no `full-loop` run could ever have closed.
 
 **A third defect, found only by re-running.** CORVID-7 then escalated twice with
 a correct one-line fix sitting on the branch, because two rules in this repo
-contradicted each other: `CLAUDE.md` required MENDER to retire the seeded
-defect's ledger entry in the same commit, and `mender.yaml`'s `write_paths`
-forbade it. MENDER tried and the guardrail refused
-(`Edit  write refused: target-app/defects.yaml is outside MENDER's sandbox`).
+contradicted each other: `CLAUDE.md` required FIXER to retire the seeded
+defect's ledger entry in the same commit, and `fixer.yaml`'s `write_paths`
+forbade it. FIXER tried and the guardrail refused
+(`Edit  write refused: target-app/defects.yaml is outside FIXER's sandbox`).
 Every seeded defect has a ledger entry, so this deadlocked *any* fix to any of
 them. The sandbox was right and the rule was wrong: the ledger is the answer key
 and must stay unwritable by the agents it scores, so the same-commit obligation
@@ -198,16 +198,16 @@ lesson — never request a change the author is not permitted to make.
 **Closed live on CORVID-8**, 2026-09-08, `fix-cycle`, $6.84, zero escalations:
 
 ```
-PROOF   NOT_FIXED   defect confirmed present
-MENDER              currency: str added to InvoiceOut (1 line of product code)
-ARBITER APPROVE
-PROOF   VERIFIED    re-verified on MENDER's branch
+VERIFIER   NOT_FIXED   defect confirmed present
+FIXER              currency: str added to InvoiceOut (1 line of product code)
+REVIEWER APPROVE
+VERIFIER   VERIFIED    re-verified on FIXER's branch
 ```
 
-PROOF ran the original failing test 5 of 5 times for flake, then the full 22-test
+VERIFIER ran the original failing test 5 of 5 times for flake, then the full 22-test
 `qa/repro` suite, and correctly attributed all 11 failures to other open tickets
 (CORVID-7, CORVID-SEC-6) with source confirmation rather than to the diff. The
-second PROOF dispatch is the hop the branch-selection fix above made reachable at
+second VERIFIER dispatch is the hop the branch-selection fix above made reachable at
 all. Verified independently afterwards: the diff is one product line and the live
 endpoint returns `currency`.
 
@@ -235,13 +235,13 @@ verdicts, no escalations, no tickets. The audit trail existed; the audit did not
   call instead of inventing a 29th kind no reader looks for.
 - **Two provenance gaps closed.** `agent_started` recorded `task_chars=len(task)`
   — the length of the prompt, not the prompt — so the instruction an agent
-  actually received was unrecoverable and five FORGE dispatches differed only by
+  actually received was unrecoverable and five REPRODUCER dispatches differed only by
   character count; the task now goes to the artifact store with a preview inline.
   And `run_started` recorded no commit, so a run was not pinned to the code it
   examined; it now carries the target's sha, branch and dirty flag.
 
 **Verify:** `pytest tests/test_trace.py` — 29 tests over a synthetic ledger and a
-scripted conductor, offline. Includes an AST sweep asserting every literal passed
+scripted router, offline. Includes an AST sweep asserting every literal passed
 to `store.log()` anywhere in `src/qaas/**` is a `LedgerKind` member, so the next
 kind added cannot go missing from the readers.
 
@@ -251,7 +251,7 @@ kind added cannot go missing from the readers.
 test", through `ToolContext.repo_root` and `SystemConfig.target_app`. That is
 true of exactly one target — the bundled demo, which happens to sit inside this
 checkout — and false for every other. `ToolContext.target_root` now comes from
-`profile.root_path()`, `SystemConfig.target_app` is gone, and MENDER's
+`profile.root_path()`, `SystemConfig.target_app` is gone, and FIXER's
 `write_paths` are target-relative (`api/app`, not `target-app/api/app`).
 
 `qaas run --repo <path-or-url>` follows from the split: it clones into
@@ -270,7 +270,7 @@ rather than layered by filename, so the first generated profile hid every
 hand-written one.
 
 ### Adding agents 7–15 afterwards
-A new discovery agent should be a prompt file plus a `config/agents/<NAME>.yaml` naming its allowlist — no changes to conductor, runner, or guardrails. Whether that holds is the real test of M3, so the first Phase-2 agent (VAULT) will be added as a smoke test of the extension path before this build is called done.
+A new discovery agent should be a prompt file plus a `config/agents/<NAME>.yaml` naming its allowlist — no changes to router, runner, or guardrails. Whether that holds is the real test of M3, so the first Phase-2 agent (DBA) will be added as a smoke test of the extension path before this build is called done.
 
 ---
 
@@ -278,7 +278,7 @@ A new discovery agent should be a prompt file plus a `config/agents/<NAME>.yaml`
 
 Every run spends real money, and a nightly sweep is the expensive one. Controls, from the start:
 
-- Per-agent and per-run `max_budget_usd` on `ClaudeAgentOptions`; CONDUCTOR aborts the run at the cap and records partial results.
+- Per-agent and per-run `max_budget_usd` on `ClaudeAgentOptions`; ROUTER aborts the run at the cap and records partial results.
 - `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` and `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` set via `env` — Opus 5 delegates readily, and an unbounded subagent tree is the fastest way to a surprise bill.
 - `--dry-run` renders each agent's exact options and prompt without calling the API; used in unit tests.
 - A cheap CI profile (lower effort, smaller model for the mechanical agents) separate from the full profile.
@@ -286,7 +286,7 @@ Every run spends real money, and a nightly sweep is the expensive one. Controls,
 
 Auth: no `ANTHROPIC_API_KEY` is set here, but the Claude Code CLI (v2.1.263) is installed and authenticated, and the Agent SDK drives it — so it works as-is. `ANTHROPIC_API_KEY` remains the CI path.
 
-Model default is `claude-opus-5` for judgment-heavy agents (CONDUIT, SURFACE, ARBITER later) and a cheaper model for mechanical ones (CARTOGRAPHER extraction, CLERK composition), set per agent in `config/agents/*.yaml`.
+Model default is `claude-opus-5` for judgment-heavy agents (API, BROWSER, REVIEWER later) and a cheaper model for mechanical ones (MAPPER extraction, TRIAGE composition), set per agent in `config/agents/*.yaml`.
 
 ---
 
@@ -302,5 +302,5 @@ Four tiers, cheapest first:
 ## Risks
 
 - **Hook event names.** The SDK's `HookEvent` literals differ between docs and releases (`preToolUse` vs `PreToolUse`). M3 pins them by introspecting the installed `claude_agent_sdk` rather than trusting the docs, and `can_use_tool` carries the guardrails so a hook-name regression degrades logging, not enforcement.
-- **Exploratory SURFACE is the noisiest agent.** It ships behind the confidence gate and the per-run finding cap from day one; if its false-positive rate is bad in M4, it runs scripted-only until the ledger says otherwise.
+- **Exploratory BROWSER is the noisiest agent.** It ships behind the confidence gate and the per-run finding cap from day one; if its false-positive rate is bad in M4, it runs scripted-only until the ledger says otherwise.
 - **Seeded defects are easier than real ones.** The golden ledger measures whether the loop works, not whether it is good at finding hard bugs. Treat 100% recall on `defects.yaml` as a floor, never as evidence the system is ready for a real codebase.

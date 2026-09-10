@@ -993,7 +993,7 @@ class JiraTracker(TrackerAdapter):
 
         The `search` tool advertises `{"enum": list(STATUSES)}` — the house names
         — and forwarded them to Jira verbatim, which validates status names and
-        answers 400. So CLERK following its own schema to dedupe
+        answers 400. So TRIAGE following its own schema to dedupe
         (`search(status="open", fingerprint=...)`) errored on every call, dedupe
         degraded silently, and the duplicate ticket this system exists to prevent
         got filed. `transition` goes to real trouble to translate via
@@ -1041,7 +1041,7 @@ class JiraTracker(TrackerAdapter):
 
         Mirrors `_match_transition`'s candidate order, so what this predicts is
         what a transition will actually do. A None is a silent failure waiting
-        to happen: PROOF asks for 'closed', nothing matches, and the ticket sits
+        to happen: VERIFIER asks for 'closed', nothing matches, and the ticket sits
         open while the run reports success.
         """
         available = {name.strip().lower(): name for name in status_names if name.strip()}

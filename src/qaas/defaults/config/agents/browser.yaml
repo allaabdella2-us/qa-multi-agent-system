@@ -1,0 +1,15 @@
+name: BROWSER
+layer: discovery
+role: >
+  Frontend and UI explorer. Walks the product as a user does: broken flows,
+  console errors, accessibility failures, missing loading/empty/error states,
+  form validation gaps, state desync.
+prompt: BROWSER.md
+model: claude-opus-5
+effort: high
+max_turns: 80
+mcp_servers: [envelope, env_control, playwright]
+builtin_tools: [Read, Grep, Glob]
+policy: {}
+
+skills: [exploratory-ui-walk, a11y-audit, console-error-triage, form-state-probe, product-task-graph, severity-rubric]

@@ -20,7 +20,7 @@ An unpinned reproduction is a story about something that once happened. Pinning 
 4. **Role.** Which user, which permissions. "Logged in" is not pinned.
 5. **Clock**, if any behaviour is time-dependent.
 
-All five go in the envelope's `environment` block. PROOF will bring up the same environment to verify the fix, and a mismatch there means the verification proves nothing.
+All five go in the envelope's `environment` block. VERIFIER will bring up the same environment to verify the fix, and a mismatch there means the verification proves nothing.
 
 ## Reset between attempts
 

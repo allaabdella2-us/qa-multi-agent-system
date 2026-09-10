@@ -266,21 +266,21 @@ def agent_usable(agent_name: str, caps: dict[str, bool]) -> bool:
     """Whether an agent can do useful work with the capabilities available.
 
     Lives here, beside `capabilities()`, because it has two callers that must
-    agree: `qaas doctor` reports it, and the conductor acts on it. They did not
-    agree for a while -- doctor would say "agents that cannot: SURFACE" and then
-    a run would dispatch SURFACE anyway and spend its whole budget looking for a
+    agree: `qaas doctor` reports it, and the router acts on it. They did not
+    agree for a while -- doctor would say "agents that cannot: BROWSER" and then
+    a run would dispatch BROWSER anyway and spend its whole budget looking for a
     browser that was never there. Being told an agent cannot work and then
     watching it run is worse than not being told.
 
-    Everything except SURFACE can contribute from static analysis alone, at
-    lower confidence. SURFACE without a reachable UI has nothing to do at all.
+    Everything except BROWSER can contribute from static analysis alone, at
+    lower confidence. BROWSER without a reachable UI has nothing to do at all.
     """
-    if agent_name in ("SURFACE", "USHER"):
-        # Both drive a browser. USHER's whole method is navigating the product
+    if agent_name in ("BROWSER", "GUIDE"):
+        # Both drive a browser. GUIDE's whole method is navigating the product
         # as a person would; with nothing to navigate it has no job at all.
         return caps.get("live_ui", False)
-    if agent_name == "GAUGE":
-        # Performance work needs something to measure. GAUGE can read query and
+    if agent_name == "LOAD":
+        # Performance work needs something to measure. LOAD can read query and
         # rendering code statically, but a latency claim about an application it
         # never called is a guess, and this system does not ship guesses.
         return caps.get("live_api", False) or caps.get("live_ui", False)

@@ -29,7 +29,7 @@ Layering granularity differs by kind, and that difference is deliberate:
                     across layers produces a configuration nobody wrote and
                     nobody can read back.
   * `agents/*.yaml` union by filename, higher layer shadows. Someone who wants
-                    MENDER's budget raised drops in one file; they do not fork
+                    FIXER's budget raised drops in one file; they do not fork
                     eight and freeze themselves on today's roster.
   * prompts/skills  union by name, higher layer shadows, same reasoning.
 """

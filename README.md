@@ -28,13 +28,13 @@ it is itself spending.
 ```
       DISCOVERY LOOP                                   REMEDIATION LOOP
  ┌──────────────────────────────────────┐        ┌───────────────────────────┐
- │  CARTOGRAPHER ─▶ CONDUIT ─┐          │        │   MENDER ─▶ ARBITER       │
- │   (system map)   SURFACE ─┴─▶ FORGE ─┼─▶ CLERK│    (fix)     (review)     │
+ │  MAPPER ─▶ API ─┐          │        │   FIXER ─▶ REVIEWER       │
+ │   (system map)   BROWSER ─┴─▶ REPRODUCER ─┼─▶ TRIAGE│    (fix)     (review)     │
  │                 (discover)   (repro) │  (file)│                           │
  └──────────────────────────────┬───────┘        └──────────┬────────────────┘
                                 │                           │
                                 ▼                           ▼
-                           [ TICKET ] ◀──────────────  PROOF (verify)
+                           [ TICKET ] ◀──────────────  VERIFIER (verify)
 ```
 
 Nothing crosses between the loops except a ticket — which is also the audit trail.
@@ -45,7 +45,7 @@ Nothing crosses between the loops except a ticket — which is also the audit tr
 
 | | |
 |---|---|
-| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `conductor.py`. That is also why **686 tests run offline, free, with no API key.** |
+| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **686 tests run offline, free, with no API key.** |
 | 🧱 **Every agent is its own `query()`** | Not subagents of a shared parent. Each gets a real context boundary, an enforceable tool allowlist, and its own cost number. |
 | 🔬 **Evidence or it did not happen** | `has_evidence()` and `is_fileable()` are methods on the envelope model, not requests in a prompt. An agent cannot talk its way past them. |
 | 📊 **Measured, not asserted** | A deliberately buggy demo app ships with a golden ledger of **16 seeded defects + 4 planted non-defects**. `qaas score` reports recall *and* precision, so a prompt change has a number attached. |
@@ -58,23 +58,23 @@ Nothing crosses between the loops except a ticket — which is also the audit tr
 
 | agent | layer | what it does |
 |---|---|---|
-| 🗺️ CARTOGRAPHER | map | services, routes, schema, ownership → the system map everything reads |
-| 🏛️ KEYSTONE | discovery | circular deps, layering violations, god modules, dead code |
-| 🔌 CONDUIT | discovery | API contract drift, authz gaps, error-shape inconsistency |
-| 🖱️ SURFACE | discovery | drives the UI through real journeys |
-| 🗄️ VAULT | discovery | schema constraints the code assumes and the database does not enforce |
-| 🔒 WARDEN | discovery | missing authorization, secrets, vulnerable dependencies, leaks |
-| 📡 PULSE | discovery | WebSocket auth, reconnect, ordering, backpressure |
-| 🧭 USHER | discovery | whether a person can *find* a feature, not just whether it works |
-| ⏱️ GAUGE | discovery | N+1 queries, unindexed hot paths, unbounded results, bundle outliers |
-| 🔨 FORGE | triage | reproduces, minimises, measures flake, commits a failing test |
-| 📝 CLERK | triage | dedupes, scores severity, routes, files — the only tracker writer |
-| 🔧 MENDER | remediation | the minimal fix, on a branch |
-| ⚖️ ARBITER | remediation | adversarial review: APPROVE / REQUEST_CHANGES / ESCALATE |
-| ✅ PROOF | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
-| 📊 CHRONICLE | reporting | what the run found, what recurred, and what it could not reach |
+| 🗺️ MAPPER | map | services, routes, schema, ownership → the system map everything reads |
+| 🏛️ ARCHITECT | discovery | circular deps, layering violations, god modules, dead code |
+| 🔌 API | discovery | API contract drift, authz gaps, error-shape inconsistency |
+| 🖱️ BROWSER | discovery | drives the UI through real journeys |
+| 🗄️ DBA | discovery | schema constraints the code assumes and the database does not enforce |
+| 🔒 AUDITOR | discovery | missing authorization, secrets, vulnerable dependencies, leaks |
+| 📡 SOCKET | discovery | WebSocket auth, reconnect, ordering, backpressure |
+| 🧭 GUIDE | discovery | whether a person can *find* a feature, not just whether it works |
+| ⏱️ LOAD | discovery | N+1 queries, unindexed hot paths, unbounded results, bundle outliers |
+| 🔨 REPRODUCER | triage | reproduces, minimises, measures flake, commits a failing test |
+| 📝 TRIAGE | triage | dedupes, scores severity, routes, files — the only tracker writer |
+| 🔧 FIXER | remediation | the minimal fix, on a branch |
+| ⚖️ REVIEWER | remediation | adversarial review: APPROVE / REQUEST_CHANGES / ESCALATE |
+| ✅ VERIFIER | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
+| 📊 REPORTER | reporting | what the run found, what recurred, and what it could not reach |
 
-**CONDUCTOR** is the sixteenth. It is the Python state machine rather than an
+**ROUTER** is the sixteenth. It is the Python state machine rather than an
 agent — a model cannot enforce a budget it is itself spending.
 
 ---
@@ -236,7 +236,7 @@ nothing** — an agent receives it only by naming it.
 $ qaas validate
                        Declared MCP servers
 ┃ name        ┃ kind  ┃ what it runs              ┃ used by      ┃
-│ house-lint  │ stdio │ ./tools/lint-mcp --strict │ CARTOGRAPHER │
+│ house-lint  │ stdio │ ./tools/lint-mcp --strict │ MAPPER │
 │ remote-docs │ http  │ https://mcp.example/v1    │ nobody       │
 ```
 
@@ -250,7 +250,7 @@ config file would mean importing arbitrary code into the process holding your
 Anthropic, Jira and GitHub credentials. Wrap it in a stdio entry point instead.
 
 Two limits worth knowing: **6 MCP servers per agent** (tool-selection accuracy
-falls off past ~7), and **MENDER is already at the cap** — the agent people most
+falls off past ~7), and **FIXER is already at the cap** — the agent people most
 want to extend.
 
 ---
@@ -261,11 +261,11 @@ Agents are **a prompt plus a YAML file**. Both are yours to change.
 
 ```bash
 qaas prompts list              # which prompt is in force, and where it came from
-qaas prompts eject CONDUIT     # copy it to .qaas/prompts/ and edit freely
+qaas prompts eject API     # copy it to .qaas/prompts/ and edit freely
 qaas prompts diff              # what you changed vs. what shipped
 ```
 
-Prefer **adding** to replacing — drop a `CONDUIT.append.md` beside it:
+Prefer **adding** to replacing — drop a `API.append.md` beside it:
 
 ```markdown
 ## Our conventions
@@ -286,18 +286,18 @@ Every tool call, denial, verdict and escalation is on the record.
 $ qaas trace run-20260908T182034-c6ed26
     t+  agent         kind            detail
     0s  -             run_started     mode=nightly  agents=[7]
-    0s  CARTOGRAPHER  agent_started   model=claude-sonnet-5
-    4s  CARTOGRAPHER  tool_call ×34   Read×25, Glob×6, ToolSearch×2
-    6s  CARTOGRAPHER  denial          tool=Bash  reason=Bash is not in CARTOGRAPHER's
+    0s  MAPPER  agent_started   model=claude-sonnet-5
+    4s  MAPPER  tool_call ×34   Read×25, Glob×6, ToolSearch×2
+    6s  MAPPER  denial          tool=Bash  reason=Bash is not in MAPPER's
                                       tool allowlist (Read, Grep, Glob).
-  146s  CARTOGRAPHER  system_map      version=20260907T233530  sections=[12]
-  156s  CARTOGRAPHER  agent_finished  subtype=success  num_turns=45
+  146s  MAPPER  system_map      version=20260907T233530  sections=[12]
+  156s  MAPPER  agent_finished  subtype=success  num_turns=45
 ```
 
 ```bash
 qaas trace <run-id> --follow                       # watch a run as it happens
 qaas trace <run-id> --quiet                        # decisions only, no file reads
-qaas trace <run-id> --agent proof --kind verdict   # filter
+qaas trace <run-id> --agent verifier --kind verdict   # filter
 qaas trace <run-id> --json                         # export
 qaas show <run-id>                                 # mode, commit, tickets, escalations
 qaas runs                                          # everything that ever ran
@@ -310,11 +310,11 @@ in a second terminal the moment a run begins, or even before, and it waits.
 $ qaas trace run-20260909T163240-83b11c --follow --quiet
 following run-20260909T163240-83b11c — ctrl-c to stop
 16:32:40 -            run_started      mode=pr-check  agents=[8]  target_sha=da19f406
-16:32:40 CARTOGRAPHER agent_started    model=claude-sonnet-5
-16:32:46 CARTOGRAPHER denial           tool=Bash  reason=Bash is not in CARTOGRAPHER's
+16:32:40 MAPPER agent_started    model=claude-sonnet-5
+16:32:46 MAPPER denial           tool=Bash  reason=Bash is not in MAPPER's
                                        tool allowlist (Read, Grep, Glob).
-16:36:11 KEYSTONE     envelope         severity=major  domain=architecture
-16:41:03 CLERK        ticket           action=created  key=QA-118  severity=major
+16:36:11 ARCHITECT     envelope         severity=major  domain=architecture
+16:41:03 TRIAGE        ticket           action=created  key=QA-118  severity=major
 ```
 
 Drop `--quiet` to see every file the agents read, one line each. Combine with
@@ -334,7 +334,7 @@ Enforced in code, not requested in a prompt:
 | 📁 **Path scoping** | Writes checked against that agent's `write_paths`. Most agents cannot write at all. |
 | 🌿 **Branch scoping** | Git writes must match the agent's patterns (`qa/repro/*`, `fix/*`). `main` and force-push refused outright. |
 | ⛔ **Forbidden classes** | Migrations, auth, payment, secrets, infrastructure, CI — stop at a human however small the change looks. |
-| 🎟️ **Ticket rate limit** | Over the per-run cap the call is denied and the conductor escalates rather than filing. |
+| 🎟️ **Ticket rate limit** | Over the per-run cap the call is denied and the router escalates rather than filing. |
 | 🧪 **Immutable test** | The agent fixing a defect may not edit the test that defines it. |
 | 🚫 **No filesystem settings** | `setting_sources=[]` — a repository qaas is inspecting cannot inject settings, hooks or MCP servers into the process running it. |
 

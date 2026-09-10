@@ -1,4 +1,4 @@
-# Ownership drives ticket routing. CLERK resolves component and team from here
+# Ownership drives ticket routing. TRIAGE resolves component and team from here
 # via the system map; an unmatched path files unassigned rather than guessed.
 
 api/app/routes/orders.py      @corvid/orders-team

@@ -48,7 +48,7 @@ OFFLINE_TOOLS = ("set_flag", "get_flags", "set_clock")
 @pytest.fixture
 def tools(make_ctx):
     """Tools bound to the real repository, so the real compose file is in play."""
-    return handlers(build_tools(make_ctx("SURFACE")))
+    return handlers(build_tools(make_ctx("BROWSER")))
 
 
 @pytest.fixture
@@ -68,7 +68,7 @@ def fake_docker(monkeypatch):
 
 
 def test_the_server_exposes_the_tools_architecture_5_2_names(make_ctx):
-    ctx = make_ctx("SURFACE")
+    ctx = make_ctx("BROWSER")
     assert [t.name for t in build_tools(ctx)] == [
         "spin_up", "seed", "reset", "set_flag", "get_flags", "set_clock",
         "impersonate", "status", "tear_down",
@@ -83,7 +83,7 @@ def test_the_server_exposes_the_tools_architecture_5_2_names(make_ctx):
 @pytest.mark.parametrize("name", sorted(ALL_CALLS))
 async def test_every_tool_refuses_cleanly_when_there_is_no_compose_file(make_ctx, tmp_path, name):
     """An empty repo root: no target-app, therefore no environment to control."""
-    tools = handlers(build_tools(make_ctx("SURFACE", target_root=tmp_path)))
+    tools = handlers(build_tools(make_ctx("BROWSER", target_root=tmp_path)))
     result = await tools[name](ALL_CALLS[name])
     assert is_error(result)
     assert "compose" in text_of(result)
@@ -140,9 +140,9 @@ async def test_a_clock_that_is_not_a_timestamp_is_refused(tools, no_docker):
 
 async def test_flags_are_scoped_to_one_run(make_ctx, no_docker):
     """Two runs must not inherit each other's environment, or a repro is a lie."""
-    first = handlers(build_tools(make_ctx("SURFACE")))
+    first = handlers(build_tools(make_ctx("BROWSER")))
     await first["set_flag"]({"key": "a.b", "value": True})
-    second = handlers(build_tools(make_ctx("SURFACE")))
+    second = handlers(build_tools(make_ctx("BROWSER")))
     assert structured(await second["get_flags"]({}))["flags"] == {}
 
 

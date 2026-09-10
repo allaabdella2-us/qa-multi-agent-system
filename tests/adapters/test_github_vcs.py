@@ -322,7 +322,7 @@ def test_a_diff_ref_may_not_smuggle_in_an_option(clone, tmp_path):
     """`git diff --output=<path>` exits 0 and writes the file it names.
 
     `pr_diff` and `list_changed_files` already refused a flag-like ref; `diff`,
-    the one tool documented "read-only", did not — and ARBITER holds it with a
+    the one tool documented "read-only", did not — and REVIEWER holds it with a
     policy that grants no write access at all.
     """
     target = tmp_path / "pwned"
@@ -425,14 +425,14 @@ def make_ctx(agent: AgentSpec, repo: Path, tmp_path: Path) -> ToolContext:
     )
 
 
-def mender(repo: Path, tmp_path: Path) -> ToolContext:
+def fixer(repo: Path, tmp_path: Path) -> ToolContext:
     """The remediation agent §8.1 grants `fix/*` and PRs (open only)."""
     return make_ctx(
         AgentSpec(
-            name="MENDER",
+            name="FIXER",
             layer="remediation",
             role="fix author",
-            prompt="MENDER.md",
+            prompt="FIXER.md",
             policy={"write_paths": ["."], "branch_patterns": ["fix/*"], "may_open_pr": True},
         ),
         repo,
@@ -449,7 +449,7 @@ def denials(ctx: ToolContext) -> list[dict]:
 
 
 async def test_mender_may_push_and_open_a_draft_pr(fake_gh, clone, tmp_path):
-    ctx = mender(clone, tmp_path)
+    ctx = fixer(clone, tmp_path)
     tools = tools_for(ctx)
 
     pushed = await tools["push"]({})
@@ -473,8 +473,8 @@ async def test_mender_may_push_and_open_a_draft_pr(fake_gh, clone, tmp_path):
 
 @pytest.mark.parametrize("tool_name, args", [("push", {}), ("open_pr", {"title": "t", "body": "b", "ticket": "P-1"})])
 async def test_an_agent_without_may_open_pr_is_refused_and_logged(fake_gh, clone, tmp_path, tool_name, args):
-    """FORGE may branch and commit (§8.1) but publishing is not its job."""
-    config_forge = load_config(search=CONFIG_SEARCH).agents["FORGE"]
+    """REPRODUCER may branch and commit (§8.1) but publishing is not its job."""
+    config_forge = load_config(search=CONFIG_SEARCH).agents["REPRODUCER"]
     assert not config_forge.policy.may_open_pr
 
     ctx = make_ctx(config_forge, clone, tmp_path)
@@ -489,7 +489,7 @@ async def test_an_agent_without_may_open_pr_is_refused_and_logged(fake_gh, clone
 
 @pytest.mark.parametrize("branch", ["main", "master"])
 async def test_the_server_refuses_a_protected_head_before_gh_is_called(fake_gh, clone, tmp_path, branch):
-    ctx = mender(clone, tmp_path)
+    ctx = fixer(clone, tmp_path)
     tools = tools_for(ctx)
 
     pushed = await tools["push"]({"branch": branch})
@@ -505,13 +505,13 @@ async def test_the_server_refuses_a_protected_head_before_gh_is_called(fake_gh, 
 
 
 async def test_no_tool_on_the_server_merges(clone, tmp_path):
-    names = set(tools_for(mender(clone, tmp_path)))
+    names = set(tools_for(fixer(clone, tmp_path)))
     assert not [n for n in names if "merge" in n]
     assert {"push", "open_pr", "pr_diff", "list_changed_files"} <= names
 
 
 async def test_the_local_backend_says_it_has_no_remote(clone, tmp_path):
-    ctx = mender(clone, tmp_path)
+    ctx = fixer(clone, tmp_path)
     ctx.config = ctx.config.model_copy(update={"vcs": "local"})
     result = await tools_for(ctx)["open_pr"](
         {"title": "t", "body": "b", "ticket": "P-1"}

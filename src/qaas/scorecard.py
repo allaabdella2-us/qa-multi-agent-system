@@ -45,7 +45,7 @@ class GoldenDefect:
     # what exists in the app, never a complete oracle.
     discovered_not_seeded: bool = False
     #: The ref a fix for this defect landed on, once one has. Retires the entry
-    #: from the recall denominator without deleting it -- ARBITER escalated a
+    #: from the recall denominator without deleting it -- REVIEWER escalated a
     #: correct fix because the schema had no way to say this, and CLAUDE.md
     #: requires the ledger to change in the same commit as the defect. Deleting
     #: the entry instead would lose the severity and domain expectations that
@@ -193,8 +193,8 @@ def _keyword_overlap(text: str, keywords: Iterable[str]) -> float:
 # classified the defect defensibly, so scoring must accept both.
 #
 # Both entries were learned from real runs, and both times the scorer was wrong
-# rather than the agent: CONDUIT filed a cross-tenant read under `security`, and
-# SURFACE filed a missing label and a contrast failure under `ux`. Marking those
+# rather than the agent: API filed a cross-tenant read under `security`, and
+# BROWSER filed a missing label and a contrast failure under `ux`. Marking those
 # as misses would have hidden a perfect discovery run behind a 50% score.
 _EQUIVALENT_DOMAINS: dict[str, set[str]] = {
     "ux": {"frontend"},

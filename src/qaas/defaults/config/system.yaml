@@ -18,40 +18,40 @@ thresholds:
   min_confidence_to_file: 0.6      # §7 confidence gate
   max_findings_per_agent_run: 25   # §8.3 loop breaker: pause and escalate, don't file
   max_tickets_per_run: 10          # §4.12 rate limit
-  flake_runs: 5                    # FORGE runs a repro N times to measure flake
+  flake_runs: 5                    # REPRODUCER runs a repro N times to measure flake
   max_mender_arbiter_round_trips: 2
   max_proof_reopens: 1
 
 run_modes:
   pr-check:
     trigger: pull_request
-    # KEYSTONE joins the PR sweep because it is pure static analysis and needs
-    # no running app. USHER, GAUGE and CHRONICLE do not: the design says GAUGE is
+    # ARCHITECT joins the PR sweep because it is pure static analysis and needs
+    # no running app. GUIDE, LOAD and REPORTER do not: the design says LOAD is
     # "nightly and pre-release only -- too expensive and too noisy per-PR", and
     # the same argument holds for a UX walk and a report about the week.
-    agents: [CARTOGRAPHER, KEYSTONE, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK]
+    agents: [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, REPRODUCER, TRIAGE]
     max_wall_clock_s: 900
     max_concurrency: 2
 
   nightly:
     trigger: cron
-    agents: [CARTOGRAPHER, KEYSTONE, CONDUIT, SURFACE, VAULT, WARDEN, PULSE, USHER, GAUGE, FORGE, CLERK, CHRONICLE]
+    agents: [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, SOCKET, GUIDE, LOAD, REPRODUCER, TRIAGE, REPORTER]
     max_wall_clock_s: 7200
     max_concurrency: 3
 
   incident:
     trigger: alert
-    agents: [CONDUIT]
+    agents: [API]
     max_wall_clock_s: 600
     max_concurrency: 2
     files_tickets: false          # §9: diagnostic only, read-only, no filing
 
-  # §9: the remediation loop. PROOF verifies first — a ticket whose defect no
+  # §9: the remediation loop. VERIFIER verifies first — a ticket whose defect no
   # longer reproduces needs no fix, and finding that out costs one cheap run
-  # instead of a whole MENDER/ARBITER cycle.
+  # instead of a whole FIXER/REVIEWER cycle.
   fix-cycle:
     trigger: agent_ready_ticket
-    agents: [PROOF, MENDER, ARBITER]
+    agents: [VERIFIER, FIXER, REVIEWER]
     max_wall_clock_s: 3600
     max_concurrency: 1
 
@@ -59,6 +59,6 @@ run_modes:
   # expensive mode in the system and the only one that closes the loop.
   full-loop:
     trigger: on_demand
-    agents: [CARTOGRAPHER, KEYSTONE, CONDUIT, SURFACE, VAULT, WARDEN, PULSE, USHER, GAUGE, FORGE, CLERK, MENDER, ARBITER, PROOF, CHRONICLE]
+    agents: [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, SOCKET, GUIDE, LOAD, REPRODUCER, TRIAGE, FIXER, REVIEWER, VERIFIER, REPORTER]
     max_wall_clock_s: 10800
     max_concurrency: 3

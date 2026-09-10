@@ -33,7 +33,7 @@ it:
 |---|---|---|
 | Browse | `Browse Projects` | Nothing can be read back. Every create appears to fail even when it succeeded, and dedupe sees an empty backlog. |
 | Create | `Create Issues` | Nothing can be filed. A run produces findings and files none of them. |
-| Transition | `Transition Issues` | PROOF cannot close a ticket it verified. The fix ships and the ticket sits open. |
+| Transition | `Transition Issues` | VERIFIER cannot close a ticket it verified. The fix ships and the ticket sits open. |
 | Link | `Link Issues` | Duplicates cannot be linked to the original, and regressions cannot be linked to the ticket they regress. |
 
 Grant them to a project role the bot account is in, rather than to the account
@@ -145,8 +145,8 @@ trying the house name and a list of common aliases.
 **driven by the system** and an unmapped one is a failure, not a note:
 
 * `open` — a reopened ticket
-* `in_progress` — CLERK picking work up
-* `resolved`, `closed` — PROOF closing a ticket whose fix it verified
+* `in_progress` — TRIAGE picking work up
+* `resolved`, `closed` — VERIFIER closing a ticket whose fix it verified
 
 If `resolved` has nowhere to land, the run reports a verified fix and the ticket
 stays open, and nobody notices until someone audits the board. `tracker-check`
@@ -232,7 +232,7 @@ with pieces silently missing. A ticket that needs richer rendering should link
 to an artifact.
 
 The name of the agent that found the defect is appended to the body ("Filed by
-CLERK (automated QA)."), because Jira sets `reporter` from the credential and
+TRIAGE (automated QA)."), because Jira sets `reporter` from the credential and
 that field will always say "QA Bot".
 
 **Labels** carry all the house metadata. Labels, specifically, because they are
@@ -257,7 +257,7 @@ breaks the thing it was for.
 
 The fingerprint is a hash of the defect's identity, not of its text, so the same
 defect fingerprints the same on Tuesday as it did on Monday. Before filing,
-CLERK searches for `labels = "qaas-fp-<digest>"`; a hit means this defect already
+TRIAGE searches for `labels = "qaas-fp-<digest>"`; a hit means this defect already
 has a ticket, and the correct action is to add evidence to it, not to file a
 second one.
 

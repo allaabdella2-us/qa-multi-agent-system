@@ -98,7 +98,7 @@ paths:
 
 @pytest.fixture
 def tools(make_ctx):
-    return handlers(build_tools(make_ctx("CONDUIT")))
+    return handlers(build_tools(make_ctx("API")))
 
 
 @pytest.fixture
@@ -117,7 +117,7 @@ def spec_tools(make_ctx, tmp_path):
     fixture spec has to sit inside the root too, which is what the
     `find_consumers` tests below already do.
     """
-    return handlers(build_tools(make_ctx("CONDUIT", target_root=tmp_path)))
+    return handlers(build_tools(make_ctx("API", target_root=tmp_path)))
 
 
 @pytest.fixture
@@ -136,11 +136,11 @@ async def _diff(tools, a: Path, b: Path) -> list[dict]:
 
 
 def test_the_server_exposes_the_tools_architecture_5_2_names(make_ctx):
-    ctx = make_ctx("CONDUIT")
+    ctx = make_ctx("API")
     assert [t.name for t in build_tools(ctx)] == [
         "diff_openapi", "classify_breaking", "find_consumers", "generate_contract_test",
     ]
-    assert build(ctx)["name"] == "contract_diff"  # the name conduit.yaml allowlists
+    assert build(ctx)["name"] == "contract_diff"  # the name api.yaml allowlists
 
 
 # -- the diff -------------------------------------------------------------
@@ -375,7 +375,7 @@ async def test_find_consumers_reports_file_and_line_and_skips_vendor_trees(make_
     (tmp_path / "node_modules" / "junk.js").write_text('fetch("/v1/orders")\n')
     (tmp_path / "notes.txt").write_text("/v1/orders is called from the web app\n")
 
-    tools = handlers(build_tools(make_ctx("CONDUIT", target_root=tmp_path)))
+    tools = handlers(build_tools(make_ctx("API", target_root=tmp_path)))
     result = await tools["find_consumers"]({"endpoint": "GET /v1/orders"})
     hits = structured(result)["consumers"]
 
@@ -385,7 +385,7 @@ async def test_find_consumers_reports_file_and_line_and_skips_vendor_trees(make_
 
 
 async def test_find_consumers_says_plainly_when_it_found_nothing(make_ctx, tmp_path):
-    tools = handlers(build_tools(make_ctx("CONDUIT", target_root=tmp_path)))
+    tools = handlers(build_tools(make_ctx("API", target_root=tmp_path)))
     result = await tools["find_consumers"]({"endpoint": "/v1/nothing"})
     assert not is_error(result)
     assert structured(result)["consumers"] == []
@@ -401,7 +401,7 @@ async def test_find_consumers_rejects_something_that_is_not_a_path(tools):
 
 
 async def test_generated_test_is_written_under_the_run_store_and_is_valid_python(make_ctx):
-    ctx = make_ctx("CONDUIT")
+    ctx = make_ctx("API")
     tools = handlers(build_tools(ctx))
     result = await tools["generate_contract_test"](
         {"endpoint": "/v1/invoices", "method": "GET", "expectation": "currency is missing from Invoice"}
@@ -487,7 +487,7 @@ async def test_the_generated_test_passes_against_a_conforming_server_and_fails_a
     make_ctx, tmp_path
 ):
     """The whole point of generating it: it has to be able to fail."""
-    tools = handlers(build_tools(make_ctx("CONDUIT")))
+    tools = handlers(build_tools(make_ctx("API")))
     result = await tools["generate_contract_test"]({"endpoint": "/v1/invoices", "method": "GET"})
     assert not is_error(result), text_of(result)
 

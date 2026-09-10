@@ -1,6 +1,6 @@
 """Throwaway probe #2: does the accessible name survive typing?
 
-SURFACE's claim: "Its only name source disappears the moment the user types."
+BROWSER's claim: "Its only name source disappears the moment the user types."
 Probe #1 already showed the browser computes name = "Search by reference" from
 the placeholder. This checks whether that name persists once the field has a value.
 """

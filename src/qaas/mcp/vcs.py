@@ -1,6 +1,6 @@
 """The `vcs` MCP server — the §8.1 write matrix, enforced where the write happens.
 
-FORGE needs a branch and a committed failing test; every other Phase 1 agent
+REPRODUCER needs a branch and a committed failing test; every other Phase 1 agent
 needs none of that. The difference is one line of YAML (`policy.branch_patterns`,
 `policy.write_paths`) and this module is what makes that line true. An agent
 cannot argue its way past a refusal here the way it can past a prompt, and every
@@ -43,7 +43,7 @@ from qaas.mcp.context import ToolContext, err, ok
 PROTECTED_BRANCHES = frozenset({"main", "master", "trunk", "develop", "release"})
 
 # Cap on a single agent-authored file. A repro case that needs more than this is
-# not minimal, which is FORGE's actual job (§4.11).
+# not minimal, which is REPRODUCER's actual job (§4.11).
 MAX_WRITE_BYTES = 512_000
 
 
@@ -173,7 +173,7 @@ def build_tools(ctx: ToolContext) -> list:
     @tool(
         "create_branch",
         "Create and switch to a branch. It must match your policy's branch patterns "
-        "(FORGE: qa/repro/*). main and master are refused for every agent.",
+        "(REPRODUCER: qa/repro/*). main and master are refused for every agent.",
         {
             "type": "object",
             "required": ["name"],

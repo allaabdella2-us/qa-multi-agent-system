@@ -164,7 +164,7 @@ def test_api_08_error_shapes_are_inconsistent(tokens):
 
 
 def test_api_09_the_websocket_is_absent_from_the_published_contract():
-    """Found by CONDUIT rather than planted, then recorded in the ledger."""
+    """Found by API rather than planted, then recorded in the ledger."""
     import yaml
 
     spec = yaml.safe_load((LEDGER.parent / "openapi.yaml").read_text())

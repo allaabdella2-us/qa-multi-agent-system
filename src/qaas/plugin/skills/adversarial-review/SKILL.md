@@ -23,7 +23,7 @@ Do these in sequence. Each step's value depends on not having already formed a v
 
 *Prevents:* accepting the author's framing of the problem.
 
-**2. Get the diff yourself.** `pr_diff` for a PR number, or `list_changed_files` for the base/head pair. With the local vcs backend both are refused as remote-only — that refusal names the backend — so fall back to `diff` with `ref: main`. Never review from MENDER's summary of its own change.
+**2. Get the diff yourself.** `pr_diff` for a PR number, or `list_changed_files` for the base/head pair. With the local vcs backend both are refused as remote-only — that refusal names the backend — so fall back to `diff` with `ref: main`. Never review from FIXER's summary of its own change.
 
 *Prevents:* reviewing a description instead of a patch. Descriptions omit the hunks their authors have stopped seeing.
 
@@ -110,11 +110,11 @@ So when a change is genuinely needed but out of the author's reach:
 | Situation | Decision |
 |---|---|
 | Cause addressed, diff minimal, tests discriminate, risk low or mitigated | `APPROVE` |
-| Something specific and nameable is wrong, and MENDER is permitted to change it — check `write_paths` | `REQUEST_CHANGES` |
-| Right fix is outside MENDER's envelope, risk is high and unmitigated, or you cannot responsibly judge it | `ESCALATE_TO_HUMAN` |
+| Something specific and nameable is wrong, and FIXER is permitted to change it — check `write_paths` | `REQUEST_CHANGES` |
+| Right fix is outside FIXER's envelope, risk is high and unmitigated, or you cannot responsibly judge it | `ESCALATE_TO_HUMAN` |
 
 - **Note a residual concern even when approving.** Use `concerns`. A reviewer with no concerns has usually not looked hard enough.
-- **`REQUEST_CHANGES` goes back to MENDER verbatim** and it cannot act on vagueness. Name the file, name what is wrong, say what would make it right. "Consider improving error handling" is not a review.
-- **Round trips are capped at two per ticket**, then the conductor escalates. A vague `REQUEST_CHANGES` spends half a ticket's remediation budget on a message nobody can act on.
+- **`REQUEST_CHANGES` goes back to FIXER verbatim** and it cannot act on vagueness. Name the file, name what is wrong, say what would make it right. "Consider improving error handling" is not a review.
+- **Round trips are capped at two per ticket**, then the router escalates. A vague `REQUEST_CHANGES` spends half a ticket's remediation budget on a message nobody can act on.
 - **Do not request changes on style, naming, or how you would have written it.** You have one question: should this change ship? Everything else costs a round trip and teaches the system that your reviews can be skimmed.
 - Escalating is a legitimate outcome, not a failure to decide.

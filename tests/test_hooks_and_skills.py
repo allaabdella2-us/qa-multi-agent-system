@@ -22,7 +22,7 @@ REPO = Path(__file__).resolve().parents[1]
 #: Skills ship inside the plugin now, not in a `.claude/skills/` directory
 #: that only existed in this checkout.
 SKILLS_DIR = REPO / "src" / "qaas" / "plugin" / "skills"
-AGENTS = ["CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK", "PROOF"]
+AGENTS = ["MAPPER", "API", "BROWSER", "REPRODUCER", "TRIAGE", "VERIFIER"]
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +53,7 @@ async def fire(hooks, event, payload):
 
 
 async def test_an_agent_that_skipped_its_deliverable_is_blocked(wire):
-    ctx, record, hooks = wire("CARTOGRAPHER")
+    ctx, record, hooks = wire("MAPPER")
     record.record("Read")
     record.record("Grep")
 
@@ -64,7 +64,7 @@ async def test_an_agent_that_skipped_its_deliverable_is_blocked(wire):
 
 
 async def test_an_agent_that_did_its_job_stops_freely(wire):
-    ctx, record, hooks = wire("CARTOGRAPHER")
+    ctx, record, hooks = wire("MAPPER")
     record.record("mcp__envelope__put_system_map")
 
     out = await fire(hooks, STOP, {"hook_event_name": "Stop", "stop_hook_active": False})
@@ -74,7 +74,7 @@ async def test_an_agent_that_did_its_job_stops_freely(wire):
 
 async def test_blocking_never_loops_forever(wire):
     """An agent that genuinely cannot comply must not burn the budget retrying."""
-    ctx, record, hooks = wire("FORGE")
+    ctx, record, hooks = wire("REPRODUCER")
 
     first = await fire(hooks, STOP, {"hook_event_name": "Stop", "stop_hook_active": False})
     assert first["decision"] == "block"
@@ -88,13 +88,13 @@ async def test_blocking_never_loops_forever(wire):
 
 async def test_a_discovery_agent_may_legitimately_find_nothing(wire):
     """Requiring an emission would manufacture findings to satisfy the hook."""
-    ctx, record, hooks = wire("CONDUIT")
+    ctx, record, hooks = wire("API")
     out = await fire(hooks, STOP, {"hook_event_name": "Stop", "stop_hook_active": False})
     assert out.get("decision") != "block"
 
 
 async def test_the_block_reason_names_the_tool_not_the_internal_id(wire):
-    _, _, hooks = wire("PROOF")
+    _, _, hooks = wire("VERIFIER")
     out = await fire(hooks, STOP, {"hook_event_name": "Stop", "stop_hook_active": False})
     assert "transition" in out["reason"]
     assert "mcp__tracker__" not in out["reason"], "the agent calls it by its short name"
@@ -104,7 +104,7 @@ async def test_the_block_reason_names_the_tool_not_the_internal_id(wire):
 
 
 async def test_a_held_envelope_tells_the_agent_immediately(wire):
-    ctx, record, hooks = wire("CONDUIT")
+    ctx, record, hooks = wire("API")
     out = await fire(hooks, POST_TOOL_USE, {
         "hook_event_name": "PostToolUse",
         "tool_name": "mcp__envelope__emit_envelope",
@@ -116,7 +116,7 @@ async def test_a_held_envelope_tells_the_agent_immediately(wire):
 
 
 async def test_a_fileable_envelope_produces_no_nagging(wire):
-    _, record, hooks = wire("CONDUIT")
+    _, record, hooks = wire("API")
     out = await fire(hooks, POST_TOOL_USE, {
         "hook_event_name": "PostToolUse",
         "tool_name": "mcp__envelope__emit_envelope",
@@ -127,7 +127,7 @@ async def test_a_fileable_envelope_produces_no_nagging(wire):
 
 
 async def test_a_tool_error_is_logged(wire):
-    ctx, _, hooks = wire("CONDUIT")
+    ctx, _, hooks = wire("API")
     await fire(hooks, POST_TOOL_USE, {
         "hook_event_name": "PostToolUse",
         "tool_name": "mcp__contract_diff__diff_openapi",
@@ -147,11 +147,11 @@ async def test_a_denied_call_does_not_satisfy_the_output_contract(wire):
     This used to assert the opposite — the attempt counted — because the tally
     was taken in PreToolUse, before anyone knew whether the call would be denied
     or would return `isError`. The consequence was at the other end of the run:
-    an errored `record_verdict` satisfied PROOF's `must_call`, so the Stop hook
-    let it stop and the conductor read back no verdict at all. The tally moved to
+    an errored `record_verdict` satisfied VERIFIER's `must_call`, so the Stop hook
+    let it stop and the router read back no verdict at all. The tally moved to
     PostToolUse, which a denial never reaches.
     """
-    ctx, record, hooks = wire("CONDUIT")
+    ctx, record, hooks = wire("API")
     await fire(hooks, PRE_TOOL_USE, {
         "hook_event_name": "PreToolUse",
         "tool_name": "Write",
@@ -162,7 +162,7 @@ async def test_a_denied_call_does_not_satisfy_the_output_contract(wire):
 
 
 async def test_a_tool_that_errored_does_not_satisfy_the_output_contract(wire):
-    ctx, record, hooks = wire("PROOF")
+    ctx, record, hooks = wire("VERIFIER")
     await fire(hooks, POST_TOOL_USE, {
         "hook_event_name": "PostToolUse",
         "tool_name": "mcp__envelope__record_fix_verdict",
@@ -224,7 +224,7 @@ def test_each_skill_description_is_a_strong_trigger(path):
 
 
 def test_the_rubric_lives_in_one_place_only(cfg):
-    """The severity table was duplicated between CLERK's prompt and the skill.
+    """The severity table was duplicated between TRIAGE's prompt and the skill.
 
     Duplicated rules drift, and the two copies then disagree about what a
     blocker is. The skill is the authority; the prompt defers to it.
@@ -232,7 +232,7 @@ def test_the_rubric_lives_in_one_place_only(cfg):
     rubric = (SKILLS_DIR / "severity-rubric" / "SKILL.md").read_text()
     assert "blocker" in rubric and "critical" in rubric
 
-    for name in ("CLERK", "PROOF"):
+    for name in ("TRIAGE", "VERIFIER"):
         assert "severity-rubric" in cfg.agents[name].skills
 
 

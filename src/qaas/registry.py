@@ -23,7 +23,7 @@ from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 # on it long ago: enforcement lives in the PreToolUse hook, which sees every
 # call, and `can_use_tool` is kept only as a second layer for calls the
 # allowlist did not auto-approve. See the module docstring in `guardrails.py` --
-# an early version really did have that bug, and FORGE's sandbox check was dead
+# an early version really did have that bug, and REPRODUCER's sandbox check was dead
 # code because of it.
 #
 # So the warning describes a hazard we already removed, and it fired on every
@@ -45,7 +45,7 @@ from qaas.sdk_compat import POST_TOOL_USE, PRE_TOOL_USE, STOP, mcp_server_wildca
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SHARED_PROMPT = "_shared.md"
 
-#: `CONDUIT.md` -> `CONDUIT.append.md`. The suffix exists because the only other
+#: `API.md` -> `API.append.md`. The suffix exists because the only other
 #: way to add three house lines to a shipped prompt is to fork the whole file,
 #: and a forked prompt stops receiving the next release's improvements to it --
 #: silently, and in the one part of the system where silence is most expensive.
@@ -99,7 +99,7 @@ def _first_hit(dirs: Sequence[Path], relative: str) -> Path | None:
 
 
 def append_name(prompt: str) -> str:
-    """`CONDUIT.md` -> `CONDUIT.append.md`, keeping any subdirectory."""
+    """`API.md` -> `API.append.md`, keeping any subdirectory."""
     return str(PurePosixPath(prompt).with_suffix("")) + APPEND_SUFFIX
 
 
@@ -130,7 +130,7 @@ def build_system_prompt(
     once, rather than being copy-pasted into six prompts that then drift.
 
     Each file is resolved first-hit-wins **independently**: overriding
-    `CONDUIT.md` keeps the house `_shared.md`, and replacing `_shared.md` keeps
+    `API.md` keeps the house `_shared.md`, and replacing `_shared.md` keeps
     all eight agent prompts. Resolving the pair from one winning directory would
     make either override drag the other along.
 
@@ -150,7 +150,7 @@ def build_system_prompt(
 
     blocks = [own.read_text(encoding="utf-8").rstrip()]
     # An empty addendum contributes nothing rather than a stray blank block --
-    # `touch CONDUIT.append.md` must not change a single byte of the prompt.
+    # `touch API.append.md` must not change a single byte of the prompt.
     blocks += [t for p in append_paths(dirs, spec.prompt) if (t := p.read_text(encoding="utf-8").strip())]
     blocks.append(shared.read_text(encoding="utf-8").strip())
     return "\n\n".join(blocks) + "\n"
@@ -281,7 +281,7 @@ def build_hooks(
     What hooks add on top is enforcement of the *output contract*. `can_use_tool`
     only ever sees calls that happen, so it can never notice the call that did
     not. The Stop hook can, and it fires while the agent still has a turn left to
-    fix it — unlike the conductor, which only finds out afterwards.
+    fix it — unlike the router, which only finds out afterwards.
     """
     record = record or TurnRecord()
 
@@ -292,7 +292,7 @@ def build_hooks(
 
         Counting here marked a tool as called before anyone knew whether it had
         been *denied* or had returned `isError` — so an errored `record_verdict`
-        satisfied PROOF's `must_call` and the Stop hook let it stop with no
+        satisfied VERIFIER's `must_call` and the Stop hook let it stop with no
         verdict. A denial never reaches PostToolUse at all, which is exactly the
         distinction that matters.
         """

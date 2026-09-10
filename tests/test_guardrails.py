@@ -45,7 +45,7 @@ def guard_for(tmp_path):
 # -- reading is always fine -------------------------------------------------
 
 
-@pytest.mark.parametrize("agent", ["CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK", "PROOF"])
+@pytest.mark.parametrize("agent", ["MAPPER", "API", "BROWSER", "REPRODUCER", "TRIAGE", "VERIFIER"])
 def test_every_agent_may_read_what_it_declared(guard_for, agent):
     g = guard_for(agent)
     for tool in g.agent.builtin_tools:
@@ -56,7 +56,7 @@ def test_every_agent_may_read_what_it_declared(guard_for, agent):
 # -- the finder never fixes -------------------------------------------------
 
 
-@pytest.mark.parametrize("agent", ["CARTOGRAPHER", "CONDUIT", "SURFACE"])
+@pytest.mark.parametrize("agent", ["MAPPER", "API", "BROWSER"])
 def test_discovery_agents_cannot_write_anywhere(guard_for, agent):
     g = guard_for(agent)
     d = g.check("Write", {"file_path": "api/app/routes/orders.py", "content": "x"})
@@ -64,21 +64,21 @@ def test_discovery_agents_cannot_write_anywhere(guard_for, agent):
 
 
 def test_a_discovery_agent_is_told_why_not_just_no(guard_for):
-    d = guard_for("CONDUIT").check("Write", {"file_path": "anything.py", "content": "x"})
+    d = guard_for("API").check("Write", {"file_path": "anything.py", "content": "x"})
     assert "read-only" in d.reason and "finder never fixes" in d.reason
 
 
-# -- FORGE's sandbox --------------------------------------------------------
+# -- REPRODUCER's sandbox --------------------------------------------------------
 
 
 def test_forge_may_write_inside_its_sandbox(guard_for):
-    assert guard_for("FORGE").check(
+    assert guard_for("REPRODUCER").check(
         "Write", {"file_path": "qa/repro/test_orders_limit.py", "content": "..."}
     ).allowed
 
 
 def test_forge_may_not_write_to_product_code(guard_for):
-    d = guard_for("FORGE").check(
+    d = guard_for("REPRODUCER").check(
         "Write", {"file_path": "api/app/routes/orders.py", "content": "..."}
     )
     assert not d.allowed and "outside" in d.reason
@@ -94,11 +94,11 @@ def test_forge_may_not_write_to_product_code(guard_for):
     ],
 )
 def test_path_traversal_out_of_the_sandbox_is_refused(guard_for, escape):
-    assert not guard_for("FORGE").check("Write", {"file_path": escape, "content": "x"}).allowed
+    assert not guard_for("REPRODUCER").check("Write", {"file_path": escape, "content": "x"}).allowed
 
 
 def test_edit_is_gated_the_same_way_as_write(guard_for):
-    g = guard_for("FORGE")
+    g = guard_for("REPRODUCER")
     assert g.check("Edit", {"file_path": "qa/repro/a.py", "old_string": "a", "new_string": "b"}).allowed
     assert not g.check("Edit", {"file_path": "src/qaas/store.py", "old_string": "a", "new_string": "b"}).allowed
 
@@ -122,27 +122,27 @@ def test_edit_is_gated_the_same_way_as_write(guard_for):
     ],
 )
 def test_forbidden_commands_are_refused_for_everyone(guard_for, command):
-    assert not guard_for("FORGE").check("Bash", {"command": command}).allowed
+    assert not guard_for("REPRODUCER").check("Bash", {"command": command}).allowed
 
 
 def test_forge_may_branch_inside_its_namespace(guard_for):
-    assert guard_for("FORGE").check(
+    assert guard_for("REPRODUCER").check(
         "Bash", {"command": "git checkout -b qa/repro/api-01-limit"}
     ).allowed
 
 
 def test_forge_may_not_branch_outside_its_namespace(guard_for):
-    d = guard_for("FORGE").check("Bash", {"command": "git checkout -b fix/api-01"})
+    d = guard_for("REPRODUCER").check("Bash", {"command": "git checkout -b fix/api-01"})
     assert not d.allowed and "outside" in d.reason
 
 
 def test_an_agent_without_branch_patterns_cannot_touch_git_state(guard_for):
-    d = guard_for("PROOF").check("Bash", {"command": "git commit -m 'verified'"})
+    d = guard_for("VERIFIER").check("Bash", {"command": "git commit -m 'verified'"})
     assert not d.allowed and "may not modify git state" in d.reason
 
 
 def test_ordinary_commands_are_allowed(guard_for):
-    g = guard_for("FORGE")
+    g = guard_for("REPRODUCER")
     for command in ["pytest -q tests/", "git status", "git diff HEAD", "ls -la"]:
         assert g.check("Bash", {"command": command}).allowed, command
 
@@ -150,7 +150,7 @@ def test_ordinary_commands_are_allowed(guard_for):
 def test_protected_test_file_cannot_be_rewritten_through_the_shell(tmp_path):
     """§10: the test that defines success must not be editable by the fixer."""
     cfg = load_config(search=CONFIG_SEARCH)
-    spec = cfg.agents["FORGE"].model_copy(deep=True)
+    spec = cfg.agents["REPRODUCER"].model_copy(deep=True)
     spec.policy.protected_paths = ["qa/repro/test_defining.py"]
     ctx = ToolContext(
         store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
@@ -165,21 +165,21 @@ def test_protected_test_file_cannot_be_rewritten_through_the_shell(tmp_path):
 
 
 def test_a_tool_outside_the_allowlist_is_refused(guard_for):
-    d = guard_for("CLERK").check("Bash", {"command": "ls"})
+    d = guard_for("TRIAGE").check("Bash", {"command": "ls"})
     assert not d.allowed and "allowlist" in d.reason
 
 
 def test_an_undeclared_mcp_server_is_refused(guard_for):
-    d = guard_for("CONDUIT").check("mcp__tracker__create_issue", {})
+    d = guard_for("API").check("mcp__tracker__create_issue", {})
     assert not d.allowed and "not connected" in d.reason
 
 
 def test_a_declared_mcp_server_is_allowed(guard_for):
-    assert guard_for("CLERK").check("mcp__tracker__create_issue", {}).allowed
+    assert guard_for("TRIAGE").check("mcp__tracker__create_issue", {}).allowed
 
 
 def test_web_access_is_refused_to_discovery_agents(guard_for):
-    d = guard_for("CONDUIT").check("WebFetch", {"url": "https://example.com"})
+    d = guard_for("API").check("WebFetch", {"url": "https://example.com"})
     assert not d.allowed and "network research" in d.reason
 
 
@@ -187,25 +187,25 @@ def test_web_access_is_refused_to_discovery_agents(guard_for):
 
 
 async def test_a_denial_is_recorded_in_the_ledger(guard_for):
-    g = guard_for("CONDUIT")
+    g = guard_for("API")
     result = await g.can_use_tool("Write", {"file_path": "x.py", "content": "y"}, None)
     assert result.behavior == "deny"
 
     denials = list(g.ctx.store.ledger("denial"))
     assert len(denials) == 1
-    assert denials[0].agent == "CONDUIT"
+    assert denials[0].agent == "API"
     assert denials[0].detail["tool"] == "Write"
 
 
 async def test_an_allowed_call_is_not_logged_as_a_denial(guard_for):
-    g = guard_for("FORGE")
+    g = guard_for("REPRODUCER")
     result = await g.can_use_tool("Write", {"file_path": "qa/repro/t.py", "content": "y"}, None)
     assert result.behavior == "allow"
     assert not list(g.ctx.store.ledger("denial"))
 
 
 async def test_file_contents_are_not_dumped_into_the_ledger(guard_for):
-    g = guard_for("CONDUIT")
+    g = guard_for("API")
     await g.can_use_tool("Write", {"file_path": "x.py", "content": "S" * 5000}, None)
     entry = next(g.ctx.store.ledger("denial"))
     assert entry.detail["args"]["content"] == "<5000 chars>"
@@ -219,7 +219,7 @@ async def test_file_contents_are_not_dumped_into_the_ledger(guard_for):
 
 
 async def test_the_hook_denies_a_write_outside_the_sandbox(guard_for):
-    g = guard_for("FORGE")
+    g = guard_for("REPRODUCER")
     out = await g.pre_tool_use(
         {"tool_name": "Write", "tool_input": {"file_path": "/etc/passwd", "content": "x"}},
         "tu_1",
@@ -231,7 +231,7 @@ async def test_the_hook_denies_a_write_outside_the_sandbox(guard_for):
 
 
 async def test_the_hook_allows_a_write_inside_the_sandbox(guard_for):
-    g = guard_for("FORGE")
+    g = guard_for("REPRODUCER")
     out = await g.pre_tool_use(
         {"tool_name": "Write", "tool_input": {"file_path": "qa/repro/t.py", "content": "x"}},
         "tu_2",
@@ -241,7 +241,7 @@ async def test_the_hook_allows_a_write_inside_the_sandbox(guard_for):
 
 
 async def test_the_hook_denies_a_forbidden_shell_command(guard_for):
-    g = guard_for("FORGE")
+    g = guard_for("REPRODUCER")
     out = await g.pre_tool_use(
         {"tool_name": "Bash", "tool_input": {"command": "git push --force origin main"}}, None, None
     )
@@ -249,7 +249,7 @@ async def test_the_hook_denies_a_forbidden_shell_command(guard_for):
 
 
 async def test_the_hook_records_both_the_call_and_the_denial(guard_for):
-    g = guard_for("CONDUIT")
+    g = guard_for("API")
     await g.pre_tool_use({"tool_name": "Write", "tool_input": {"file_path": "x.py"}}, None, None)
 
     calls = list(g.ctx.store.ledger("tool_call"))
@@ -260,7 +260,7 @@ async def test_the_hook_records_both_the_call_and_the_denial(guard_for):
 
 async def test_the_hook_survives_a_malformed_payload(guard_for):
     """A hook that raises would break the turn. It must decide, not explode."""
-    g = guard_for("FORGE")
+    g = guard_for("REPRODUCER")
     out = await g.pre_tool_use({"tool_name": "Write"}, None, None)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert await g.pre_tool_use({}, None, None) is not None
@@ -276,7 +276,7 @@ def test_the_registry_wires_the_hook_to_pretooluse(tmp_path):
     cfg = load_config(search=CONFIG_SEARCH)
     ctx = ToolContext(
         store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
-        config=cfg, agent=cfg.agents["FORGE"], target_root=TARGET,
+        config=cfg, agent=cfg.agents["REPRODUCER"], target_root=TARGET,
     )
     guard = Guardrail(ctx)
     hooks = build_hooks(guard, ctx)
@@ -285,13 +285,13 @@ def test_the_registry_wires_the_hook_to_pretooluse(tmp_path):
 
 # -- the §8.2 autonomy envelope ---------------------------------------------
 #
-# MENDER is the only agent that may change product code. These are the limits
+# FIXER is the only agent that may change product code. These are the limits
 # that make that acceptable, and they are enforced here rather than requested in
 # its prompt, because a prompt is a request and this is a decision.
 
 
 def test_mender_may_fix_ordinary_product_code(guard_for):
-    assert guard_for("MENDER").check(
+    assert guard_for("FIXER").check(
         "Write", {"file_path": "api/app/routes/orders.py", "content": "..."}
     ).allowed
 
@@ -310,7 +310,7 @@ def test_mender_may_fix_ordinary_product_code(guard_for):
 def test_forbidden_classes_stop_at_a_human(guard_for, path, expected):
     """§8.2: these changes need approval however small they look, because their
     blast radius is not something a review can reliably bound."""
-    d = guard_for("MENDER").check("Write", {"file_path": path, "content": "..."})
+    d = guard_for("FIXER").check("Write", {"file_path": path, "content": "..."})
     assert not d.allowed
     assert expected in d.reason
     assert "escalate" in d.reason.lower(), "a refusal must tell the agent what to do instead"
@@ -319,7 +319,7 @@ def test_forbidden_classes_stop_at_a_human(guard_for, path, expected):
 def test_the_defining_test_cannot_be_edited_by_the_fixer(tmp_path):
     """§10, symptom fixes: a fixer that edits the test has hidden the defect."""
     cfg = load_config(search=CONFIG_SEARCH)
-    spec = cfg.agents["MENDER"].model_copy(deep=True)
+    spec = cfg.agents["FIXER"].model_copy(deep=True)
     spec.policy.protected_paths = ["qa/repro/test_orders_limit.py"]
     ctx = ToolContext(
         store=RunStore.new(root=tmp_path), maps=SystemMapStore(tmp_path),
@@ -335,7 +335,7 @@ def test_the_defining_test_cannot_be_edited_by_the_fixer(tmp_path):
 def test_the_diff_budget_is_counted_per_file_not_per_edit(guard_for):
     """Editing one file six times is one file's worth of change. Counting calls
     would refuse ordinary iteration on a single fix."""
-    g = guard_for("MENDER")
+    g = guard_for("FIXER")
     for _ in range(6):
         assert g.check(
             "Edit", {"file_path": "api/app/routes/orders.py",
@@ -344,9 +344,9 @@ def test_the_diff_budget_is_counted_per_file_not_per_edit(guard_for):
 
 
 def test_a_fix_wider_than_the_envelope_is_refused_with_what_it_touched(guard_for):
-    g = guard_for("MENDER")
+    g = guard_for("FIXER")
     limit = g.policy.max_diff_files
-    assert limit, "MENDER must have a diff budget"
+    assert limit, "FIXER must have a diff budget"
 
     for i in range(limit):
         assert g.check(
@@ -361,13 +361,13 @@ def test_a_fix_wider_than_the_envelope_is_refused_with_what_it_touched(guard_for
 
 def test_arbiter_cannot_write_anything_at_all(guard_for):
     """The reviewer having no write access is the whole point of the separation."""
-    g = guard_for("ARBITER")
+    g = guard_for("REVIEWER")
     assert not g.check("Write", {"file_path": "api/app/routes/orders.py"}).allowed
     assert not g.check("Bash", {"command": "git commit -m x"}).allowed
 
 
 def test_mender_may_branch_only_under_fix(guard_for):
-    g = guard_for("MENDER")
+    g = guard_for("FIXER")
     assert g.check("Bash", {"command": "git checkout -b fix/CORVID-1-limit"}).allowed
     assert not g.check("Bash", {"command": "git checkout -b feature/rewrite"}).allowed
     assert not g.check("Bash", {"command": "git push origin main"}).allowed
@@ -375,7 +375,7 @@ def test_mender_may_branch_only_under_fix(guard_for):
 
 def test_nothing_in_the_system_can_merge(guard_for):
     """§8.4: merge is always human. Not policy — absence of capability."""
-    for agent in ["MENDER", "ARBITER", "PROOF", "FORGE"]:
+    for agent in ["FIXER", "REVIEWER", "VERIFIER", "REPRODUCER"]:
         g = guard_for(agent)
         assert not g.check("Bash", {"command": "git merge fix/x"}).allowed
         assert not g.check("Bash", {"command": "gh pr merge 42 --squash"}).allowed
@@ -399,7 +399,7 @@ def _mender_guard(tmp_path: Path, target_root: Path) -> Guardrail:
             store=RunStore.new(root=tmp_path / "state"),
             maps=SystemMapStore(tmp_path / "state"),
             config=cfg,
-            agent=cfg.agents["MENDER"],
+            agent=cfg.agents["FIXER"],
             target_root=target_root,
         )
     )
@@ -441,14 +441,14 @@ def test_an_agent_cannot_write_into_the_qaas_checkout(tmp_path, monkeypatch):
     # this agent has must live under the target, and none of them anywhere near
     # the qaas checkout the process is standing in.
     assert g.root == target.resolve()
-    assert g._allowed_roots, "MENDER must have somewhere to write"
+    assert g._allowed_roots, "FIXER must have somewhere to write"
     for sandbox in g._allowed_roots:
         assert sandbox.is_relative_to(target.resolve()), sandbox
         assert not sandbox.is_relative_to(REPO), f"{sandbox} is inside the qaas checkout"
 
     for path in (
         str(REPO / "src" / "qaas" / "guardrails.py"),
-        str(REPO / "src" / "qaas" / "defaults" / "config" / "agents" / "mender.yaml"),
+        str(REPO / "src" / "qaas" / "defaults" / "config" / "agents" / "fixer.yaml"),
         "../../src/qaas/guardrails.py",
     ):
         assert not g.check("Write", {"file_path": path, "content": "..."}).allowed, (
@@ -487,10 +487,10 @@ def test_the_sdk_subprocess_is_started_in_the_target(tmp_path):
         store=RunStore.new(root=tmp_path / "state"),
         maps=SystemMapStore(tmp_path / "state"),
         config=cfg,
-        agent=cfg.agents["CONDUIT"],
+        agent=cfg.agents["API"],
         target_root=target,
     )
-    options = build_options(cfg.agents["CONDUIT"], ctx)
+    options = build_options(cfg.agents["API"], ctx)
     assert options.cwd == str(target)
     assert options.setting_sources == []
 
@@ -526,12 +526,12 @@ def _guard(agent_name: str, tmp_path: Path, **policy: object):
     ],
 )
 def test_a_read_only_agent_cannot_write_through_the_shell(tmp_path, command):
-    """PROOF holds Bash and no write_paths, so it was read-only only against Write.
+    """VERIFIER holds Bash and no write_paths, so it was read-only only against Write.
 
     That is the verification gate editing the source it is verifying — §2's
     finder/fixer separation, gone through a door nobody was watching.
     """
-    decision = _guard("PROOF", tmp_path).check("Bash", {"command": command})
+    decision = _guard("VERIFIER", tmp_path).check("Bash", {"command": command})
     assert not decision.allowed, command
     assert "read-only" in decision.reason
 
@@ -547,8 +547,8 @@ def test_a_read_only_agent_cannot_write_through_the_shell(tmp_path, command):
     ],
 )
 def test_a_write_capable_agent_gets_the_same_answer_through_the_shell(tmp_path, command, expected):
-    """MENDER may write under api/app; auth.py inside it is still a §8.2 class."""
-    decision = _guard("MENDER", tmp_path).check("Bash", {"command": command})
+    """FIXER may write under api/app; auth.py inside it is still a §8.2 class."""
+    decision = _guard("FIXER", tmp_path).check("Bash", {"command": command})
     assert not decision.allowed, command
     assert expected in decision.reason
 
@@ -570,7 +570,7 @@ def test_ordinary_and_permitted_commands_still_run(tmp_path, command):
 
     `> /dev/null` and `2>&1` are the two that a naive redirect check breaks.
     """
-    assert _guard("MENDER", tmp_path).check("Bash", {"command": command}).allowed, command
+    assert _guard("FIXER", tmp_path).check("Bash", {"command": command}).allowed, command
 
 
 def test_a_shell_write_it_cannot_read_is_refused_not_waved_through(tmp_path):
@@ -580,7 +580,7 @@ def test_a_shell_write_it_cannot_read_is_refused_not_waved_through(tmp_path):
     which is exactly when guessing is worst. The reason names Write/Edit, so the
     enforced path is also the easy one.
     """
-    decision = _guard("MENDER", tmp_path).check(
+    decision = _guard("FIXER", tmp_path).check(
         "Bash", {"command": "python -c 'open(\"/etc/hosts\",\"w\")'"}
     )
     assert not decision.allowed
@@ -589,7 +589,7 @@ def test_a_shell_write_it_cannot_read_is_refused_not_waved_through(tmp_path):
 
 def test_the_shell_counts_against_the_same_diff_budget(tmp_path):
     """§8.2 caps files per run; a sed did not count and an Edit did."""
-    guard = _guard("MENDER", tmp_path, max_diff_files=2)
+    guard = _guard("FIXER", tmp_path, max_diff_files=2)
     assert guard.check("Bash", {"command": "echo a > api/app/one.py"}).allowed
     assert guard.check("Bash", {"command": "echo b > api/app/two.py"}).allowed
     third = guard.check("Bash", {"command": "echo c > api/app/three.py"})
@@ -600,4 +600,4 @@ def test_the_shell_counts_against_the_same_diff_budget(tmp_path):
 @pytest.mark.parametrize("command", ["rm -R build", "rm --recursive build", "rm --force x"])
 def test_the_long_forms_of_a_recursive_delete_are_refused_too(tmp_path, command):
     """`-[a-zA-Z]*[rf]` matched `-rf` and missed every spelled-out equivalent."""
-    assert not _guard("MENDER", tmp_path).check("Bash", {"command": command}).allowed
+    assert not _guard("FIXER", tmp_path).check("Bash", {"command": command}).allowed

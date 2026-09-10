@@ -76,7 +76,7 @@ def _check_skills_loaded(spec: AgentSpec, ctx: ToolContext, message: Any, emit) 
 
 
 #: How much of the task goes inline in the ledger line. Enough to tell two
-#: FORGE invocations apart at a glance; the artifact holds the rest.
+#: REPRODUCER invocations apart at a glance; the artifact holds the rest.
 TASK_PREVIEW_CHARS = 300
 
 
@@ -85,7 +85,7 @@ def _record_task(ctx: ToolContext, agent: str, task: str) -> dict[str, Any]:
 
     `agent_started` recorded `task_chars=len(task)` -- the *length* of the
     prompt. So the one thing needed to explain why an agent did what it did, or
-    to replay it, was the one thing the ledger threw away; FORGE runs once per
+    to replay it, was the one thing the ledger threw away; REPRODUCER runs once per
     finding and its five lines were distinguishable only by character count.
 
     The task goes to the artifact store rather than inline because a task is
@@ -98,8 +98,8 @@ def _record_task(ctx: ToolContext, agent: str, task: str) -> dict[str, Any]:
     detail: dict[str, Any] = {"task_preview": task[:TASK_PREVIEW_CHARS]}
     try:
         # Numbered off what is already on disk, not off a ToolContext counter:
-        # the conductor builds a fresh context per dispatch, so an in-memory
-        # counter would restart at 1 and each FORGE invocation would overwrite
+        # the router builds a fresh context per dispatch, so an in-memory
+        # counter would restart at 1 and each REPRODUCER invocation would overwrite
         # the previous one's task. This is the bug `put_result` already had.
         existing = len(list((ctx.store.dir / "artifacts").glob(f"task-{agent}-*.md")))
         detail["task_uri"] = ctx.store.put_artifact(f"task-{agent}-{existing + 1:02d}.md", task)
@@ -120,7 +120,7 @@ async def run_agent(
     """Invoke one agent and record the outcome.
 
     Failures are captured, not raised. One agent falling over should cost the run
-    that agent's findings, not the whole run — the conductor decides whether to
+    that agent's findings, not the whole run — the router decides whether to
     retry, skip, or escalate.
     """
     # Building the options can fail on its own — a missing prompt file
@@ -128,7 +128,7 @@ async def run_agent(
     # (UnknownServer), a declared server whose ${VAR} is unset
     # (MissingServerEnv). Outside the try below, those propagated out of a
     # function whose contract is "failures are captured, not raised": the
-    # conductor's `_gather` calls `asyncio.gather` without `return_exceptions`
+    # router's `_gather` calls `asyncio.gather` without `return_exceptions`
     # and `run()` catches only BudgetExceeded, so one such agent aborted the
     # whole run with no `run_finished` line — while its sibling discovery
     # agents, which gather does not cancel, kept going and kept spending with
@@ -181,7 +181,7 @@ async def run_agent(
                     error = _error_text(message)
                 if isinstance(message.result, str):
                     final_text = message.result
-    except Exception as exc:  # noqa: BLE001 — the conductor decides what a failure means
+    except Exception as exc:  # noqa: BLE001 — the router decides what a failure means
         subtype = "failure"
         error = f"{type(exc).__name__}: {exc}"
         ctx.store.log("agent_error", agent=spec.name, error=error)

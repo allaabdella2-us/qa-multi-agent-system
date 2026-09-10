@@ -13,19 +13,19 @@ from qaas.config import MAX_MCP_SERVERS_PER_AGENT, AgentSpec, SystemConfig, load
 REPO = Path(__file__).resolve().parents[1]
 PROMPTS = REPO / "src" / "qaas" / "prompts"
 
-PHASE_1 = {"CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK", "PROOF"}
-PHASE_3 = {"MENDER", "ARBITER"}
+PHASE_1 = {"MAPPER", "API", "BROWSER", "REPRODUCER", "TRIAGE", "VERIFIER"}
+PHASE_3 = {"FIXER", "REVIEWER"}
 #: Added later, and the point of them is how they were added: a prompt file and a
-#: YAML file each, with no change to conductor, runner, registry or guardrails.
+#: YAML file each, with no change to router, runner, registry or guardrails.
 #: That was the architecture's central claim and it went untested until someone
 #: actually tried it.
-PHASE_2 = {"VAULT", "WARDEN", "KEYSTONE", "PULSE", "USHER", "GAUGE"}
-#: The reporting layer. CHRONICLE is the only agent that is not discovery,
+PHASE_2 = {"DBA", "AUDITOR", "ARCHITECT", "SOCKET", "GUIDE", "LOAD"}
+#: The reporting layer. REPORTER is the only agent that is not discovery,
 #: triage or remediation, and it needed the one piece of Python the others did
-#: not: a `_phase_report` in the conductor. Every other phase dispatches by
+#: not: a `_phase_report` in the router. Every other phase dispatches by
 #: NAME, so a reporting agent would otherwise validate, assemble, appear in
 #: `--dry-run` and never run.
-PHASE_4 = {"CHRONICLE"}
+PHASE_4 = {"REPORTER"}
 ROSTER = PHASE_1 | PHASE_3 | PHASE_2 | PHASE_4
 
 
@@ -35,7 +35,7 @@ def cfg() -> SystemConfig:
 
 
 def spec(**kw) -> dict:
-    base = dict(name="TESTER", layer="discovery", role="r", prompt="CONDUIT.md")
+    base = dict(name="TESTER", layer="discovery", role="r", prompt="API.md")
     base.update(kw)
     return base
 
@@ -75,32 +75,32 @@ def test_discovery_agents_are_read_only(cfg):
 
 def test_clerk_is_the_only_ticket_creator(cfg):
     creators = {n for n, s in cfg.agents.items() if s.policy.may_create_tickets}
-    assert creators == {"CLERK"}
+    assert creators == {"TRIAGE"}
 
 
 def test_proof_may_transition_but_not_create(cfg):
-    proof = cfg.agents["PROOF"]
-    assert proof.policy.may_transition_tickets
-    assert not proof.policy.may_create_tickets
+    verifier = cfg.agents["VERIFIER"]
+    assert verifier.policy.may_transition_tickets
+    assert not verifier.policy.may_create_tickets
 
 
 def test_writers_are_confined_to_their_own_branch_namespaces(cfg):
     """Two agents may write, and each only where its own work belongs (§8.1)."""
     writers = {n for n, s in cfg.agents.items() if s.policy.write_paths}
-    assert writers == {"FORGE", "MENDER"}
-    assert cfg.agents["FORGE"].policy.branch_patterns == ["qa/repro/*"]
-    assert cfg.agents["MENDER"].policy.branch_patterns == ["fix/*"]
+    assert writers == {"REPRODUCER", "FIXER"}
+    assert cfg.agents["REPRODUCER"].policy.branch_patterns == ["qa/repro/*"]
+    assert cfg.agents["FIXER"].policy.branch_patterns == ["fix/*"]
 
 
 def test_forge_writes_only_tests_never_product_code(cfg):
     """The reproducer must not be able to fix what it is reproducing."""
-    assert cfg.agents["FORGE"].policy.write_paths == ["qa/repro"]
-    assert not cfg.agents["FORGE"].policy.may_open_pr
+    assert cfg.agents["REPRODUCER"].policy.write_paths == ["qa/repro"]
+    assert not cfg.agents["REPRODUCER"].policy.may_open_pr
 
 
 def test_the_fixer_has_a_bounded_autonomy_envelope(cfg):
-    """§8.2. Without these, 'MENDER may write product code' has no limit."""
-    policy = cfg.agents["MENDER"].policy
+    """§8.2. Without these, 'FIXER may write product code' has no limit."""
+    policy = cfg.agents["FIXER"].policy
     assert policy.max_diff_files and policy.max_diff_files <= 10
     assert policy.max_diff_lines and policy.max_diff_lines <= 300
     forbidden = " ".join(policy.forbidden_paths).lower()
@@ -109,22 +109,22 @@ def test_the_fixer_has_a_bounded_autonomy_envelope(cfg):
 
 
 def test_the_reviewer_cannot_write_code(cfg):
-    """ARBITER reviewing with write access would defeat the separation."""
-    policy = cfg.agents["ARBITER"].policy
+    """REVIEWER reviewing with write access would defeat the separation."""
+    policy = cfg.agents["REVIEWER"].policy
     assert policy.read_only
     assert not policy.write_paths and not policy.may_open_pr
 
 
 def test_only_the_fixer_may_open_a_pull_request(cfg):
     openers = {n for n, s in cfg.agents.items() if s.policy.may_open_pr}
-    assert openers == {"MENDER"}
+    assert openers == {"FIXER"}
 
 
 def test_incident_mode_files_nothing(cfg):
     """§9: incident runs are diagnostic, read-only, no filing."""
     incident = cfg.run_modes["incident"]
     assert not incident.files_tickets
-    assert "CLERK" not in incident.agents
+    assert "TRIAGE" not in incident.agents
 
 
 def test_every_run_mode_is_bounded(cfg):
@@ -146,8 +146,8 @@ def test_enabled_agents_resolves_a_mode(cfg):
     names = [s.name for s in cfg.enabled_agents("pr-check")]
     # The exact roster is config and will change; the invariants are that the
     # map comes first and filing comes last.
-    assert names[0] == "CARTOGRAPHER", "the map must be built before anything reads it"
-    assert names[-1] == "CLERK", "filing is last"
+    assert names[0] == "MAPPER", "the map must be built before anything reads it"
+    assert names[-1] == "TRIAGE", "filing is last"
     assert set(names) <= ROSTER, f"mode names an agent that does not exist: {set(names) - ROSTER}"
 
 

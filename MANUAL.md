@@ -33,7 +33,7 @@ qaas drives the Claude Agent SDK. It needs one of:
 ### Optional extras
 
 ```bash
-npx playwright install chromium   # only for UI exploration (the SURFACE agent)
+npx playwright install chromium   # only for UI exploration (the BROWSER agent)
 ```
 
 ---
@@ -55,7 +55,7 @@ qaas run --mode pr-check --dry-run   # exactly what each agent would receive
 > [!IMPORTANT]
 > **Every value in that profile is a guess.** `init` reports what it detected and
 > what it could not find. Read it and correct it before a real run — a wrong
-> `layout.backend` makes CARTOGRAPHER explore blind.
+> `layout.backend` makes MAPPER explore blind.
 
 Then, when you are ready to spend money:
 
@@ -142,10 +142,10 @@ auth:
 
 | mode | agents | when |
 |---|---|---|
-| `incident` | CONDUIT | diagnose one thing, file nothing |
-| `pr-check` | CARTOGRAPHER, KEYSTONE, CONDUIT, SURFACE, VAULT, WARDEN, FORGE, CLERK | on a pull request |
-| `nightly` | those eight plus PULSE, USHER, GAUGE, CHRONICLE | the scheduled sweep |
-| `fix-cycle` | PROOF, MENDER, ARBITER | take a filed ticket and fix it |
+| `incident` | API | diagnose one thing, file nothing |
+| `pr-check` | MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, REPRODUCER, TRIAGE | on a pull request |
+| `nightly` | those eight plus SOCKET, GUIDE, LOAD, REPORTER | the scheduled sweep |
+| `fix-cycle` | VERIFIER, FIXER, REVIEWER | take a filed ticket and fix it |
 | `full-loop` | all fifteen | discover → file → fix → verify → report |
 
 Every mode is bounded by a **wall clock** and each agent by **`max_turns`** —
@@ -170,7 +170,7 @@ qaas validate                   # config, prompts, skills, allowlists, budgets
 ```
 
 `qaas doctor` tells you which agents can do useful work here and which cannot —
-SURFACE with no reachable UI has nothing to do and says so rather than
+BROWSER with no reachable UI has nothing to do and says so rather than
 substituting a weaker static read.
 
 ### Running
@@ -189,7 +189,7 @@ qaas run --mode <mode> [options]
 ```bash
 qaas run --mode pr-check --dry-run                    # free
 qaas run --mode nightly                               # the usual sweep
-qaas run --mode nightly --only CONDUIT                # one agent
+qaas run --mode nightly --only API                # one agent
 qaas run --repo https://github.com/you/app --dry-run  # clone and inspect
 qaas run --mode fix-cycle --ticket QA-42              # fix one ticket
 ```
@@ -200,7 +200,7 @@ qaas run --mode fix-cycle --ticket QA-42              # fix one ticket
 qaas runs [--limit N]                    # every run, newest first
 qaas show <run-id>                       # findings, cost, tickets, escalations
 qaas trace <run-id> [--agent A] [--kind K] [--follow] [--quiet] [--json]
-qaas map [--version V]                   # the system map CARTOGRAPHER built
+qaas map [--version V]                   # the system map MAPPER built
 qaas board [--no-create]                 # this target's Jira board
 ```
 
@@ -209,7 +209,7 @@ happened:
 
 ```bash
 qaas trace <run-id>                              # the whole timeline
-qaas trace <run-id> --agent MENDER               # one agent
+qaas trace <run-id> --agent FIXER               # one agent
 qaas trace <run-id> --kind denial                # every refused tool call
 qaas trace <run-id> --kind verdict --kind review # just the decisions
 qaas trace <run-id> --quiet                      # decisions only, no file reads
@@ -359,13 +359,13 @@ qaas run --mode fix-cycle --ticket QA-42
 ```
 
 ```
-PROOF   NOT_FIXED  → the defect still reproduces
-MENDER             → writes the minimal fix on a fix/* branch
-ARBITER APPROVE    → adversarial review passed
-PROOF   VERIFIED   → the original failing test now passes
+VERIFIER   NOT_FIXED  → the defect still reproduces
+FIXER             → writes the minimal fix on a fix/* branch
+REVIEWER APPROVE    → adversarial review passed
+VERIFIER   VERIFIED   → the original failing test now passes
 ```
 
-ARBITER may also return `REQUEST_CHANGES` (back to MENDER, capped at two round
+REVIEWER may also return `REQUEST_CHANGES` (back to FIXER, capped at two round
 trips) or `ESCALATE_TO_HUMAN` (stop — the fix is correct but shipping it is a
 decision you should make).
 
@@ -377,11 +377,11 @@ decision you should make).
 
 ```bash
 qaas prompts list              # which prompt is in force, and from where
-qaas prompts eject CONDUIT     # copy to .qaas/prompts/ and edit
+qaas prompts eject API     # copy to .qaas/prompts/ and edit
 qaas prompts diff              # what you changed vs. what shipped
 ```
 
-Prefer **adding** to replacing — drop a `CONDUIT.append.md` next to it and your
+Prefer **adding** to replacing — drop a `API.append.md` next to it and your
 lines are inserted between the agent's prompt and the shared house rules. You keep
 receiving improvements to the base prompt instead of forking it forever.
 
@@ -434,7 +434,7 @@ A denial returns a reason and is logged; it never kills the turn. See them with
 | `no target profile loaded` | Run `qaas init <path>`, or set `QAAS_TARGET`. With exactly one profile on disk it is used automatically. |
 | `qaas score` says there is no golden ledger | Expected. Scoring needs a calibration target with a `ledger:`; ordinary applications do not have one. |
 | `Role 'x' names environment variable Y ... and it is unset` | Export `Y`. Credentials come from the environment, never the profile. |
-| SURFACE does nothing | It needs a reachable UI. Check `environment.mode` and `web_url`; `qaas doctor` will say so. |
+| BROWSER does nothing | It needs a reachable UI. Check `environment.mode` and `web_url`; `qaas doctor` will say so. |
 | `spend cap reached` | Not an error — the governor working. Raise `max_budget_usd` for that mode or narrow with `--only`. |
 | `mode 'x': agents can spend $N but the cap is $M` | The mode cannot finish. Raise its cap or drop an agent. |
 | An agent names an MCP server that does not exist | `qaas validate` names it. Add it under `mcp_servers:` or fix the typo. |
@@ -445,7 +445,7 @@ A denial returns a reason and is logged; it never kills the turn. See them with
 ```bash
 qaas show <run-id>                      # the summary
 qaas trace <run-id> --kind denial       # what was refused, and why
-qaas trace <run-id> --agent FORGE       # one agent's whole story
+qaas trace <run-id> --agent REPRODUCER       # one agent's whole story
 qaas trace <run-id> --json > run.json   # everything, machine-readable
 ```
 
@@ -459,7 +459,7 @@ summary of it — nothing is hidden from you.
 
 - **`--dry-run` first, always.** It is free and shows exactly what would happen.
 - **`--only AGENT`** while you are tuning. One agent is a fraction of a full run.
-- **FORGE runs once per finding**, so a finding-heavy run is longer than an
+- **REPRODUCER runs once per finding**, so a finding-heavy run is longer than an
   agent-heavy one. That is the thing that most often surprises people.
 - **`max_turns`** is the per-agent bound, and **`max_wall_clock_s`** the per-mode
   one. Both are enforced in code and neither assumes a provider.

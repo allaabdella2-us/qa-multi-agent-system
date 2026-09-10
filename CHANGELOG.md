@@ -1,5 +1,57 @@
 # Changelog
 
+## 2.0.0 — 2026-09-10
+
+**Breaking: every agent is renamed.** The old names were evocative but opaque —
+you had to learn that CONDUIT meant the API analyst and FORGE meant the
+reproducer. The new ones say what the agent does.
+
+| was | is now |
+|---|---|
+| CONDUCTOR | ROUTER |
+| CARTOGRAPHER | MAPPER |
+| KEYSTONE | ARCHITECT |
+| VAULT | DBA |
+| CONDUIT | API |
+| PULSE | SOCKET |
+| SURFACE | BROWSER |
+| USHER | GUIDE |
+| WARDEN | AUDITOR |
+| GAUGE | LOAD |
+| FORGE | REPRODUCER |
+| CLERK | TRIAGE |
+| MENDER | FIXER |
+| ARBITER | REVIEWER |
+| PROOF | VERIFIER |
+| CHRONICLE | REPORTER |
+
+ROUTER is not an agent — it is the Python state machine, and `conductor.py` is
+now `router.py` with `Conductor` renamed to `Router`.
+
+### What you have to change
+
+Anything of yours that names an agent:
+
+- **`run_modes` in your `system.yaml`.** This is the one that will stop a run:
+  an unknown agent name is a load-time error, so `qaas validate` will tell you
+  exactly which names it did not recognise.
+- **Agent overrides** in `<project>/config/agents/` or `.qaas/config/agents/` —
+  the filename and the `name:` field both.
+- **Ejected prompts** in `.qaas/prompts/` — `CONDUIT.md` is now `API.md`, and a
+  `<AGENT>.append.md` follows the new name too.
+- **Scripts** passing `--only`, `--agent` or `--kind`.
+
+Existing runs under `.qaas/runs/` are left alone deliberately: a ledger is an
+audit trail of what actually happened, and rewriting the names in it would make
+it a record of something that did not.
+
+### Also in this release
+
+Prompts moved with their agents (`src/qaas/prompts/<NEW>.md`), as did the packaged
+config (`src/qaas/defaults/config/agents/<new>.yaml`). `tasks.py`'s builders follow
+the same names: `tasks.conduit` is `tasks.api`, `tasks.forge` is
+`tasks.reproducer`, and so on.
+
 ## 1.1.0 — 2026-09-10
 
 A security and correctness release. An adversarial audit of the whole codebase
@@ -17,7 +69,7 @@ and the `vcs` MCP server calls it instead of keeping its own near-copy.
 - **`Bash` bypassed the whole matrix.** `_check_bash` consulted `FORBIDDEN_BASH`,
   the branch patterns and a substring test against `protected_paths`, and nothing
   else — so `sed -i '' api/app/auth.py` reached what `Edit` on that path was
-  refused. PROOF, the verification gate, holds `Bash` with no `write_paths`: it
+  refused. VERIFIER, the verification gate, holds `Bash` with no `write_paths`: it
   was read-only only against `Write`, and could edit the source it verified.
 - **`mcp__vcs__*` had its own copy of the rules, and the copy had drifted.**
   `check()` short-circuits every `mcp__*` call to "is this server declared"
@@ -37,7 +89,7 @@ and the `vcs` MCP server calls it instead of keeping its own near-copy.
   the refspec is stated explicitly on both sides.
 - **`git diff --output=<path>` wrote any file.** `diff`'s `ref` reached argv with
   no `_reject_flaglike`, from the one tool documented read-only — held by
-  ARBITER, whose policy grants no write access at all.
+  REVIEWER, whose policy grants no write access at all.
 - **`create_branch`'s start point had no validator** while the name beside it had
   two.
 - **Test-runner selectors executed code outside the target root.** A path-shaped
@@ -66,16 +118,16 @@ and the `vcs` MCP server calls it instead of keeping its own near-copy.
   purpose and runs at the top of every Jira-backed run, so an SSO site's 302 sent
   the bot's credential to the identity provider.
 - **`required_plugins = ["pytest-asyncio"]`.** Without it, an interpreter lacking
-  the plugin skipped all 156 async tests — the hooks, the conductor loop, the
+  the plugin skipped all 156 async tests — the hooks, the router loop, the
   guardrail callbacks, every MCP server — and exited 0.
 
 ### Gates, budgets and contracts
 
 - **The diff budget reset on every loop.** It counted a set on a context rebuilt
-  per dispatch, so MENDER's "5 files per run" started again on each
-  MENDER/ARBITER round trip and each ticket.
+  per dispatch, so FIXER's "5 files per run" started again on each
+  FIXER/REVIEWER round trip and each ticket.
 - **`must_call` counted denied and errored calls.** The tally was taken in
-  PreToolUse; an errored `record_verdict` satisfied PROOF's contract and the Stop
+  PreToolUse; an errored `record_verdict` satisfied VERIFIER's contract and the Stop
   hook let it stop with no verdict.
 - **`has_evidence()` accepted an empty string.** `failing_test is not None` let
   `""` pass the §2 evidence gate a model is not supposed to be able to argue past.
@@ -98,7 +150,7 @@ and the `vcs` MCP server calls it instead of keeping its own near-copy.
   any other target every generated test failed at its login fixture, and the
   envelope cited a "failing contract test" that was really a login failure.
 - `search` forwarded house status names to Jira, which validates its own and
-  answers 400 — so CLERK's dedupe errored on every call and the duplicate ticket
+  answers 400 — so TRIAGE's dedupe errored on every call and the duplicate ticket
   the system exists to prevent got filed.
 - `find_filter` failed open on an unknown account id and could adopt — and, since
   0.4.0, rewrite — a stranger's saved filter. `update_filter_jql` un-shared the

@@ -6,7 +6,7 @@ one layer up, in `qaas.mcp.vcs`, because that is where the run context lives and
 where a refusal can be logged to the ledger.
 
 The split also keeps the §8.1 matrix honest when the backend changes. Swapping
-`vcs: local` for `vcs: github` must not quietly widen what FORGE may do, and it
+`vcs: local` for `vcs: github` must not quietly widen what REPRODUCER may do, and it
 cannot, because the enforcement is not in here.
 
 Two capabilities are absent on purpose rather than by oversight: there is no
@@ -171,7 +171,7 @@ class LocalGit(VcsAdapter):
         # called `_reject_flaglike` on theirs. `git diff --output=<path>` exits 0
         # and writes the diff to that path, so the one tool documented
         # "read-only" could create or truncate any file the process can reach --
-        # and ARBITER, whose policy grants no write access at all, holds it.
+        # and REVIEWER, whose policy grants no write access at all, holds it.
         args = ["diff"]
         if ref:
             args.append(_reject_flaglike("ref", ref))

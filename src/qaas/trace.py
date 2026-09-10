@@ -288,7 +288,7 @@ class RunSummary:
     agents: list[str] = field(default_factory=list)
     cost_usd: float = 0.0
     escalations: list[str] = field(default_factory=list)
-    #: ticket key -> its latest verdict, or None if PROOF never reached it.
+    #: ticket key -> its latest verdict, or None if VERIFIER never reached it.
     tickets: dict[str, str | None] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=dict)
     stopped_early: str | None = None
@@ -328,7 +328,7 @@ def summarise(store: RunStore, entries: Sequence[LedgerEntry] | None = None) -> 
         elif entry.kind == LedgerKind.TICKET and detail.get("key"):
             summary.tickets.setdefault(str(detail["key"]), None)
         elif entry.kind == LedgerKind.VERDICT and detail.get("ticket_key"):
-            # Last verdict wins, matching how the conductor itself reads these
+            # Last verdict wins, matching how the router itself reads these
             # back (`_latest_verdict`); a reopened ticket is verdicted twice.
             summary.tickets[str(detail["ticket_key"])] = detail.get("verdict")
         elif entry.kind == LedgerKind.VERIFIED and detail.get("ticket_key"):
@@ -336,7 +336,7 @@ def summarise(store: RunStore, entries: Sequence[LedgerEntry] | None = None) -> 
 
     # Cost comes from the per-invocation result files, not from summing ledger
     # lines: `put_result` writes one file per invocation precisely so repeated
-    # agents (FORGE, MENDER) are not under-counted, and this must agree with
+    # agents (REPRODUCER, FIXER) are not under-counted, and this must agree with
     # `qaas runs`.
     summary.cost_usd = store.total_cost_usd()
     return summary

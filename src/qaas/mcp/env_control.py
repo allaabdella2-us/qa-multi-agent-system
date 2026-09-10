@@ -3,7 +3,7 @@
 A defect envelope claims `reproduction.environment = {branch, fixture, flags}`.
 That claim is only worth something if some component owns those three things and
 can put them back. This server is that component: every tool here exists so a
-later run (FORGE re-running a repro, PROOF verifying a fix) can stand the world
+later run (REPRODUCER re-running a repro, VERIFIER verifying a fix) can stand the world
 up in the same shape and get the same answer.
 
 Two deliberate properties:

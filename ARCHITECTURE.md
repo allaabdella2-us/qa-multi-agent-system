@@ -64,7 +64,7 @@ Start with `qaas validate`, then `qaas run --dry-run`. Neither calls the API.
 ```
 src/qaas/
 ├── cli.py          866  entry point; every command above
-├── conductor.py    452  THE STATE MACHINE — phases, budget, concurrency, loops
+├── router.py    452  THE STATE MACHINE — phases, budget, concurrency, loops
 ├── runner.py       118  invokes ONE agent, records what it cost
 ├── registry.py     275  turns an agent's YAML into SDK options
 ├── guardrails.py   413  the permission matrix, enforced in code
@@ -81,18 +81,18 @@ src/qaas/
 └── adapters/           tracker (local | jira), vcs (local | github)
 ```
 
-If you read three files, read `conductor.py`, `envelope.py`, `guardrails.py`.
+If you read three files, read `router.py`, `envelope.py`, `guardrails.py`.
 Everything else is in service of those.
 
 ---
 
 ## 4. The two decisions that explain everything else
 
-**CONDUCTOR is Python, not a prompt.** The original design has an orchestrator
+**ROUTER is Python, not a prompt.** The original design has an orchestrator
 agent. It is implemented as an ordinary state machine instead, because *a model
 cannot enforce a budget it is itself spending*. Phase ordering, concurrency,
 retries, escalation and the budget governor are all plain code in
-`conductor.py`. This also makes runs reproducible and cheap to unit-test — 547
+`router.py`. This also makes runs reproducible and cheap to unit-test — 547
 tests run offline with no API calls.
 
 **Each agent is its own top-level `query()`.** Not SDK subagents of a shared
@@ -114,34 +114,34 @@ $ qaas run --mode full-loop
     cli.py  ── loads config/system.yaml + config/agents/*.yaml + the target profile
         │
         ▼
- conductor.py  ── runs five phases in order, in-process
+ router.py  ── runs five phases in order, in-process
         │
-        ├── PHASE 1  map        CARTOGRAPHER      → system-map.json (versioned, pinned)
-        ├── PHASE 2  discover   CONDUIT, SURFACE  → DefectEnvelopes   [concurrent]
-        ├── PHASE 3  reproduce  FORGE             → failing test per finding
-        ├── PHASE 4  file       CLERK             → tickets
-        └── PHASE 5  verify     PROOF ⇄ MENDER ⇄ ARBITER   [bounded loop]
+        ├── PHASE 1  map        MAPPER                    → system-map.json (versioned, pinned)
+        ├── PHASE 2  discover   API, BROWSER, …           → DefectEnvelopes   [concurrent]
+        ├── PHASE 3  reproduce  REPRODUCER                → failing test per finding
+        ├── PHASE 4  file       TRIAGE                    → tickets
+        └── PHASE 5  verify     VERIFIER ⇄ FIXER ⇄ REVIEWER   [bounded loop]
 ```
 
-Each phase is a method on `Conductor`: `_phase_map`, `_phase_discover`,
+Each phase is a method on `Router`: `_phase_map`, `_phase_discover`,
 `_phase_reproduce`, `_phase_file`, `_phase_verify`.
 
 Which agents run is **config, not code** — `run_modes` in `config/system.yaml`:
 
 ```yaml
-pr-check:   [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]        $16
-nightly:    [CARTOGRAPHER, CONDUIT, SURFACE, FORGE, CLERK]        $40
-fix-cycle:  [PROOF, MENDER, ARBITER]                              $20
+pr-check:   [MAPPER, API, BROWSER, REPRODUCER, TRIAGE]        $16
+nightly:    [MAPPER, API, BROWSER, REPRODUCER, TRIAGE]        $40
+fix-cycle:  [VERIFIER, FIXER, REVIEWER]                              $20
 full-loop:  all eight                                             $60
 ```
 
-Note the shape: **FORGE runs once per finding**, in a fresh context each time. So
+Note the shape: **REPRODUCER runs once per finding**, in a fresh context each time. So
 cost scales with how much was found, not with how many agents exist.
 
 ### 5.2 Dispatching one agent
 
 ```
-conductor._dispatch(spec, task)
+router._dispatch(spec, task)
         │
         ├── Budget.check()          raises BudgetExceeded → a control working, not an error
         │
@@ -164,7 +164,7 @@ conductor._dispatch(spec, task)
 ```
 
 Failures are **captured, not raised**. One agent falling over costs the run that
-agent's findings, not the whole run; the conductor decides whether to retry, skip
+agent's findings, not the whole run; the router decides whether to retry, skip
 or escalate.
 
 ### 5.3 The remediation loop (phase 5)
@@ -175,7 +175,7 @@ explicit bounds:
 ```
         ┌─────────────────────────────────────────────┐
         ▼                                             │
-      PROOF ──VERIFIED──▶ done                        │
+      VERIFIER ──VERIFIED──▶ done                        │
         │                                             │
         ├──REGRESSED──▶ escalate to a human           │
         │                                             │
@@ -183,9 +183,9 @@ explicit bounds:
         │                                             │
         ├─ reopens ≥ max_proof_reopens ─▶ escalate    │
         ▼                                             │
-      MENDER ──▶ ARBITER ──APPROVE────────────────────┘
+      FIXER ──▶ REVIEWER ──APPROVE────────────────────┘
                     │
-                    ├─ REQUEST_CHANGES ─▶ back to MENDER (capped at 2 trips)
+                    ├─ REQUEST_CHANGES ─▶ back to FIXER (capped at 2 trips)
                     └─ ESCALATE_TO_HUMAN ─▶ stop
 ```
 
@@ -194,7 +194,7 @@ defect cycles until the budget is gone and the run ends with no verdict and no
 money left to reach one. Escalating after one reopen costs a human five minutes;
 not escalating costs the whole run.
 
-PROOF's verdict is a **typed ledger entry** written through a tool
+VERIFIER's verdict is a **typed ledger entry** written through a tool
 (`record_verdict`), never parsed out of the agent's prose.
 
 ---
@@ -279,11 +279,11 @@ Playwright is the one exception — a real stdio subprocess, declared in
 An agent is **a prompt plus a YAML file**. Nothing else.
 
 ```
-src/qaas/prompts/CONDUIT.md      role, standards, what good looks like
-config/agents/conduit.yaml       model, budget, tools, skills, policy
+src/qaas/prompts/API.md      role, standards, what good looks like
+config/agents/api.yaml       model, budget, tools, skills, policy
 ```
 
-Adding an agent should require **no change** to `conductor.py`, `runner.py`,
+Adding an agent should require **no change** to `router.py`, `runner.py`,
 `registry.py` or `guardrails.py`. A change to those files while adding an agent
 is a sign something is wrong.
 
@@ -305,23 +305,23 @@ that mentions one repo's layout or one app's seeded users works exactly once.
 
 | agent | layer | does |
 |---|---|---|
-| CARTOGRAPHER | map | services, routes, schema, ownership → `system-map.json` |
-| KEYSTONE | discovery | circular deps, layering violations, god modules, dead code |
-| CONDUIT | discovery | API contract drift; ships a failing contract test |
-| SURFACE | discovery | drives the UI through real journeys |
-| VAULT | discovery | schema constraints the code assumes and the database does not enforce |
-| WARDEN | discovery | missing authorization, secrets, vulnerable dependencies, leaked internals |
-| PULSE | discovery | WebSocket auth, reconnect, ordering, backpressure |
-| USHER | discovery | whether a person can *find* a feature, not just whether it works |
-| GAUGE | discovery | N+1 queries, unindexed hot paths, unbounded results, bundle outliers |
-| FORGE | triage | reproduces, minimises, measures flake, commits a failing test |
-| CLERK | triage | dedupes, scores severity, routes, files — the only tracker writer |
-| MENDER | remediation | the minimal fix, on a `fix/*` branch |
-| ARBITER | remediation | adversarial review: APPROVE / REQUEST_CHANGES / ESCALATE |
-| PROOF | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
-| CHRONICLE | reporting | what the run found, what recurred, and what it could not reach |
+| MAPPER | map | services, routes, schema, ownership → `system-map.json` |
+| ARCHITECT | discovery | circular deps, layering violations, god modules, dead code |
+| API | discovery | API contract drift; ships a failing contract test |
+| BROWSER | discovery | drives the UI through real journeys |
+| DBA | discovery | schema constraints the code assumes and the database does not enforce |
+| AUDITOR | discovery | missing authorization, secrets, vulnerable dependencies, leaked internals |
+| SOCKET | discovery | WebSocket auth, reconnect, ordering, backpressure |
+| GUIDE | discovery | whether a person can *find* a feature, not just whether it works |
+| LOAD | discovery | N+1 queries, unindexed hot paths, unbounded results, bundle outliers |
+| REPRODUCER | triage | reproduces, minimises, measures flake, commits a failing test |
+| TRIAGE | triage | dedupes, scores severity, routes, files — the only tracker writer |
+| FIXER | remediation | the minimal fix, on a `fix/*` branch |
+| REVIEWER | remediation | adversarial review: APPROVE / REQUEST_CHANGES / ESCALATE |
+| VERIFIER | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
+| REPORTER | reporting | what the run found, what recurred, and what it could not reach |
 
-CONDUCTOR is the sixteenth. It is the Python state machine in `conductor.py`
+ROUTER is the sixteenth. It is the Python state machine in `router.py`
 rather than an agent, because a model cannot enforce a budget it is spending.
 
 ---
@@ -340,16 +340,16 @@ second layer for calls the allowlist did not auto-approve. Both call one
 
 What is enforced:
 
-- **Path scoping** — writes resolved and checked against `write_paths`. FORGE and
-  MENDER only; everyone else denied.
+- **Path scoping** — writes resolved and checked against `write_paths`. REPRODUCER and
+  FIXER only; everyone else denied.
 - **Branch scoping** — git writes matched against branch patterns
   (`qa/repro/*`, `fix/*`). `main` and force-push denied outright.
 - **Ticket rate limit** — `max_tickets_per_run: 10`; over cap the call is denied
-  and the conductor escalates instead of filing.
+  and the router escalates instead of filing.
 - **Forbidden path classes** — migrations, auth, payment, secrets, infra, CI stop
   at a human however small the change looks.
 - **Diff budget** — counted per distinct file.
-- **Immutable test** — MENDER may not edit the test recorded on the envelope.
+- **Immutable test** — FIXER may not edit the test recorded on the envelope.
 
 Denials **return a reason and are logged**; they never kill the turn. The agent
 reads the denial and adapts.
@@ -366,7 +366,7 @@ drafts. Merging is a human decision.
 ### Hooks enforce the output contract
 
 - **`Stop`** blocks an agent that has not called its `must_call` tools, *while it
-  still has a turn to fix it* — the conductor would only find out afterwards. It
+  still has a turn to fix it* — the router would only find out afterwards. It
   honours `stop_hook_active`; blocking twice burns budget.
 - **`PostToolUse`** tells an agent immediately when an emitted envelope was
   **held** rather than filed, since discovering that at the end is too late to
@@ -453,8 +453,8 @@ Four tiers, cheapest first:
 1. `qaas validate` then `qaas run --mode pr-check --dry-run` — see the machine
    describe itself, for free
 2. `envelope.py` — the contract everything else moves
-3. `conductor.py::run` — the five phases
-4. `config/agents/conduit.yaml` + `prompts/CONDUIT.md` — what an agent *is*
+3. `router.py::run` — the five phases
+4. `config/agents/api.yaml` + `prompts/API.md` — what an agent *is*
 5. `guardrails.py::check` — the one function both enforcement points call
 6. `.qaas/runs/<id>/ledger.jsonl` from a real run — what actually happened
 
@@ -464,8 +464,8 @@ Four tiers, cheapest first:
 
 Honesty about what is *not* proven, so nobody inherits a false impression:
 
-- **Eight of sixteen agents.** KEYSTONE, VAULT, PULSE, USHER, WARDEN, GAUGE and
-  CHRONICLE are designed but not built.
+- **Eight of sixteen agents.** ARCHITECT, DBA, SOCKET, GUIDE, AUDITOR, LOAD and
+  REPORTER are designed but not built.
 - **The extensibility claim is untested.** "A new agent needs only a prompt and a
   YAML" is the architecture's central promise, and no one has added a ninth agent
   to check it.

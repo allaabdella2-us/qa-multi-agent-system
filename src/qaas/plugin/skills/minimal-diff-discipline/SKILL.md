@@ -17,9 +17,9 @@ Every line beyond the fix is a line a reviewer has to judge and a line that can 
 
 Your policy sets `max_diff_files: 5` and `max_diff_lines: 150` (§8.2).
 
-- **Files are counted and enforced** by the PreToolUse hook, per *distinct* file, not per call — editing one file six times is one file. On the sixth distinct file the write is refused with: *"MENDER has already changed 5 files, which is its limit of 5 (§8.2). A fix this wide is outside the autonomy envelope: stop, and escalate with what you have found."* The refusal names the files already touched. It is not a rate limit to wait out; it is the envelope closing.
-- **Lines are a declared budget, not a machine check.** Nothing stops you at 150. You hold it, and ARBITER measures it. Treat crossing it exactly as you would treat the file refusal.
-- **Forbidden classes stop you whatever the size.** Migrations, anything matching `*auth*`, payment, billing, secrets, `*.tf`, `*/infra/*`, Docker and `.github` are refused with the class named: *"...is outside MENDER's autonomy envelope: it is a database migration. Changes here need human approval (§8.2). Describe the change you would make and escalate instead of making it."* Do that literally — describe the change, do not find a path that misses the glob.
+- **Files are counted and enforced** by the PreToolUse hook, per *distinct* file, not per call — editing one file six times is one file. On the sixth distinct file the write is refused with: *"FIXER has already changed 5 files, which is its limit of 5 (§8.2). A fix this wide is outside the autonomy envelope: stop, and escalate with what you have found."* The refusal names the files already touched. It is not a rate limit to wait out; it is the envelope closing.
+- **Lines are a declared budget, not a machine check.** Nothing stops you at 150. You hold it, and REVIEWER measures it. Treat crossing it exactly as you would treat the file refusal.
+- **Forbidden classes stop you whatever the size.** Migrations, anything matching `*auth*`, payment, billing, secrets, `*.tf`, `*/infra/*`, Docker and `.github` are refused with the class named: *"...is outside FIXER's autonomy envelope: it is a database migration. Changes here need human approval (§8.2). Describe the change you would make and escalate instead of making it."* Do that literally — describe the change, do not find a path that misses the glob.
 
 ## What belongs in this diff
 

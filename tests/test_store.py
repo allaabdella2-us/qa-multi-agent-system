@@ -18,7 +18,7 @@ def store(tmp_path):
 def make_env(run_id, **kw):
     base = dict(
         run_id=run_id,
-        discovered_by="CONDUIT",
+        discovered_by="API",
         domain=Domain.API,
         **{"class": "bug"},
         title="Missing role check on the refund endpoint",
@@ -44,14 +44,14 @@ def test_envelope_persists_and_is_stamped_with_a_fingerprint(store):
 def test_ledger_is_append_only_and_filterable(store):
     store.log("run_started", mode="pr-check")
     store.put_envelope(make_env(store.run_id))
-    store.log("denial", agent="KEYSTONE", tool="Write", reason="read-only agent")
+    store.log("denial", agent="ARCHITECT", tool="Write", reason="read-only agent")
 
     kinds = [e.kind for e in store.ledger()]
     assert kinds == ["run_started", "envelope", "denial"]
 
     denials = list(store.ledger("denial"))
     assert len(denials) == 1
-    assert denials[0].agent == "KEYSTONE"
+    assert denials[0].agent == "ARCHITECT"
     assert denials[0].detail["reason"] == "read-only agent"
 
 
@@ -72,16 +72,16 @@ def test_artifact_names_with_slashes_are_flattened_not_nested(store):
 
 
 def test_costs_accumulate_across_agents(store):
-    store.put_result(AgentResult(agent="CONDUIT", cost_usd=0.42, num_turns=7))
-    store.put_result(AgentResult(agent="SURFACE", cost_usd=1.08, num_turns=12))
+    store.put_result(AgentResult(agent="API", cost_usd=0.42, num_turns=7))
+    store.put_result(AgentResult(agent="BROWSER", cost_usd=1.08, num_turns=12))
 
     assert store.total_cost_usd() == pytest.approx(1.50)
-    assert {r.agent for r in store.results()} == {"CONDUIT", "SURFACE"}
+    assert {r.agent for r in store.results()} == {"API", "BROWSER"}
     assert [e.kind for e in store.ledger("agent_finished")] == ["agent_finished"] * 2
 
 
 def test_failed_agent_result_records_its_error(store):
-    store.put_result(AgentResult(agent="SURFACE", subtype="failure", error="browser timeout"))
+    store.put_result(AgentResult(agent="BROWSER", subtype="failure", error="browser timeout"))
     entry = next(store.ledger("agent_finished"))
     assert entry.detail["error"] == "browser timeout"
 
@@ -109,10 +109,10 @@ def test_system_map_versions_and_latest_pointer(tmp_path):
 
 
 def test_repeated_invocations_of_one_agent_all_count(store):
-    """FORGE runs once per finding. A per-agent filename would keep only the last,
+    """REPRODUCER runs once per finding. A per-agent filename would keep only the last,
     and the run's recorded cost would then be wrong by everything before it."""
     for i in range(3):
-        store.put_result(AgentResult(agent="FORGE", cost_usd=1.50, num_turns=5))
+        store.put_result(AgentResult(agent="REPRODUCER", cost_usd=1.50, num_turns=5))
 
     results = store.results()
     assert len(results) == 3, "each invocation is its own record"
@@ -121,9 +121,9 @@ def test_repeated_invocations_of_one_agent_all_count(store):
 
 
 def test_different_agents_are_still_distinguishable(store):
-    store.put_result(AgentResult(agent="FORGE", cost_usd=1.0))
-    store.put_result(AgentResult(agent="CLERK", cost_usd=0.5))
-    assert {r.agent for r in store.results()} == {"FORGE", "CLERK"}
+    store.put_result(AgentResult(agent="REPRODUCER", cost_usd=1.0))
+    store.put_result(AgentResult(agent="TRIAGE", cost_usd=0.5))
+    assert {r.agent for r in store.results()} == {"REPRODUCER", "TRIAGE"}
 
 
 # -- the ledger must survive the environment it runs in ---------------------
@@ -149,7 +149,7 @@ def test_a_denial_reason_round_trips_under_an_ascii_default_encoding(tmp_path):
         "from qaas.store import RunStore\n"
         "store = RunStore.new(root=__import__('pathlib').Path(%r))\n"
         "reason = \"api/app/auth.py is outside the envelope (\\u00a78.2) \\u2014 escalate.\"\n"
-        "store.log('denial', agent='MENDER', tool='Edit', reason=reason)\n"
+        "store.log('denial', agent='FIXER', tool='Edit', reason=reason)\n"
         "back = list(store.ledger('denial'))\n"
         "assert back and back[0].detail['reason'] == reason, back\n"
         "print('ok')\n"

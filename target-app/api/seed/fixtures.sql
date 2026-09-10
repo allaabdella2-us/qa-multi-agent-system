@@ -16,7 +16,7 @@ BEGIN;
 -- by initdb (docker-entrypoint-initdb.d/002) and again by any explicit
 -- env_control.seed()/reset(). Without this truncate the second application dies
 -- on `duplicate key value violates unique constraint "organizations_pkey"`,
--- which is exactly what a PROOF run hit -- a reproduction that cannot re-seed
+-- which is exactly what a VERIFIER run hit -- a reproduction that cannot re-seed
 -- cannot pin its environment. RESTART IDENTITY also re-zeroes the sequences the
 -- setval() calls at the foot of this file then pin to the fixture's own max ids.
 TRUNCATE invoices, order_items, orders, users, organizations RESTART IDENTITY CASCADE;

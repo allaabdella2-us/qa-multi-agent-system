@@ -41,12 +41,12 @@ class LedgerKind(StrEnum):
     `entry.kind == "denial"` still holds, `model_dump_json()` still writes
     `"kind":"denial"`, and every ledger already on disk still parses. Adding a
     kind means adding a member here -- deliberately a visible act, because the
-    conductor reads several of these back for control flow (`_latest_verdict`,
+    router reads several of these back for control flow (`_latest_verdict`,
     `_latest_review`, `_branch_written_since`), so a rename is a breaking
     change to a wire format, not a rename.
     """
 
-    # run lifecycle (conductor)
+    # run lifecycle (router)
     RUN_STARTED = "run_started"
     RUN_FINISHED = "run_finished"
     SKIPPED = "skipped"
@@ -253,8 +253,8 @@ class RunStore:
     # -- per-agent results ------------------------------------------------
 
     def put_result(self, result: AgentResult) -> None:
-        # One file per invocation, not per agent. FORGE runs once per finding and
-        # MENDER once per review round trip, so a per-agent filename silently
+        # One file per invocation, not per agent. REPRODUCER runs once per finding and
+        # FIXER once per review round trip, so a per-agent filename silently
         # keeps only the last one — and the persisted cost of a run then
         # under-reports by however much the repeated agents actually spent.
         existing = len(list((self.dir / "results").glob(f"{result.agent}-*.json")))
@@ -279,7 +279,7 @@ class RunStore:
 
 
 class SystemMapStore:
-    """Versioned Cartographer output, shared across runs.
+    """Versioned Mapper output, shared across runs.
 
     Agents pin a map version for the length of a run so a bad map cannot
     half-propagate mid-run (§10, context poisoning).

@@ -27,7 +27,7 @@ Under 90 characters. A reader should be able to tell from the title alone whethe
 ## Body, in this order
 
 1. **What breaks, for whom, how often.** Two or three sentences. Lead with the user-visible consequence, not the code.
-2. **Reproduction.** FORGE's steps, verbatim. Do not paraphrase them, do not tidy them, do not renumber. They were minimised deliberately and every edit risks breaking the reproduction.
+2. **Reproduction.** REPRODUCER's steps, verbatim. Do not paraphrase them, do not tidy them, do not renumber. They were minimised deliberately and every edit risks breaking the reproduction.
 3. **Evidence.** Links to the artifacts. Say what each one shows.
 4. **Acceptance criteria.** The failing test that must pass, named exactly. This is the contract: when that test is green the ticket is done, and there is nothing to argue about.
 5. **Suggested area** if you have one, clearly marked as a suggestion. You are not the person fixing it and you may be wrong about where.

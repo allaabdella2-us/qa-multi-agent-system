@@ -6,7 +6,7 @@ pin the readers -- `qaas trace`, the enriched `qaas show`, the closed `LedgerKin
 set -- and the two provenance gaps that made a run unreplayable: the task an
 agent was actually given, and the commit it was given it against.
 
-Everything here is offline: a synthetic run store, a scripted conductor, no
+Everything here is offline: a synthetic run store, a scripted router, no
 network and no API call.
 """
 
@@ -24,9 +24,9 @@ from typer.testing import CliRunner
 from support import CONFIG_SEARCH
 
 from qaas import cli
-from qaas import conductor as conductor_mod
+from qaas import router as conductor_mod
 from qaas import trace as trace_mod
-from qaas.conductor import Conductor, target_revision
+from qaas.router import Router, target_revision
 from qaas.config import load_config
 from qaas.envelope import DefectEnvelope, Domain, Severity
 from qaas.mcp.context import ToolContext
@@ -45,39 +45,39 @@ def runner():
 def run(tmp_path) -> RunStore:
     """A synthetic run whose ledger carries one of every kind that matters.
 
-    Shaped after a real `fix-cycle` ledger: discovery emits envelopes, FORGE
-    reproduces, CLERK files, PROOF verdicts twice on one ticket, ARBITER
+    Shaped after a real `fix-cycle` ledger: discovery emits envelopes, REPRODUCER
+    reproduces, TRIAGE files, VERIFIER verdicts twice on one ticket, REVIEWER
     escalates. Details are kept short on purpose -- rich wraps CLI output at 80
     columns and an assertion on a long string would be an assertion about
     terminal width.
     """
     store = RunStore("run-synthetic-0001", tmp_path)
     store.log(
-        "run_started", mode="fix-cycle", agents=["CONDUIT", "FORGE", "CLERK", "PROOF"],
+        "run_started", mode="fix-cycle", agents=["API", "REPRODUCER", "TRIAGE", "VERIFIER"],
         budget_usd=10.0, wall_clock_s=3600,
         target_root="/tmp/app", target_sha="abc123def4567890", target_dirty=False,
     )
-    store.log("agent_started", agent="CONDUIT", model="claude-opus-5",
-              task_chars=42, task_preview="Exercise the API.", task_uri="artifact://x/task-CONDUIT-01.md")
+    store.log("agent_started", agent="API", model="claude-opus-5",
+              task_chars=42, task_preview="Exercise the API.", task_uri="artifact://x/task-API-01.md")
     for tool in ("Read", "Read", "Grep"):
-        store.log("tool_call", agent="CONDUIT", tool=tool, allowed=True)
-    store.log("denial", agent="CONDUIT", tool="Bash", reason="not allowlisted")
-    store.log("tool_call", agent="CONDUIT", tool="Read", allowed=True)
-    store.put_envelope(_envelope(store.run_id, "CONDUIT"))
-    store.put_result(AgentResult(agent="CONDUIT", cost_usd=1.25, num_turns=9))
+        store.log("tool_call", agent="API", tool=tool, allowed=True)
+    store.log("denial", agent="API", tool="Bash", reason="not allowlisted")
+    store.log("tool_call", agent="API", tool="Read", allowed=True)
+    store.put_envelope(_envelope(store.run_id, "API"))
+    store.put_result(AgentResult(agent="API", cost_usd=1.25, num_turns=9))
 
-    store.log("agent_started", agent="FORGE", model="claude-opus-5", task_chars=7)
-    store.log("reproduction", agent="FORGE", envelope_id="e1", status="reproduced", fileable=True)
-    store.log("vcs", agent="FORGE", action="commit", branch="qa/repro/e1", sha="deadbee")
-    store.put_result(AgentResult(agent="FORGE", cost_usd=0.75, num_turns=4))
+    store.log("agent_started", agent="REPRODUCER", model="claude-opus-5", task_chars=7)
+    store.log("reproduction", agent="REPRODUCER", envelope_id="e1", status="reproduced", fileable=True)
+    store.log("vcs", agent="REPRODUCER", action="commit", branch="qa/repro/e1", sha="deadbee")
+    store.put_result(AgentResult(agent="REPRODUCER", cost_usd=0.75, num_turns=4))
 
-    store.log("ticket", agent="CLERK", action="created", key="CORVID-1", severity="major")
-    store.log("ticket", agent="CLERK", action="created", key="CORVID-2", severity="minor")
-    store.log("verdict", agent="PROOF", ticket_key="CORVID-1", verdict="NOT_FIXED", observed="still broken")
-    store.log("reopened", agent="PROOF", ticket_key="CORVID-1", attempt=1)
-    store.log("verdict", agent="PROOF", ticket_key="CORVID-1", verdict="VERIFIED", observed="passes")
-    store.log("verified", agent="PROOF", ticket_key="CORVID-1", reopens=1)
-    store.log("escalation", agent="ARBITER", reason="CORVID-2 needs a human")
+    store.log("ticket", agent="TRIAGE", action="created", key="CORVID-1", severity="major")
+    store.log("ticket", agent="TRIAGE", action="created", key="CORVID-2", severity="minor")
+    store.log("verdict", agent="VERIFIER", ticket_key="CORVID-1", verdict="NOT_FIXED", observed="still broken")
+    store.log("reopened", agent="VERIFIER", ticket_key="CORVID-1", attempt=1)
+    store.log("verdict", agent="VERIFIER", ticket_key="CORVID-1", verdict="VERIFIED", observed="passes")
+    store.log("verified", agent="VERIFIER", ticket_key="CORVID-1", reopens=1)
+    store.log("escalation", agent="REVIEWER", reason="CORVID-2 needs a human")
     store.log("run_finished", run_id=store.run_id, mode="fix-cycle", agents_run=2,
               failed=[], cost_usd=2.0, escalations=["CORVID-2 needs a human"], stopped_early=None)
     return store
@@ -154,15 +154,15 @@ def test_json_is_faithful_and_never_folds(run):
 
 
 def test_agent_filter_keeps_only_that_agent(runner, run):
-    output = _trace(runner, run, "--agent", "PROOF")
+    output = _trace(runner, run, "--agent", "VERIFIER")
     assert "verdict" in output and "reopened" in output
-    assert "CONDUIT" not in output
-    assert "run_started" not in output, "an unattributed entry is not PROOF's"
+    assert "API" not in output
+    assert "run_started" not in output, "an unattributed entry is not VERIFIER's"
 
 
 def test_agent_filter_is_case_insensitive(run):
     entries = trace_mod.read_ledger(run)
-    assert trace_mod.select(entries, agent="proof") == trace_mod.select(entries, agent="PROOF")
+    assert trace_mod.select(entries, agent="verifier") == trace_mod.select(entries, agent="VERIFIER")
 
 
 def test_kind_filter_is_repeatable(runner, run):
@@ -173,7 +173,7 @@ def test_kind_filter_is_repeatable(runner, run):
 
 def test_filters_compose(run):
     entries = trace_mod.read_ledger(run)
-    picked = trace_mod.select(entries, agent="CLERK", kinds=[LedgerKind.TICKET])
+    picked = trace_mod.select(entries, agent="TRIAGE", kinds=[LedgerKind.TICKET])
     assert [e.detail["key"] for e in picked] == ["CORVID-1", "CORVID-2"]
 
 
@@ -209,7 +209,7 @@ def test_json_output_honours_the_filters(runner, run):
 def test_json_output_survives_a_detail_longer_than_the_console(runner, tmp_path):
     """rich soft-wraps at 80 columns; JSON wrapped mid-string does not parse."""
     store = RunStore("run-wide-0001", tmp_path)
-    store.log("denial", agent="FORGE", tool="Bash", reason="x" * 4000)
+    store.log("denial", agent="REPRODUCER", tool="Bash", reason="x" * 4000)
     result = runner.invoke(cli.app, ["trace", store.run_id, "--root", str(tmp_path), "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)[0]["detail"]["reason"] == "x" * 4000
@@ -247,7 +247,7 @@ def test_show_still_lists_findings_and_denials(runner, run):
 
 def test_show_flags_a_run_that_never_finished(runner, tmp_path):
     store = RunStore("run-killed-0001", tmp_path)
-    store.log("run_started", mode="nightly", agents=["CONDUIT"], budget_usd=1.0)
+    store.log("run_started", mode="nightly", agents=["API"], budget_usd=1.0)
     result = runner.invoke(cli.app, ["show", store.run_id, "--root", str(tmp_path)])
     assert result.exit_code == 0, result.output
     assert "did not complete" in result.output
@@ -259,7 +259,7 @@ def test_show_flags_a_run_that_never_finished(runner, tmp_path):
 def test_an_unknown_kind_is_rejected_on_write(tmp_path):
     store = RunStore("run-typo-0001", tmp_path)
     with pytest.raises(ValidationError):
-        store.log("denail", agent="FORGE", reason="typo")
+        store.log("denail", agent="REPRODUCER", reason="typo")
     assert not list(store.ledger()), "nothing may reach the file"
 
 
@@ -269,9 +269,9 @@ def test_an_unknown_kind_is_rejected_on_read():
 
 
 def test_a_kind_still_behaves_as_its_string(tmp_path):
-    """~60 call sites pass a literal and the conductor compares against strings."""
+    """~60 call sites pass a literal and the router compares against strings."""
     store = RunStore("run-str-0001", tmp_path)
-    entry = store.log("denial", agent="FORGE", reason="no")
+    entry = store.log("denial", agent="REPRODUCER", reason="no")
     assert entry.kind == "denial"
     assert f"{entry.kind}" == "denial"
     assert '"kind":"denial"' in store.ledger_path.read_text()
@@ -308,7 +308,7 @@ def test_the_wire_format_did_not_change(run):
 # -- provenance: the task an agent was given --------------------------------
 
 
-def _context(tmp_path, cfg, name="FORGE") -> ToolContext:
+def _context(tmp_path, cfg, name="REPRODUCER") -> ToolContext:
     from qaas.store import SystemMapStore
 
     store = RunStore("run-task-0001", tmp_path)
@@ -321,18 +321,18 @@ def test_the_task_an_agent_received_is_recoverable(tmp_path):
     cfg = load_config(search=CONFIG_SEARCH)
     ctx = _context(tmp_path, cfg)
     task = "Reproduce finding e1.\n" + "detail " * 500
-    detail = _record_task(ctx, "FORGE", task)
+    detail = _record_task(ctx, "REPRODUCER", task)
 
     assert detail["task_preview"].startswith("Reproduce finding e1.")
     assert ctx.store.resolve_artifact(detail["task_uri"]).read_text() == task
 
 
 def test_each_invocation_of_a_repeated_agent_keeps_its_own_task(tmp_path):
-    """FORGE runs once per finding; a per-agent filename would keep only the last."""
+    """REPRODUCER runs once per finding; a per-agent filename would keep only the last."""
     cfg = load_config(search=CONFIG_SEARCH)
     ctx = _context(tmp_path, cfg)
-    first = _record_task(ctx, "FORGE", "finding one")
-    second = _record_task(ctx, "FORGE", "finding two")
+    first = _record_task(ctx, "REPRODUCER", "finding one")
+    second = _record_task(ctx, "REPRODUCER", "finding two")
 
     assert first["task_uri"] != second["task_uri"]
     assert ctx.store.resolve_artifact(first["task_uri"]).read_text() == "finding one"
@@ -376,7 +376,7 @@ def test_run_started_pins_the_run_to_a_commit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(conductor_mod, "run_agent", fake_run_agent)
     cfg = load_config(search=CONFIG_SEARCH)
-    report = asyncio.run(Conductor(cfg, target_root=REPO, root=tmp_path).run("pr-check"))
+    report = asyncio.run(Router(cfg, target_root=REPO, root=tmp_path).run("pr-check"))
 
     started = next(iter(RunStore(report.run_id, tmp_path).ledger("run_started")))
     # `cfg.target_app` is gone: the target root is the profile's, resolved once.
@@ -410,7 +410,7 @@ def test_a_half_written_line_is_not_an_entry_and_is_picked_up_later(tmp_path):
     store = RunStore("run-partial-0001", tmp_path)
     store.log("run_started", mode="nightly")
     complete = store.ledger_path.read_text()
-    entry = LedgerEntry(kind=LedgerKind.DENIAL, agent="CONDUIT", detail={"tool": "Bash"})
+    entry = LedgerEntry(kind=LedgerKind.DENIAL, agent="API", detail={"tool": "Bash"})
     line = entry.model_dump_json()
     store.ledger_path.write_text(complete + line[: len(line) // 2])
 
@@ -441,7 +441,7 @@ def test_follow_streams_entries_appended_after_it_started(tmp_path):
     stream = trace_mod.tail(store, poll=0.0)
     assert next(stream).kind == LedgerKind.RUN_STARTED
 
-    store.log("agent_started", agent="CONDUIT", model="claude-opus-5")
+    store.log("agent_started", agent="API", model="claude-opus-5")
     assert next(stream).kind == LedgerKind.AGENT_STARTED
 
     store.log("run_finished", agents_run=1, cost_usd=0.0, failed=[])
@@ -451,7 +451,7 @@ def test_follow_streams_entries_appended_after_it_started(tmp_path):
 
 def test_the_follow_view_prints_the_same_facts_as_the_timeline(runner, run):
     output = _trace(runner, run, "--follow")
-    for expected in ("CONDUIT", "denial", "CORVID-1", "VERIFIED", "run finished"):
+    for expected in ("API", "denial", "CORVID-1", "VERIFIED", "run finished"):
         assert expected in output
 
 

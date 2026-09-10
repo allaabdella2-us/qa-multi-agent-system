@@ -1,7 +1,7 @@
 """Configuration: agents are data, not code.
 
 An agent is a prompt file plus an entry in `config/agents/`. Adding one of the
-remaining agents from the roster should never require touching the conductor,
+remaining agents from the roster should never require touching the router,
 the runner, or the guardrails — that is the property this module exists to keep.
 """
 
@@ -87,7 +87,7 @@ class AgentSpec(BaseModel):
 
     # Tools this agent must have called before it is allowed to finish. The Stop
     # hook enforces it. Without this an agent can produce a confident summary and
-    # no artifact, and the failure only surfaces afterwards in the conductor —
+    # no artifact, and the failure only surfaces afterwards in the router —
     # too late for the agent to fix it.
     must_call: list[str] = Field(default_factory=list)
 
@@ -321,7 +321,7 @@ def load_config(
     raw.pop("target_app", None)
 
     # Backend overrides from the environment, so pointing a run at a real
-    # tracker or forge is not a committed file change.
+    # tracker or reproducer is not a committed file change.
     #
     # `tracker: local` is the committed default and must stay that way. When
     # `jira` was committed instead, 18 tests failed and 14 errored: the agent

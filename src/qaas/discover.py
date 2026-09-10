@@ -3,7 +3,7 @@
 This is deliberately dumb pattern-matching, not analysis. Its job is to save a
 person ten minutes of typing and to be obviously wrong when it is wrong — every
 value it produces is a guess a human is expected to correct, and `qaas init`
-says so. CARTOGRAPHER does the real mapping later, with a model and the whole
+says so. MAPPER does the real mapping later, with a model and the whole
 repository in front of it.
 """
 
@@ -43,7 +43,7 @@ TEST_DIR_NAMES = {"tests", "test", "__tests__", "spec", "e2e", "integration_test
 MIGRATION_DIR_NAMES = {"migrations", "migrate", "alembic", "db/migrate", "prisma/migrations"}
 
 #: `Layout.docs` existed and nothing ever filled it, so a documentation-heavy
-#: repository profiled as having no documentation at all and KEYSTONE was told
+#: repository profiled as having no documentation at all and ARCHITECT was told
 #: to go and find it. Prose is a real surface: specs that contradict the code,
 #: tickets that describe behaviour nobody built, standards nothing follows.
 DOC_DIR_NAMES = {"docs", "doc", "documentation", "adr", "rfcs", "specs"}
@@ -158,7 +158,7 @@ def inspect(root: Path) -> Discovery:
 
     if not spec:
         notes.append(
-            "No OpenAPI document found. CONDUIT can still audit the API, but it has "
+            "No OpenAPI document found. API can still audit the API, but it has "
             "no declared contract to diff against — set layout.spec if one exists "
             "somewhere this did not look."
         )
@@ -170,7 +170,7 @@ def inspect(root: Path) -> Discovery:
     if not backend and not frontend:
         notes.append(
             "Could not identify backend or frontend directories. Set layout.backend "
-            "and layout.frontend by hand — leaving them empty makes CARTOGRAPHER "
+            "and layout.frontend by hand — leaving them empty makes MAPPER "
             "explore blind, which is slower and less accurate."
         )
 
@@ -185,7 +185,7 @@ def inspect(root: Path) -> Discovery:
 
     # "." is not a service. A root pyproject.toml or package.json is usually
     # tooling or workspace config, and listing the root as a backend directory
-    # tells CARTOGRAPHER nothing while making it read the whole repository.
+    # tells MAPPER nothing while making it read the whole repository.
     if len(set(backend)) > 1:
         backend = [b for b in backend if b != "."]
 

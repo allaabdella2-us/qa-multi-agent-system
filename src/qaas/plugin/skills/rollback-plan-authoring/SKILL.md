@@ -78,4 +78,4 @@ Faster option: set <flag>=off, no deploy needed.
 <one or two sentences: bounded by the revert, or bounded by <mitigation>>
 ```
 
-ARBITER judges this note, and an unviable rollback plan is grounds for `REQUEST_CHANGES` on its own — see `adversarial-review`.
+REVIEWER judges this note, and an unviable rollback plan is grounds for `REQUEST_CHANGES` on its own — see `adversarial-review`.

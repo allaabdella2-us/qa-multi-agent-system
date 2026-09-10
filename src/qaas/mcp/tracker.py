@@ -1,7 +1,7 @@
 """The `tracker` MCP server — every ticket the system files passes through here.
 
 The rules below are code, not prompt text, and that is deliberate. §8.1 says
-only CLERK creates and only CLERK and PROOF transition; §4.12 caps tickets per
+only TRIAGE creates and only TRIAGE and VERIFIER transition; §4.12 caps tickets per
 run and requires that hitting the cap escalates instead of filing; §10 lists
 "security findings leak into public tickets" as a named failure mode. A prompt
 can be argued with, misread, or dropped from a truncated context. A refusal
@@ -141,8 +141,8 @@ def build_tools(ctx: ToolContext) -> list:
         if not policy.may_create_tickets:
             return deny(
                 "create_issue",
-                f"{ctx.agent.name} may not create tickets (§8.1: CLERK only). "
-                "Emit your finding as an envelope; CLERK files it.",
+                f"{ctx.agent.name} may not create tickets (§8.1: TRIAGE only). "
+                "Emit your finding as an envelope; TRIAGE files it.",
             )
 
         cap = policy.max_tickets_per_run
@@ -250,7 +250,7 @@ def build_tools(ctx: ToolContext) -> list:
         # Stamp the key back onto the envelope. The two loops of this system meet
         # at the ticket (§1) and this write is that junction: without it the
         # remediation half can never find anything to work on, because it selects
-        # by `envelope.jira.key`. A whole full-loop run reached CLERK, filed ten
+        # by `envelope.jira.key`. A whole full-loop run reached TRIAGE, filed ten
         # tickets, and then skipped verification entirely for exactly this reason.
         if envelope is not None:
             ctx.store.put_envelope(
@@ -295,7 +295,7 @@ def build_tools(ctx: ToolContext) -> list:
         if not policy.may_transition_tickets:
             return deny(
                 "transition",
-                f"{ctx.agent.name} may not transition tickets (§8.1: CLERK and PROOF only).",
+                f"{ctx.agent.name} may not transition tickets (§8.1: TRIAGE and VERIFIER only).",
             )
 
         if dry_run:

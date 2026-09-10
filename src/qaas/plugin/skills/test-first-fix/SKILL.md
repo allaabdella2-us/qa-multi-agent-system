@@ -54,7 +54,7 @@ Write it against the boundary the reproduction found. "Fails with one item, work
 1. **Write the regression test before the fix.** Run it, watch it fail, keep the failure text, then fix. Nothing to undo, and the evidence is free.
 2. **Stash the fix and re-run.** `git stash push -- <changed files>`, `run_single` on the new test, confirm it fails, `git stash pop`. Do not reach for `git reset --hard` or `git checkout main` — both are refused, and for good reason.
 
-Record the observed old-code failure in the PR body. ARBITER cannot run this check itself (it has no shell and no write access), so your statement of it, with the failure message, is the evidence the review depends on.
+Record the observed old-code failure in the PR body. REVIEWER cannot run this check itself (it has no shell and no write access), so your statement of it, with the failure message, is the evidence the review depends on.
 
 ## 4. Before you open anything
 

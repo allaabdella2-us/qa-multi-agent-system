@@ -2,7 +2,7 @@
 
 Every agent gets a `can_use_tool` callback built from its policy. The callback
 sees the tool name and its arguments before the tool runs, which is the only
-place a limit like "FORGE may write, but only under qa/repro" can actually be
+place a limit like "REPRODUCER may write, but only under qa/repro" can actually be
 imposed. A prompt asking an agent not to do something is a request; this is a
 decision.
 
@@ -11,7 +11,7 @@ a stylistic choice and it is easy to get wrong: an `allowed_tools` entry that
 names a whole tool auto-approves it *before* `can_use_tool` is consulted, so a
 policy implemented only in that callback is silently never applied. The SDK warns
 about this shadowing, and an early version of this file had exactly that bug —
-FORGE's sandbox check was dead code. The hook sees every call regardless.
+REPRODUCER's sandbox check was dead code. The hook sees every call regardless.
 
 `can_use_tool` is kept as a second layer, for anything that falls outside the
 allowlist and so reaches the callback normally.
@@ -105,11 +105,11 @@ _MUTATES_FILE = re.compile(r"(>>?|\btee\b|\bsed\s+-i|\btruncate\b|\bdd\b)")
 # — `write_paths`, `forbidden_paths`, the §8.2 diff budget — was enforced for
 # `Write`/`Edit` and bypassed entirely by a shell command:
 #
-#     MENDER   Write api/app/auth.py             -> denied
-#     MENDER   sed -i '' s/x/y/ api/app/auth.py  -> allowed
-#     PROOF    tee /etc/hosts < x                -> allowed
+#     FIXER     Write api/app/auth.py             -> denied
+#     FIXER     sed -i '' s/x/y/ api/app/auth.py  -> allowed
+#     VERIFIER  tee /etc/hosts < x                -> allowed
 #
-# PROOF is the verification gate and has `Bash` with no `write_paths`, so it was
+# VERIFIER is the verification gate and has `Bash` with no `write_paths`, so it was
 # "read-only" only against `Write` — §2's finder/fixer separation gone.
 #
 # Reading a shell command is best-effort by nature: a write can always hide one
@@ -530,7 +530,7 @@ def _branch_from_command(command: str) -> str | None:
         return None
     # Only a git command names a branch. Without this, `-c` was read as
     # `switch -c` in anything that happens to take one: `python -c '...'` was
-    # refused as "branch 'open(...)' is outside MENDER's patterns", which is
+    # refused as "branch 'open(...)' is outside FIXER's patterns", which is
     # both a wrong answer and an unactionable one.
     if not any(Path(part).name == "git" for part in parts[:2]):
         return None

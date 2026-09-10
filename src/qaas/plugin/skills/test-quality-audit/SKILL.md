@@ -18,8 +18,8 @@ The audit answers one question — **would this test have failed against the cod
 
 ## The central technique: run it against the old code
 
-- **MENDER can do this directly.** Write the regression test before the fix and watch it fail, or `git stash push -- <changed files>`, `run_single` on the new test, confirm the failure, `git stash pop`. Put the observed old-code failure message in the PR body.
-- **ARBITER cannot.** You have `Read`, `Grep`, `Glob` and read-only vcs and test_runner; no shell, no write access, no way to revert the diff. So:
+- **FIXER can do this directly.** Write the regression test before the fix and watch it fail, or `git stash push -- <changed files>`, `run_single` on the new test, confirm the failure, `git stash pop`. Put the observed old-code failure message in the PR body.
+- **REVIEWER cannot.** You have `Read`, `Grep`, `Glob` and read-only vcs and test_runner; no shell, no write access, no way to revert the diff. So:
   1. Running `run_single` on the new test in the current tree proves it passes with the fix. That is the premise, not the check — do not record it as evidence of quality.
   2. Do the revert **on paper**: for each hunk of the fix, ask which assertion in the new test goes red if that hunk is deleted. If no assertion depends on any hunk, the test does not test the fix.
   3. Require the PR body to state that the check was run, and quote the old-code failure. If it does not, `REQUEST_CHANGES` asking for exactly that. It is the cheapest and most specific review you can write, and it puts the work where the tools are.
@@ -55,4 +55,4 @@ The audit answers one question — **would this test have failed against the cod
 
 ## When the tests are the only problem
 
-A correct fix with a vacuous test is `REQUEST_CHANGES`, not `APPROVE` with a concern. The test is what stops the defect returning after everyone involved has forgotten the ticket, and it is the cheapest thing in the change to get right. Name the file, name the assertion, and say what it should assert instead — MENDER receives your words verbatim and there are only two round trips.
+A correct fix with a vacuous test is `REQUEST_CHANGES`, not `APPROVE` with a concern. The test is what stops the defect returning after everyone involved has forgotten the ticket, and it is the cheapest thing in the change to get right. Name the file, name the assertion, and say what it should assert instead — FIXER receives your words verbatim and there are only two round trips.

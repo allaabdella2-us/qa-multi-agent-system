@@ -89,7 +89,7 @@ def order_owned_by_org(admin_token):
         "/v1/orders",
         token=admin_token,
         body={
-            "reference": "FORGE-2108631B",
+            "reference": "REPRODUCER-2108631B",
             "items": [
                 {
                     "sku": "SKU-TEST-1",
@@ -120,7 +120,7 @@ def test_viewer_creating_an_order_matches_the_published_contract(viewer_token):
         "/v1/orders",
         token=viewer_token,
         body={
-            "reference": "FORGE-2108631B-VIEWER",
+            "reference": "REPRODUCER-2108631B-VIEWER",
             "items": [
                 {
                     "sku": "SKU-TEST-1",

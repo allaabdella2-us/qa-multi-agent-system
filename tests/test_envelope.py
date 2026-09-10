@@ -18,7 +18,7 @@ from qaas.envelope import (
 def make(**overrides) -> DefectEnvelope:
     base = dict(
         run_id="run-1",
-        discovered_by="CONDUIT",
+        discovered_by="API",
         domain=Domain.API,
         **{"class": "bug"},
         title="Orders list endpoint returns unbounded result set",
@@ -59,7 +59,7 @@ def test_class_serializes_under_its_reserved_word_alias():
         ({"confidence": 1.4}, "confidence out of range"),
         ({"severity": "catastrophic"}, "severity off the rubric"),
         ({"domain": "blockchain"}, "unknown domain"),
-        ({"discovered_by": "conduit"}, "agent name not SCREAMING_CASE"),
+        ({"discovered_by": "api"}, "agent name not SCREAMING_CASE"),
         ({"evidence": [{"type": "log", "uri": "wat/nope"}]}, "evidence uri scheme"),
     ],
 )
@@ -79,7 +79,7 @@ def test_unknown_fields_are_rejected_not_ignored():
 def test_same_defect_different_prose_fingerprints_alike():
     a = make(location={"service": "orders-api", "paths": ["src/routes/orders.py:88"]})
     b = make(
-        discovered_by="SURFACE",
+        discovered_by="BROWSER",
         run_id="run-2",
         title="Unbounded query on the orders listing",
         summary="Completely different words describing the same defect.",
@@ -141,7 +141,7 @@ def test_severity_ranks_blocker_above_minor():
 # All three describe ONE defect (the refund endpoint's missing role check) and
 # each produced a DIFFERENT fingerprint, so `occurrence_count` never left 1 and
 # `get_occurrences` could never report a recurrence. Deduplication survived only
-# because CLERK matches on similarity rather than on this hash.
+# because TRIAGE matches on similarity rather than on this hash.
 #
 # Two causes, both invisible to the old unit tests because those used tidy
 # single-line paths: the strip regex did not match a line RANGE (`:112-113`),
@@ -157,7 +157,7 @@ REFUND_VARIANTS = [
 
 def _refund(paths):
     return DefectEnvelope(
-        run_id="r", discovered_by="CONDUIT", domain=Domain.API, **{"class": "bug"},
+        run_id="r", discovered_by="API", domain=Domain.API, **{"class": "bug"},
         title="Refund endpoint has no role check",
         summary="A read-only viewer can refund a paid order.",
         severity=Severity.CRITICAL, confidence=0.9,

@@ -46,7 +46,7 @@ def ctx_for(cfg, tmp_path):
     return build
 
 
-AGENTS = ["CARTOGRAPHER", "CONDUIT", "SURFACE", "FORGE", "CLERK", "PROOF", "MENDER", "ARBITER"]
+AGENTS = ["MAPPER", "API", "BROWSER", "REPRODUCER", "TRIAGE", "VERIFIER", "FIXER", "REVIEWER"]
 
 
 # -- every declared server is providable ------------------------------------
@@ -67,9 +67,9 @@ def test_each_agent_gets_exactly_the_servers_it_declared(ctx_for, cfg, agent):
 
 
 def test_an_unknown_server_fails_loudly(cfg, ctx_for):
-    spec = cfg.agents["CONDUIT"].model_copy(update={"mcp_servers": ["nonexistent"]})
+    spec = cfg.agents["API"].model_copy(update={"mcp_servers": ["nonexistent"]})
     with pytest.raises(UnknownServer, match="nonexistent"):
-        build_mcp_servers(spec, ctx_for("CONDUIT"))
+        build_mcp_servers(spec, ctx_for("API"))
 
 
 # -- the allowlist ----------------------------------------------------------
@@ -108,7 +108,7 @@ def test_no_agent_is_handed_more_than_six_servers(cfg, agent):
     assert len(cfg.agents[agent].mcp_servers) <= MAX_MCP_SERVERS_PER_AGENT
 
 
-@pytest.mark.parametrize("agent", ["CARTOGRAPHER", "CONDUIT", "SURFACE", "CLERK", "ARBITER"])
+@pytest.mark.parametrize("agent", ["MAPPER", "API", "BROWSER", "TRIAGE", "REVIEWER"])
 def test_read_only_agents_are_never_handed_a_write_tool(cfg, agent):
     forbidden = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
     assert not forbidden & set(build_allowed_tools(cfg.agents[agent]))
@@ -119,7 +119,7 @@ def test_only_the_two_writing_agents_get_write_tools(cfg):
         name for name, spec in cfg.agents.items()
         if {"Write", "Edit"} & set(spec.builtin_tools)
     }
-    assert writers == {"FORGE", "MENDER"}
+    assert writers == {"REPRODUCER", "FIXER"}
 
 
 # -- prompts ----------------------------------------------------------------
@@ -134,7 +134,7 @@ def test_every_agent_prompt_carries_the_shared_house_rules(cfg, agent):
 
 
 def test_a_missing_prompt_is_an_error_not_an_empty_string(cfg):
-    spec = cfg.agents["CONDUIT"].model_copy(update={"prompt": "NOPE.md"})
+    spec = cfg.agents["API"].model_copy(update={"prompt": "NOPE.md"})
     with pytest.raises(FileNotFoundError):
         build_system_prompt(spec)
 
@@ -181,8 +181,8 @@ def test_subagent_spawning_is_capped(ctx_for, cfg, agent):
 
 
 def test_describe_is_a_pure_dry_run(cfg):
-    d = describe(cfg.agents["FORGE"])
-    assert d["agent"] == "FORGE"
+    d = describe(cfg.agents["REPRODUCER"])
+    assert d["agent"] == "REPRODUCER"
     assert "mcp__test_runner" in d["allowed_tools"]
     assert d["policy"]["branch_patterns"] == ["qa/repro/*"]
 
@@ -219,7 +219,7 @@ async def test_an_agent_whose_options_cannot_be_built_fails_alone(tmp_path):
 
     A missing prompt, an unknown MCP server, or a declared server with an unset
     ${VAR} raised out of a function documented "failures are captured, not
-    raised" — and the conductor gathers discovery agents without
+    raised" — and the router gathers discovery agents without
     `return_exceptions`, so one of these aborted the run while its siblings kept
     spending with nothing recording their cost.
     """
@@ -229,7 +229,7 @@ async def test_an_agent_whose_options_cannot_be_built_fails_alone(tmp_path):
     from qaas.store import RunStore, SystemMapStore
 
     cfg = load_config(search=CONFIG_SEARCH)
-    spec = cfg.agents["CONDUIT"].model_copy(deep=True)
+    spec = cfg.agents["API"].model_copy(deep=True)
     spec.prompt = "NO_SUCH_PROMPT_FILE.md"
     store = RunStore.new(root=tmp_path)
     ctx = ToolContext(
@@ -242,4 +242,4 @@ async def test_an_agent_whose_options_cannot_be_built_fails_alone(tmp_path):
     assert outcome.result.subtype == "failure"
     assert outcome.result.error
     assert [e.kind for e in store.ledger("agent_error")] == ["agent_error"]
-    assert [r.agent for r in store.results()] == ["CONDUIT"], "its cost is still recorded"
+    assert [r.agent for r in store.results()] == ["API"], "its cost is still recorded"

@@ -64,7 +64,7 @@ def test_validate_accepts_the_shipped_config(runner):
 def test_dry_run_renders_the_plan_without_calling_the_api(runner):
     result = runner.invoke(cli.app, ["run", "--mode", "pr-check", "--config", CONFIG, "--dry-run"])
     assert result.exit_code == 0, result.output
-    assert "CARTOGRAPHER" in result.output
+    assert "MAPPER" in result.output
     assert "tools:" in result.output
 
 
@@ -81,7 +81,7 @@ def test_unknown_agent_is_rejected_before_anything_runs(runner):
 # Phase E: a run can be pointed at a repository directly. It is sugar over
 # `--target`, so what these check is that it goes through the *same* path --
 # provisions a profile, resolves a target root from it, and hands that to the
-# conductor -- rather than growing a second way to decide what is under test.
+# router -- rather than growing a second way to decide what is under test.
 
 
 def _fake_repo(path: Path) -> Path:
@@ -105,7 +105,7 @@ def test_run_repo_provisions_a_profile_and_dry_runs(runner, tmp_path, monkeypatc
         ["run", "--mode", "pr-check", "--config", str(config), "--repo", str(repo), "--dry-run"],
     )
     assert result.exit_code == 0, result.output
-    assert "CARTOGRAPHER" in result.output
+    assert "MAPPER" in result.output
 
     written = config / "targets" / "widget.yaml"
     assert written.is_file(), result.output
