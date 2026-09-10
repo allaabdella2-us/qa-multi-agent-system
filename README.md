@@ -26,10 +26,12 @@ a state machine that is ordinary Python — because a model cannot enforce a bud
 it is itself spending.
 
 <div align="center">
-  <img src="docs/architecture-loops.png" alt="Two loops: a discovery loop of Mapper, API, Browser, Reproducer and Triage files a ticket; a remediation loop of Fixer, Reviewer and Verifier picks it up and closes it. The ticket is the only thing that crosses between them." width="900">
+  <img src="docs/roster.png" alt="The fifteen agents by phase: Map — Mapper. Discovery, eight agents — Architect, API, Browser, DBA, Auditor, Socket, Guide, Load. Triage, two — Reproducer and Triage. Remediation, two — Fixer and Reviewer. Verify — Verifier. Reporting — Reporter." width="900">
 </div>
 
-Nothing crosses between the loops except a ticket — which is also the audit trail.
+Six phases, and every agent in them is its own `query()`. **ROUTER** is the sixteenth
+and is deliberately not in the picture: it is the Python state machine that dispatches
+the rest.
 
 ---
 
@@ -43,31 +45,6 @@ Nothing crosses between the loops except a ticket — which is also the audit tr
 | 📊 **Measured, not asserted** | A deliberately buggy demo app ships with a golden ledger of **16 seeded defects + 4 planted non-defects**. `qaas score` reports recall *and* precision, so a prompt change has a number attached. |
 | 🔒 **Merge is impossible by construction** | No merge method exists anywhere. `gh pr merge` is refused. Pull requests open as drafts. Shipping stays a human decision. |
 | 🔍 **Every action is on the record** | 28 kinds of ledger event — every tool call, denial, verdict and escalation. `qaas trace` reads it back as a timeline. |
-
----
-
-## 🤖 The roster
-
-| agent | layer | what it does |
-|---|---|---|
-| 🗺️ MAPPER | map | services, routes, schema, ownership → the system map everything reads |
-| 🏛️ ARCHITECT | discovery | circular deps, layering violations, god modules, dead code |
-| 🔌 API | discovery | API contract drift, authz gaps, error-shape inconsistency |
-| 🖱️ BROWSER | discovery | drives the UI through real journeys |
-| 🗄️ DBA | discovery | schema constraints the code assumes and the database does not enforce |
-| 🔒 AUDITOR | discovery | missing authorization, secrets, vulnerable dependencies, leaks |
-| 📡 SOCKET | discovery | WebSocket auth, reconnect, ordering, backpressure |
-| 🧭 GUIDE | discovery | whether a person can *find* a feature, not just whether it works |
-| ⏱️ LOAD | discovery | N+1 queries, unindexed hot paths, unbounded results, bundle outliers |
-| 🔨 REPRODUCER | triage | reproduces, minimises, measures flake, commits a failing test |
-| 📝 TRIAGE | triage | dedupes, scores severity, routes, files — the only tracker writer |
-| 🔧 FIXER | remediation | the minimal fix, on a branch |
-| ⚖️ REVIEWER | remediation | adversarial review: APPROVE / REQUEST_CHANGES / ESCALATE |
-| ✅ VERIFIER | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
-| 📊 REPORTER | reporting | what the run found, what recurred, and what it could not reach |
-
-**ROUTER** is the sixteenth. It is the Python state machine rather than an
-agent — a model cannot enforce a budget it is itself spending.
 
 ---
 
