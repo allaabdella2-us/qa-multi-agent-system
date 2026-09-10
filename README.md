@@ -26,7 +26,7 @@ a state machine that is ordinary Python — because a model cannot enforce a bud
 it is itself spending.
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/allaabdella2-us/qa-multi-agent-system/main/docs/architecture-loops.png" alt="Two loops: a discovery loop of Mapper, API, Browser, Reproducer and Triage files a ticket; a remediation loop of Fixer, Reviewer and Verifier picks it up and closes it. The ticket is the only thing that crosses between them." width="900">
+  <img src="docs/architecture-loops.png" alt="Two loops: a discovery loop of Mapper, API, Browser, Reproducer and Triage files a ticket; a remediation loop of Fixer, Reviewer and Verifier picks it up and closes it. The ticket is the only thing that crosses between them." width="900">
 </div>
 
 Nothing crosses between the loops except a ticket — which is also the audit trail.
