@@ -9,7 +9,10 @@ target application, find defects, reproduce them, and file tickets. It is built
 to the design in `qa-agent-system-architecture.md`; `BUILD_PLAN.md` is the
 milestone checklist. Code comments cite that document by section (`§8.1`,
 `§5.3`) — when changing behaviour those sections describe, read the section
-first, and update the plan's milestone table when work lands.
+first, and update the plan's milestone table when work lands. `ARCHITECTURE.md`
+walks the code as it now stands, `MANUAL.md` is the user-facing command
+reference and `tutorial/` a nine-chapter tour — a change that outdates this file
+usually outdates those too.
 
 ## Commands
 
@@ -17,13 +20,17 @@ first, and update the plan's milestone table when work lands.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (SURFACE) runs
 
-pytest                                   # 686 tests, no API calls, no network
+pytest                                   # 688 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
 
+qaas init                                # scaffold .qaas/ and a target profile
 qaas validate                            # config + prompts + allowlists, no API call
+qaas targets                             # profiles this project can see
 qaas doctor --target corvid              # what a target makes possible
+qaas prompts list / eject / diff         # prompt overrides in .qaas/prompts/
+qaas tracker-check                       # Jira credentials, before spending anything
 qaas run --mode pr-check --dry-run       # renders each agent's options, no API call
 qaas run --mode nightly --only CONDUIT   # real run, costs money
 qaas runs / qaas show <run-id> / qaas map
@@ -64,6 +71,17 @@ loops with bounded reopens and escalates rather than cycling. `Budget.check()`
 runs before every dispatch and raises `BudgetExceeded`, which is a control
 working, not an error.
 
+`verify` is a loop, not a step. `_verify_loop` dispatches PROOF; on `NOT_FIXED`
+it calls `_remediate` (MENDER -> ARBITER, bounded by
+`max_mender_arbiter_round_trips`) and re-runs PROOF, bounded by
+`max_proof_reopens`. Two facts there are bug-derived. PROOF must re-verify **the
+branch MENDER wrote**, read back out of the ledger by `_branch_written_since`
+and scoped to entries since a mark — the envelope names the *repro* branch,
+which by construction carries a failing test and no fix, and sending PROOF back
+there made VERIFIED unreachable in a live run. And a roster with no MENDER
+escalates `NOT_FIXED` to a human immediately, which is right: the alternative is
+re-running PROOF against unchanged code.
+
 ### The DefectEnvelope is the only inter-agent type
 
 `envelope.py`. Agents never pass prose to each other. Validated on write and on
@@ -75,8 +93,12 @@ defect found twice hashes the same.
 
 ### Agents are data, not code
 
-An agent is a prompt in `src/qaas/prompts/<AGENT>.md` plus a file in
-`config/agents/<agent>.yaml`. Adding one should require **no change** to
+An agent is a prompt in `src/qaas/prompts/<AGENT>.md` plus a YAML file in
+`src/qaas/defaults/config/agents/<agent>.yaml` — the shipped roster, 15 agents.
+A file of the same name under `<project>/config/agents/` or
+`.qaas/config/agents/` *shadows* the packaged one; this checkout's `config/`
+holds only `targets/`, so adding to the roster means the packaged directory and
+not an override. Adding one should require **no change** to
 conductor, runner, registry or guardrails — treat a change to those files while
 adding an agent as a sign something is wrong. Constraints enforced in
 `config.py`: at most 6 MCP servers per agent (§5.3, tool-selection accuracy),
@@ -96,8 +118,21 @@ overriding `CONDUIT.md` keeps the house `_shared.md`. A `<AGENT>.append.md` is
 inserted between the agent block and the shared block — never after it, because
 the house rules must stay the last word. `qaas prompts list/eject/diff`.
 Role and standards live in the system prompt;
-*procedure* lives in `.claude/skills/*/SKILL.md`; the per-run *task* (which app,
-which environment, which finding) is built in `tasks.py`.
+*procedure* lives in `src/qaas/plugin/skills/<skill>/SKILL.md` (30 of them); the
+per-run *task* (which app, which environment, which finding) is built in
+`tasks.py`.
+
+Skills reach an agent as a Claude Code **plugin** (`--plugin-dir`), not through
+filesystem settings, so they travel inside the wheel instead of depending on a
+`.claude/skills/` in whatever repository the user happens to be standing in. The
+layout was settled by testing the CLI rather than by reading about it, and it is
+not optional: a directory of bare `<skill>/SKILL.md` folders loads **nothing,
+silently**; only `.claude-plugin/plugin.json` + `skills/<name>/SKILL.md` gives a
+stable namespace, taken from the manifest's `name`. `qualified_skills` therefore
+rewrites an agent's `skills:` entries to `qaas:<skill>` — the SDK matches skill
+names down two channels with different rules, and the unqualified name loads on
+one but never matches the allow rule on the other. A skill no plugin provides is
+dropped, not passed through.
 
 **Nothing in `tasks.py` or a prompt may name a specific application.** The
 system is pointed at a target profile; a prompt mentioning one repo's layout or
@@ -140,6 +175,13 @@ one stdio subprocess, declared in `registry.STDIO_SERVERS`.
 
 Tool results use `ok()`/`err()` from `mcp/context.py`: errors are **returned, not
 raised**, so the agent reads the reason and corrects itself.
+
+A project can declare more servers in `system.yaml` under `mcp_servers:`.
+Declaring one grants nothing — an agent receives it only by naming it in its own
+`mcp_servers:` list — and `SystemConfig._agents_name_real_servers` checks every
+such name against the builtin set plus the declared ones at load time, so a typo
+fails `qaas validate` instead of surfacing as `UnknownServer` part-way through a
+paid run.
 
 ### One Jira view per repository, not one project
 
@@ -239,6 +281,28 @@ human work instead.
 
 Run `qaas score` after changing any prompt, threshold or model. It is the only
 way to know whether a change helped.
+
+### Where qaas's own resources come from
+
+`paths.py` exists because the package used to assume it was running from its own
+git checkout, so a `pip install` produced a CLI where every command needing
+config died. It separates two ideas that had been collapsed into `Path.cwd()` —
+where qaas's resources live, and where the user's project state lives — from a
+third that belongs to `TargetProfile.root_path`. Precedence is the ordinary one:
+`--config` / `QAAS_CONFIG_DIR`, then `<project>/.qaas/config` and
+`<project>/config`, then packaged.
+
+Layering *granularity* differs by kind, deliberately: `system.yaml` — **first hit
+wins whole**, because merging run-mode dictionaries across layers produces a
+configuration nobody wrote and nobody can read back; `agents/*.yaml`, prompts and
+skills — **union by name, higher layer shadows**, so raising MENDER's budget is
+one dropped-in file rather than a fork of the whole roster.
+
+Distribution name is `qaas-python` (`qaas` was taken); the import package and the
+CLI are both `qaas`. Everything an installed run needs sits under `src/qaas/`.
+**The wheel must never carry `target-app/`** — 69M of deliberately vulnerable
+code has no business in `site-packages`; CI fails the build if it appears. The
+sdist does carry it, so a contributor can run `qaas score`.
 
 ### SDK drift
 
