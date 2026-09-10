@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 — first release
+## 0.0.1 — first release
 
 `qaas` — a multi-agent QA system built on the Claude Agent SDK. Sixteen roles:
 ROUTER is the Python state machine, and fifteen agents map a codebase, find
