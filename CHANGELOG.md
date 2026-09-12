@@ -47,6 +47,80 @@ The fan-out escalation now leads the escalation list and names the count and the
 cap, rather than arriving third in a list of sixteen — it is the line that
 explains the bill.
 
+### Tuning is editable from the page
+
+The configuration view's model, effort, turn cap and thresholds are now
+controls rather than readouts. Changing one writes `overrides.yaml` beside your
+config, and the next run sees it — `qaas run --dry-run` renders the new model
+immediately.
+
+This is the dashboard's **only** writing route, and the shape of the exception
+is the point: it changes what a model *is*, never what an agent is *allowed to
+do*. An agent's policy, tool list, MCP servers and `must_call` contract cannot
+be set from the page at any price — they are the §8.1 write-permission matrix
+the guardrails enforce, and a page reachable by anything running as this user
+must not be a second, quieter door onto them. A refused field is named in the
+error rather than silently dropped.
+
+A candidate is validated through a real `load_config` in a scratch copy before
+anything is written, so a value that would not load is refused rather than
+discovered on the next paid run. Deleting the file undoes everything, and
+"reset overrides" is that `rm`.
+
+`overrides.yaml` is also the only **partial** config layer. Every other layer
+replaces whole, which is right for forking an agent and wrong for changing one
+line: the fork freezes that agent's policy and prompt on the day it was copied,
+so a later fix to a `forbidden_paths` pattern never reaches you.
+
+### The agent grid got its screen back
+
+Fifteen cards cost a screen and a half, most of it repeating each card's layer
+under its name — which the band header above it already states for every card
+in it. What is left is what changes: the name, the state, and the three
+numbers. The grid went from roughly a thousand pixels to three hundred and
+fifty, so the timeline and the findings now sit above the fold.
+
+### Light and dark
+
+A toggle in the top bar, and a full light palette behind it. Three states, not
+two: explicit light, explicit dark, and no choice at all — which is the default
+and follows the operating system, so a page opened on a light machine is light
+without anyone having to ask for it.
+
+Getting there meant tokenising four surfaces that had been written as literal
+hex inside their rules. A literal is a colour the second palette cannot reach,
+which is how a page that "supports light mode" ends up with three black panels
+in it; a test now fails on any opaque colour outside a palette block, and
+another fails if either light palette stops redefining a token the dark one
+sets. The event colours are darkened rather than reused: a refusal and a
+regression have to catch the eye at the same speed against white as against
+near-black.
+
+The stored choice is read in a blocking inline script in the head. `app.js` is
+a module, so it runs after first paint, and choosing the theme there showed a
+frame of the wrong one on every load.
+
+### A configuration view
+
+`qaas dashboard` grew a second half. The runs view answers "what happened"; the
+configuration view answers "what would happen" — the roster with each agent's
+model, tools, skills and output contract; which prompt file is in force and
+which layer it came from; the MCP servers and who may use each; models grouped
+by model; the thirty skills and their qualified names; the three hook events
+and what each may block; the write-permission matrix per agent; the run modes;
+and the governors, each with the sentence explaining what it costs.
+
+That is the same object graph `qaas validate`, `qaas prompts list`, `qaas
+doctor` and `qaas run --dry-run` already print, in one place instead of four
+terminal tables. Two questions it answers that were previously a grep: which
+file defined this agent, and what that file shadows.
+
+It stays a reader. `/api/config` is a GET, the route-table test still passes,
+and there is no form on the page. A credential is reported as *whether the
+variable is set* and never as its value — a profile names an environment
+variable so the secret stays out of the file, and a token rendered into HTML is
+a token in a browser cache.
+
 ### The dashboard reads a resumed run correctly
 
 `qaas run --run-id <id>` appends a second `run_started` to a ledger that already

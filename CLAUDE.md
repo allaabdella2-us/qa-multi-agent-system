@@ -20,7 +20,7 @@ usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (BROWSER) runs
 
-pytest                                   # 840 tests, no API calls, no network
+pytest                                   # 861 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
@@ -274,9 +274,27 @@ two sets of rules about where someone else's code lands on disk.
 
 ### The dashboard reads; it never participates
 
-`src/qaas/ui/` is `qaas dashboard` — a localhost page over a run's ledger. Every
-route is a GET and a test asserts the route table contains nothing else; there is
-no path from the page to a dispatch, a ticket or a write.
+`src/qaas/ui/` is `qaas dashboard` — a localhost page over a run's ledger. There
+is no path from the page to a dispatch, a ticket, a branch or the target's
+files, and `test_only_the_override_route_writes` holds the line: every route is
+a GET except **one**, named in `WRITE_ROUTES`, and adding a second is an
+architectural change rather than a feature.
+
+That one route writes `overrides.yaml`, and the shape of the exception is the
+point: it changes what a model *is* — which model an agent runs, a turn cap, a
+threshold — and never what an agent is *allowed to do*. `config.TUNABLE_AGENT_FIELDS`
+is the whole vocabulary; `policy`, `mcp_servers`, `builtin_tools`, `skills` and
+`must_call` are absent deliberately, because a page reachable by anything
+running as this user must not be a second, quieter door onto the §8.1 matrix
+that `guardrails.py` exists to enforce. A refused field is named in the error
+rather than dropped, the candidate is validated through a real `load_config` in
+a scratch copy before anything lands, and deleting the file undoes all of it.
+
+`overrides.yaml` is also the only **partial** config layer. Everything else
+replaces whole — an `agents/fixer.yaml` in a nearer directory shadows the
+packaged file entirely — which is right for forking an agent and wrong for
+changing one line, because the fork freezes that agent's policy and prompt on
+the day it was copied.
 
 It adds **no `LedgerKind` member and no router change**, and must not grow one.
 Phase boundaries are not in the ledger, so the phase is *derived* from the
@@ -287,9 +305,18 @@ roster (CARTOGRAPHER, FORGE, VAULT), which render as `not in this roster` rather
 than crashing the view. Anything reading the ledger must treat an agent name as
 data, not as a key into today's config.
 
+`ui/config_view.py` is the other half: what the installation is *configured* to
+do, which is the same object graph `qaas validate`, `qaas prompts list`, `qaas
+doctor` and `qaas run --dry-run` already print into four different terminal
+tables. It is still a reader — `/api/config` is a GET like every other route,
+and there is no form and nothing to post one to. It reports a credential as
+*whether the variable is set*, never as its value: a profile names an
+environment variable precisely so the secret stays out of the file, and
+rendering it into a page would put it back (`test_no_credential_value_reaches_the_payload`).
+
 `ui/state.py` folds entries one at a time, so replay and live tail are the same
-`apply()` calls; it imports no web dependency, which is what keeps the read model
-in the offline suite. `ui/server.py` keeps **one** `trace.tail` thread per run and
+`apply()` calls; neither it nor `config_view.py` imports a web dependency, which
+is what keeps both read models in the offline suite. `ui/server.py` keeps **one** `trace.tail` thread per run and
 fans out over SSE — a browser tab gets a snapshot of the existing view plus
 deltas, never its own re-read of a 40,000-line file. Two numbers are deliberate:
 the progress bar measures elapsed against `max_wall_clock_s` and never dollars
