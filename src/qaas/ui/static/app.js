@@ -102,6 +102,20 @@ function renderCounters(v) {
 
 const ORDER = { running: 0, done: 1, failed: 2, queued: 3, never_ran: 4, skipped: 5 };
 
+/* The roster's own layers, in the order the router walks them (router.py's
+ * phase pipeline). Grouping by layer rather than sorting a flat grid is what
+ * makes fifteen cards read as a pipeline instead of a pile: a person looking
+ * for "is discovery done" scans one band, not fifteen cards. A layer the
+ * config does not know still gets a band, because a ledger written by an
+ * earlier roster names agents no config can place. */
+const LAYERS = [
+  ["control",     "map"],
+  ["discovery",   "find"],
+  ["triage",      "reproduce &amp; file"],
+  ["remediation", "fix, review &amp; verify"],
+  ["reporting",   "report"],
+];
+
 function agentCard(a) {
   const label = { running: `turn ${a.turns || "—"}`, done: "done",
                   failed: "failed", skipped: "skipped", queued: "queued",
@@ -121,17 +135,42 @@ function agentCard(a) {
   </div>`;
 }
 
+function layerBand(title, caption, members) {
+  const running = members.filter((a) => a.status === "running").length;
+  const settled = members.filter((a) => a.status === "done").length;
+  const cost = members.reduce((sum, a) => sum + (a.cost_usd || 0), 0);
+  const state = running ? "running" : settled === members.length ? "done" : "idle";
+  return `<section class="band" data-state="${state}">
+    <div class="band-head">
+      <span class="band-name">${title}</span>
+      <span class="band-caption">${caption}</span>
+      <span class="band-stat">${settled}/${members.length}</span>
+      <span class="band-stat band-cost">${money(cost)}</span>
+    </div>
+    <div class="agents">${members.map(agentCard).join("")}</div>
+  </section>`;
+}
+
 function renderAgents(v) {
   const agents = Object.values(v.agents);
-  agents.sort((a, b) =>
-    (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9) ||
-    v.phases.indexOf(a.phase) - v.phases.indexOf(b.phase) ||
-    a.name.localeCompare(b.name));
-  $("agents").innerHTML = agents.map(agentCard).join("") ||
+  const within = (a, b) =>
+    (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9) || a.name.localeCompare(b.name);
+
+  const known = new Set(LAYERS.map(([name]) => name));
+  const bands = LAYERS
+    .map(([name, caption]) => [name, caption, agents.filter((a) => a.layer === name).sort(within)])
+    .filter(([, , members]) => members.length);
+
+  // Agents whose layer this config cannot place -- a ledger from an earlier
+  // roster -- get their own band rather than being dropped or mixed in.
+  const stray = agents.filter((a) => !known.has(a.layer)).sort(within);
+  if (stray.length) bands.push(["unplaced", "not in this roster", stray]);
+
+  $("agents").innerHTML =
+    bands.map(([name, caption, members]) => layerBand(name, caption, members)).join("") ||
     '<div class="empty">no agents dispatched yet</div>';
+
   const retired = agents.filter((a) => !a.layer).length;
-  // A ledger from an earlier roster names agents no config knows. Saying so is
-  // better than a grid of cards with a blank layer and no explanation.
   $("agent-hint").textContent = retired
     ? `— ${retired} named by this run are not in the current roster` : "";
 }
@@ -296,10 +335,63 @@ async function loadScore() {
 
 /* ---------- drawer ---------- */
 
+/* `title` is markup, so every caller escapes what it interpolates. The
+ * severity tag has to sit *in* the title rather than under it -- it is the
+ * first thing anyone reads, and a drawer that opens on a blocker should say so
+ * before the sentence explaining it. */
 function openDrawer(title, html) {
-  $("drawer-title").textContent = title;
+  $("drawer-title").innerHTML = title;
   $("drawer-body").innerHTML = html;
+  $("drawer-body").scrollTop = 0;
   $("drawer").hidden = false;
+}
+
+/* An agent writes prose with commands, paths and URLs embedded in it, and a
+ * reproduction step is routinely a shell one-liner. Rendered as one run of
+ * body text it becomes the wall of undifferentiated white this drawer used to
+ * show -- and the long tokens overflowed the panel rather than wrapping. So
+ * two passes: lift anything command-shaped onto its own monospace line, and
+ * mark the remaining inline code so it reads as code. Backticks first, because
+ * an agent that fenced its own snippet has already told us where it ends. */
+const CODE_LINE = /^\s*(?:\$ |curl |git |npm |npx |pnpm |yarn |python3? |pytest |node |docker |psql |sed |awk |grep |GET |POST |PUT |PATCH |DELETE )/;
+
+function prose(text) {
+  const value = String(text ?? "").trim();
+  if (!value) return '<p class="muted">—</p>';
+  return value.split(/\n{2,}/).map((para) => {
+    const lines = para.split("\n");
+    // A paragraph whose lines are *all* command-shaped is a block, not prose.
+    if (lines.every((line) => CODE_LINE.test(line) || !line.trim())) {
+      return `<pre class="snippet">${esc(para.trim())}</pre>`;
+    }
+    return `<p>${inlineCode(para)}</p>`;
+  }).join("");
+}
+
+/* Backticked spans become <code>; bare paths, dotted filenames and URLs are
+ * marked too, since agents rarely bother with backticks. `esc` runs first so
+ * nothing here can inject markup. */
+function inlineCode(text) {
+  let html = esc(text);
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  html = html.replace(/(https?:\/\/[^\s<>"']+)/g, '<code class="url">$1</code>');
+  html = html.replace(
+    /(^|[\s(])((?:[\w.-]+\/)+[\w.-]+\.\w+(?::\d+)?)/g, '$1<code>$2</code>');
+  return html;
+}
+
+function stepList(steps) {
+  if (!steps || !steps.length) return '<p class="muted">—</p>';
+  return `<ol class="steps">${steps.map((step) => {
+    const value = String(step ?? "").trim();
+    // Split a step into its instruction and the command that carries it out,
+    // so a curl line is readable instead of reflowed into the sentence.
+    const lines = value.split("\n");
+    const head = [], code = [];
+    for (const line of lines) (CODE_LINE.test(line) ? code : head).push(line);
+    return `<li>${head.length ? inlineCode(head.join(" ").trim()) : ""}` +
+           `${code.length ? `<pre class="snippet">${esc(code.join("\n").trim())}</pre>` : ""}</li>`;
+  }).join("")}</ol>`;
 }
 
 async function showFinding(id) {
@@ -309,30 +401,45 @@ async function showFinding(id) {
     const name = ev.uri.startsWith("artifact://") ? ev.uri.split("/").slice(3).join("/") : null;
     return name
       ? `<button class="evidence-link" data-artifact="${esc(name)}">▸ ${esc(name)}</button>
-         <p>${esc(ev.note || "")}</p>`
+         ${ev.note ? `<p class="note">${inlineCode(ev.note)}</p>` : ""}`
       : `<div class="evidence-link">${esc(ev.uri)}</div>`;
-  }).join("") || "<p>none</p>";
+  }).join("") || '<p class="muted">none</p>';
 
-  openDrawer(e.title, `
-    <h3>summary</h3><p>${esc(e.summary)}</p>
+  const ticket = (e.jira || {}).key;
+  const confidence = Number(e.confidence ?? 0);
+
+  openDrawer(`<span class="sev-tag sev-${esc(e.severity)}">${esc(e.severity)}</span>
+              <span class="drawer-name">${esc(e.title)}</span>`, `
+    <div class="facts">
+      <div class="fact"><span>confidence</span><b>${confidence.toFixed(2)}</b>
+        <div class="conf-bar"><i style="width:${Math.round(confidence * 100)}%"></i></div></div>
+      <div class="fact"><span>found by</span><b>${esc(e.discovered_by)}</b></div>
+      <div class="fact"><span>domain</span><b>${esc(e.domain)}</b></div>
+      <div class="fact"><span>ticket</span>
+        <b class="${ticket ? "ok" : "muted"}">${esc(ticket || "not filed")}</b></div>
+    </div>
+
+    <h3>summary</h3>${prose(e.summary)}
+
+    <h3>reproduction</h3>
+    <p><span class="pill pill-${esc(repro.status)}">${esc(repro.status || "unattempted")}</span>
+       ${repro.failing_test ? `<code>${esc(repro.failing_test)}</code>` : ""}</p>
+    ${stepList(repro.steps)}
+
+    <h3>location</h3>
+    <ul class="paths">${(e.location.paths || []).map((path) =>
+      `<li><code>${esc(path)}</code></li>`).join("") || '<li class="muted">—</li>'}</ul>
+
+    <h3>evidence</h3>${evidence}
+
+    <h3>suggested fix area</h3>${prose(e.suggested_fix_area)}
+
     <h3>identity</h3>
     <dl class="kv">
-      <dt>severity</dt><dd class="sev sev-${esc(e.severity)}">${esc(e.severity)}</dd>
-      <dt>domain / class</dt><dd>${esc(e.domain)} · ${esc(e["class"])}</dd>
-      <dt>confidence</dt><dd>${e.confidence}</dd>
-      <dt>found by</dt><dd>${esc(e.discovered_by)}</dd>
-      <dt>reproduction</dt><dd>${esc(repro.status)}${
-        repro.failing_test ? ` · ${esc(repro.failing_test)}` : ""}</dd>
-      <dt>fingerprint</dt><dd>${esc((e.dedupe || {}).fingerprint || "—")}</dd>
-      <dt>ticket</dt><dd>${esc((e.jira || {}).key || "not filed")}</dd>
-    </dl>
-    <h3>location</h3>
-    <ul>${(e.location.paths || []).map((p) => `<li><code>${esc(p)}</code></li>`).join("") ||
-      "<li>—</li>"}</ul>
-    <h3>steps</h3>
-    <ul>${(repro.steps || []).map((s) => `<li>${esc(s)}</li>`).join("") || "<li>—</li>"}</ul>
-    <h3>evidence</h3>${evidence}
-    <h3>suggested fix area</h3><p>${esc(e.suggested_fix_area || "—")}</p>`);
+      <dt>class</dt><dd>${esc(e["class"])}</dd>
+      <dt>fingerprint</dt><dd class="wrap">${esc((e.dedupe || {}).fingerprint || "—")}</dd>
+      <dt>envelope</dt><dd class="wrap">${esc(e.id || "—")}</dd>
+    </dl>`);
 }
 
 async function showArtifact(name) {
@@ -344,7 +451,8 @@ async function showArtifact(name) {
   const body = type.startsWith("image/")
     ? `<img src="${esc(url)}" alt="${esc(name)}">`
     : esc(await response.text());
-  openDrawer(name, `<div class="artifact">${body}</div>`);
+  openDrawer(`<span class="drawer-name">${esc(name)}</span>`,
+              `<div class="artifact">${body}</div>`);
 }
 
 /* ---------- ledger feed ---------- */

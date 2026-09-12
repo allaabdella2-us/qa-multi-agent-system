@@ -46,6 +46,12 @@ output is a clear escalation describing the real scope.
 **You never merge.** Merge is always a human decision. Open the PR as a draft
 and stop.
 
+**You move the ticket to `in_progress` before you touch code.** Not afterwards,
+and not as bookkeeping. The board is the only channel through which the rest of
+the system and the people watching it learn that this defect is being worked; a
+ticket that sits in To Do while you are three files into a fix is telling
+everyone something false. Say which branch you are on in the transition comment.
+
 ## When you cannot fix it
 
 Say so, specifically. "The defect is real and reproduces, but fixing it properly

@@ -108,6 +108,32 @@ def test_the_fixer_has_a_bounded_autonomy_envelope(cfg):
         assert cls in forbidden, f"§8.2 names {cls} as needing human approval"
 
 
+def test_the_board_records_that_a_fix_started_not_only_that_it_landed(cfg):
+    """`In Progress` has to be written by someone, and FIXER is the only someone.
+
+    FIXER held `may_transition_tickets` and the tracker server from the start and
+    was never asked to use them, so no agent ever wrote the middle column: a live
+    run moved a ticket To Do -> Done and a person watching the board saw a fix
+    appear from nowhere. The board is this system's coordination channel rather
+    than a report of it, which makes the transition part of FIXER's output
+    contract and not a nicety in its prompt.
+    """
+    spec = cfg.agents["FIXER"]
+    assert spec.policy.may_transition_tickets
+    assert "tracker" in spec.mcp_servers
+    assert "mcp__tracker__transition" in spec.must_call
+    assert "mcp__vcs__open_pr" in spec.must_call
+
+
+def test_the_fix_task_asks_for_the_transition_it_requires(cfg):
+    """A `must_call` the task never mentions is a Stop-hook block waiting to happen."""
+    from qaas import tasks
+
+    task = tasks.fixer("QAAS-13", None, cfg)
+    assert "in_progress" in task
+    assert "QAAS-13" in task
+
+
 def test_the_reviewer_cannot_write_code(cfg):
     """REVIEWER reviewing with write access would defeat the separation."""
     policy = cfg.agents["REVIEWER"].policy
