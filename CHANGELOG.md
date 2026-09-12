@@ -47,6 +47,27 @@ The fan-out escalation now leads the escalation list and names the count and the
 cap, rather than arriving third in a list of sixteen — it is the line that
 explains the bill.
 
+### The dashboard reads a resumed run correctly
+
+`qaas run --run-id <id>` appends a second `run_started` to a ledger that already
+carries a `run_finished`. Three things in the read model assumed that never
+happens, and together they rendered a live run as a finished one:
+
+- **liveness** asked whether the ledger *contains* `run_finished`. It now counts
+  starts against finishes, so a run is live while it has been started more times
+  than it has been finished.
+- **the header** kept the first session's verdict, writing "stopped early —
+  wall-clock cap" across the top of a run that was actively dispatching.
+- **agent cards** left an agent the first session never reached marked
+  `never_ran`, which is the one thing the resume exists to change. They are
+  queued again.
+
+Separately, an agent's finding count counted `envelope` *lines* rather than
+envelopes. An envelope is re-logged when a later phase revises it — REPRODUCER
+raising a held finding's confidence writes a second line naming the same id and
+the same discovering agent — so one live run showed 21 findings against 17 real
+envelopes. The count is now taken where the deduplication already happens.
+
 ### `qaas dashboard`
 
 A localhost page that reads a run's ledger and shows it as instrumentation: the

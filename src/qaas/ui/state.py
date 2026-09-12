@@ -381,6 +381,12 @@ class RunView:
             # measuring elapsed from the first start would show a run against a
             # cap it is not being held to.
             self.started = entry.at
+            # A resume reopens a run that had already finished. Leaving these set
+            # showed the header as "stopped early" over a run that was actively
+            # dispatching agents.
+            self.completed = False
+            self.finished = None
+            self.stopped_early = None
             self.mode = detail.get("mode")
             self.roster = list(detail.get("agents") or [])
             self.budget_usd = detail.get("budget_usd")
@@ -390,7 +396,11 @@ class RunView:
             self.target_dirty = detail.get("target_dirty")
             self.target_branch = detail.get("target_branch")
             for name in self.roster:
-                self._agent(name)
+                view = self._agent(name)
+                # A resume re-rosters agents the previous session marked as
+                # never reached. They are queued again, not still never-run.
+                if view.status == "never_ran":
+                    view.status = "queued"
 
         elif kind == LedgerKind.RUN_FINISHED:
             self.finished = entry.at
@@ -445,9 +455,18 @@ class RunView:
             )
 
         elif kind == LedgerKind.ENVELOPE:
-            if agent:
+            # Count the envelope, not the line. An envelope is re-logged when a
+            # later phase revises it -- REPRODUCER raising a held finding's
+            # confidence writes a second `envelope` line naming the same id and
+            # the same discovering agent -- and incrementing per line credited
+            # AUDITOR with two findings for one defect. `_add_finding` already
+            # owns the "have I seen this id" question; ask it rather than
+            # keeping a second answer here that can disagree.
+            first_time = self._add_finding(
+                str(detail.get("envelope_id") or ""), entry, detail
+            )
+            if agent and first_time:
                 self._agent(agent).findings += 1
-            self._add_finding(str(detail.get("envelope_id") or ""), entry, detail)
 
         elif kind == LedgerKind.SKIPPED:
             reason = detail.get("reason")
@@ -508,9 +527,12 @@ class RunView:
             if finding.id and finding.id == ticket.envelope_id:
                 finding.ticket_key = ticket.key
 
-    def _add_finding(self, envelope_id: str, entry: LedgerEntry, detail: dict[str, Any]) -> None:
+    def _add_finding(
+        self, envelope_id: str, entry: LedgerEntry, detail: dict[str, Any]
+    ) -> bool:
+        """Record a finding. True when it was new, so callers can count it once."""
         if not envelope_id or any(f.id == envelope_id for f in self.findings):
-            return
+            return False
         env = None
         try:
             env = self.store.get_envelope(envelope_id)
@@ -518,7 +540,7 @@ class RunView:
             env = None
         if env is not None:
             self.findings.append(FindingView.of(env, min_confidence=self.min_confidence))
-            return
+            return True
         # The ledger line exists but the document does not (or will not parse).
         # The five fields the line itself carries still beat showing nothing.
         severity = str(detail.get("severity") or Severity.MINOR)
@@ -540,6 +562,7 @@ class RunView:
                 fingerprint=detail.get("fingerprint"),
             )
         )
+        return True
 
     # -- serialisation ----------------------------------------------------
 
@@ -599,16 +622,21 @@ def load(
 
 
 def is_live(store: RunStore) -> bool:
-    """A run is live until its ledger carries `run_finished`.
+    """Whether this run is still being written.
 
-    There is no "current run" pointer anywhere, and there deliberately is not:
-    the ledger is the only thing that knows, and it knows without being told.
+    Not "does the ledger contain `run_finished`" -- `qaas run --run-id` appends a
+    second `run_started` to a ledger that already carries one `run_finished`, and
+    that test called a resumed run dead while REPRODUCER was still working in it.
+    Counting is what distinguishes them: a run is live while it has been started
+    more times than it has been finished.
+
+    There is no "current run" pointer anywhere, and deliberately not: the ledger
+    is the only thing that knows, and it knows without being told.
     """
     if not store.ledger_path.exists():
         return False
-    return '"kind":"run_finished"' not in store.ledger_path.read_text(
-        encoding="utf-8", errors="replace"
-    )
+    text = store.ledger_path.read_text(encoding="utf-8", errors="replace")
+    return text.count('"kind":"run_started"') > text.count('"kind":"run_finished"')
 
 
 def pick_run(root: Path | str = DEFAULT_ROOT, run_id: str | None = None) -> str | None:

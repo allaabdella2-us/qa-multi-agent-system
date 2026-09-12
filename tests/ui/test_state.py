@@ -175,6 +175,28 @@ def test_findings_sort_most_severe_first(tmp_path: Path) -> None:
     assert titles.index("Cross-tenant order read") < titles.index("Trivial one")
 
 
+def test_a_revised_envelope_is_counted_once(tmp_path: Path) -> None:
+    """One defect, two `envelope` lines, one finding on the discoverer's card.
+
+    An envelope is re-logged when a later phase revises it: REPRODUCER raising a
+    held finding's confidence writes a second line naming the same id and the
+    same discovering agent. Counting lines credited AUDITOR with two findings
+    for one defect -- a live run showed 21 against 17 real envelopes.
+    """
+    store = RunStore("run-revised", root=tmp_path, create=True)
+    store.log("run_started", mode="pr-check", agents=["API"], wall_clock_s=900)
+    store.log("agent_started", agent="API", model="m")
+    envelope = make_envelope("run-revised", confidence=0.45)
+    store.put_envelope(envelope)
+    store.put_envelope(envelope.model_copy(update={"confidence": 0.97}))
+
+    view = load(tmp_path, "run-revised")
+    assert view.agents["API"].findings == 1
+    assert len(view.findings) == 1
+    # The ledger still holds both lines; it is the count that is deduplicated.
+    assert view.counts["envelope"] == 2
+
+
 def test_denials_keep_the_reason_and_the_arguments(run_root: Path) -> None:
     denial = load(run_root).denials[0]
     assert denial.agent == "API"
@@ -247,6 +269,63 @@ def test_is_live_is_the_absence_of_run_finished(tmp_path: Path) -> None:
     build_run(tmp_path, "run-open", finish=False)
     assert state.is_live(RunStore("run-open", root=tmp_path, create=False)) is True
     assert state.is_live(RunStore("run-done", root=tmp_path, create=False)) is False
+
+
+def test_a_resumed_run_is_live_again(tmp_path: Path) -> None:
+    """`qaas run --run-id` appends a second `run_started` after a `run_finished`.
+
+    Asking whether the file *contains* `run_finished` answered yes and called a
+    run dead while REPRODUCER was still working inside it -- the dashboard showed
+    a static report over a run that was actively dispatching. Counting starts
+    against finishes is what tells the two apart.
+    """
+    store = build_run(tmp_path, "run-resumed", finish=True)
+    assert state.is_live(RunStore("run-resumed", root=tmp_path, create=False)) is False
+    store.log("run_started", mode="full-loop", agents=["REPRODUCER"], wall_clock_s=1800)
+    assert state.is_live(RunStore("run-resumed", root=tmp_path, create=False)) is True
+
+
+def test_a_resume_reopens_a_run_the_header_had_closed(tmp_path: Path) -> None:
+    """The second `run_started` must clear the first `run_finished`'s verdict.
+
+    Left set, the header wrote "stopped early -- wall-clock cap" across the top
+    of a live run, which is the one thing a live view must not say.
+    """
+    store = RunStore("run-resumed", root=tmp_path, create=True)
+    store.log("run_started", mode="pr-check", agents=["API", "REPRODUCER"], wall_clock_s=900)
+    store.log("agent_started", agent="API", model="m")
+    store.put_result(AgentResult(agent="API", cost_usd=0.4))
+    store.log("run_finished", run_id="run-resumed", stopped_early="wall-clock cap")
+    assert load(tmp_path, "run-resumed").stopped_early == "wall-clock cap"
+
+    store.log("run_started", mode="full-loop", agents=["API", "REPRODUCER"], wall_clock_s=1800)
+    view = load(tmp_path, "run-resumed")
+    assert view.completed is False
+    assert view.finished is None
+    assert view.stopped_early is None
+
+
+def test_a_resume_requeues_an_agent_the_previous_session_never_reached(
+    tmp_path: Path,
+) -> None:
+    """`never_ran` is a verdict on a finished run, not a permanent state.
+
+    The resume exists precisely to reach the agent the first session ran out of
+    clock before dispatching, so its card is queued again -- and REPRODUCER,
+    which the first session never started at all, is queued rather than absent.
+    """
+    store = RunStore("run-resumed", root=tmp_path, create=True)
+    store.log("run_started", mode="pr-check", agents=["API", "REPRODUCER"], wall_clock_s=900)
+    store.log("agent_started", agent="API", model="m")
+    store.put_result(AgentResult(agent="API", cost_usd=0.4))
+    store.log("run_finished", run_id="run-resumed", stopped_early="wall-clock cap")
+    assert load(tmp_path, "run-resumed").agents["REPRODUCER"].status == "never_ran"
+
+    store.log("run_started", mode="full-loop", agents=["API", "REPRODUCER"], wall_clock_s=1800)
+    view = load(tmp_path, "run-resumed")
+    assert view.agents["REPRODUCER"].status == "queued"
+    # A finished agent is not un-finished by a resume that re-rosters it.
+    assert view.agents["API"].status == "done"
 
 
 def test_pick_run_prefers_a_live_run_over_a_newer_finished_one(tmp_path: Path) -> None:

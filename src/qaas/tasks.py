@@ -415,6 +415,11 @@ suite locally before you open anything.
 The failing test defines success and you may not edit it. If you believe the test
 itself is wrong, that is an escalation, not a licence to change it.
 
+Move {ticket_key} to `in_progress` before you start, and say in the comment which
+branch you are working on. The board is how everyone else finds out this ticket is
+being worked; a ticket that goes from To Do to Done with nothing in between tells
+a person watching that a fix appeared from nowhere.
+
 Work on a `fix/*` branch. Open the pull request as a draft with a rollback note.
 Never merge — merge is a human decision."""
 

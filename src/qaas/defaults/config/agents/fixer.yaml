@@ -52,4 +52,10 @@ policy:
     - "Dockerfile*"
     - "*.github/*"
 
-must_call: [mcp__vcs__open_pr]
+# The transition is in the contract, not left to the prompt. FIXER held
+# `may_transition_tickets` and the tracker server from the beginning and was
+# never once asked to use them, so `In Progress` was a column nothing ever
+# wrote: tickets went To Do -> Done and the middle of the loop was invisible on
+# the board that is supposed to *be* the coordination channel. The Stop hook
+# blocks a turn that has not called both.
+must_call: [mcp__vcs__open_pr, mcp__tracker__transition]
