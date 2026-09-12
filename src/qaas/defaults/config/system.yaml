@@ -17,6 +17,11 @@ vcs: local          # local | github
 thresholds:
   min_confidence_to_file: 0.6      # §7 confidence gate
   max_findings_per_agent_run: 25   # §8.3 loop breaker: pause and escalate, don't file
+  # Reproduction is the one phase whose cost scales with findings, and each
+  # dispatch is a fresh frontier-model context. Below this severity a finding is
+  # filed on the evidence discovery already produced instead of earning one.
+  # Lower it to `trivial` to reproduce everything, as releases before 0.0.2 did.
+  reproduce_min_severity: major
   max_tickets_per_run: 10          # §4.12 rate limit
   flake_runs: 5                    # REPRODUCER runs a repro N times to measure flake
   max_mender_arbiter_round_trips: 2

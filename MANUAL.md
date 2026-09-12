@@ -34,7 +34,12 @@ qaas drives the Claude Agent SDK. It needs one of:
 
 ```bash
 npx playwright install chromium   # only for UI exploration (the BROWSER agent)
+pip install 'qaas-python[ui]'     # only for `qaas dashboard`
 ```
+
+The `[ui]` extra pulls `starlette`, `uvicorn` and `sse-starlette`. All three
+already arrive with the Claude Agent SDK, so in practice it installs nothing
+new — it is there so the dashboard pins what it imports.
 
 ---
 
@@ -200,6 +205,7 @@ qaas run --mode fix-cycle --ticket QA-42              # fix one ticket
 qaas runs [--limit N]                    # every run, newest first
 qaas show <run-id>                       # findings, cost, tickets, escalations
 qaas trace <run-id> [--agent A] [--kind K] [--follow] [--quiet] [--json]
+qaas dashboard [<run-id>]                # the same run, in a browser
 qaas map [--version V]                   # the system map MAPPER built
 qaas board [--no-create]                 # this target's Jira board
 ```
@@ -231,6 +237,36 @@ genuinely what "what is it doing right now" looks like, and is a lot. With it yo
 see only what the agent *decided*: findings, refusals, tickets, verdicts,
 escalations. `--follow` stops on its own when the run finishes; ctrl-c is safe at
 any point and stops only the view, never the run.
+
+#### …or in a browser
+
+`qaas trace --follow` is one scrolling column. Fifteen agents do not run in one
+column: `qaas dashboard` shows them side by side.
+
+```bash
+qaas dashboard                       # the live run if there is one, else the newest
+qaas dashboard <run-id>              # a particular run
+qaas run --mode nightly --dashboard  # start both; the URL is printed first
+```
+
+It opens on `http://127.0.0.1:7777` and shows the phase rail advancing, one card
+per agent with its cost, turn count and **the tool it is calling right now**, a
+timeline lane per agent, findings by severity with their evidence, and every
+refusal the guardrails issued as it happens.
+
+| flag | |
+|---|---|
+| `--port N` | default 7777; the next few are tried if it is taken |
+| `--host H` | default `127.0.0.1`. Leave it there — the ledger carries agent task previews, refused command lines and your target's paths |
+| `--no-open` | do not open a browser |
+
+It is **read-only**: it shows a run, it cannot start one, file anything or spend
+anything. Ctrl-c stops the view and never the run, exactly like `--follow`.
+
+Two things it shows that the CLI does not. A **skipped** agent says why it was
+skipped, which is the answer to "why didn't BROWSER run". And an agent named by
+an older roster is drawn as `not in this roster` rather than dropped, so runs
+recorded before a rename still open.
 
 ### Measuring
 
@@ -460,7 +496,24 @@ summary of it — nothing is hidden from you.
 - **`--dry-run` first, always.** It is free and shows exactly what would happen.
 - **`--only AGENT`** while you are tuning. One agent is a fraction of a full run.
 - **REPRODUCER runs once per finding**, so a finding-heavy run is longer than an
-  agent-heavy one. That is the thing that most often surprises people.
+  agent-heavy one. That is the thing that most often surprises people — and it is
+  the single biggest lever on what a run costs.
+- **`thresholds.reproduce_min_severity`** (default `major`) is that lever.
+  Findings below it are filed on the evidence discovery already produced instead
+  of each opening a fresh context. Set it to `trivial` to reproduce everything.
+- **If runs come back expensive and noisy, raise the gates before touching
+  anything else:**
+
+  ```yaml
+  # .qaas/config/system.yaml
+  thresholds:
+    min_confidence_to_file: 0.75    # from 0.6 — drops low-confidence noise
+    max_findings_per_agent_run: 10  # from 25 — caps the REPRODUCER fan-out
+    reproduce_min_severity: major   # don't buy a context for a trivium
+  ```
+
+  Then run `qaas score` — a threshold change without a number attached is a
+  guess.
 - **`max_turns`** is the per-agent bound, and **`max_wall_clock_s`** the per-mode
   one. Both are enforced in code and neither assumes a provider.
 - **`incident` mode files nothing** — useful for diagnosing without paperwork.

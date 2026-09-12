@@ -121,6 +121,23 @@ REPRODUCER reproduces, minimizes, runs N times for flake rate, and commits a fai
 VERIFIER re-runs REPRODUCER's test against a patched build and returns `VERIFIED`/`NOT_FIXED`/`REGRESSED`. ROUTER gains all five discovery run modes, budget governor, concurrency caps, and escalation.
 **Verify:** the acceptance test for the whole system — fix one seeded defect by hand on a branch, run `qaas run --mode fix-cycle --ticket <id>`, and VERIFIER returns `VERIFIED`; revert the fix and it returns `NOT_FIXED`. Then `qaas run --mode nightly && qaas score` prints the §12 scorecard: acceptance rate, duplicate rate, false-positive rate, cost per accepted ticket.
 
+### M7 — The dashboard ✅ done
+`qaas dashboard`: a localhost page that reads a run's ledger and renders it as
+instrumentation — phase rail, one card per agent with its live tool and cost, a
+timeline lane each, findings with their evidence, and the guardrail refusals as
+they fire. Read-only by construction: every route is a GET and a test asserts the
+route table has nothing else. No `LedgerKind` member and no `router.py` change —
+the phase is *derived* from each agent's layer, which is what lets it open runs
+recorded before it existed, including ones naming a retired roster. The web
+dependencies are an optional `[ui]` extra, and `ui/state.py` imports none of
+them so the read model stays in the offline suite.
+**Verify:** `pytest tests/ui` — 61 tests, offline, binding no port: `apply()` per
+ledger kind, an incremental replay proven identical to a one-shot load, an
+artifact path that cannot escape its run and is never served as `text/html`, a
+half-written last line skipped rather than fatal, and a live tail streaming
+`snapshot → ledger/patch → done` against a ledger appended to mid-test. Then
+`qaas dashboard <run-id>` against a real run in `.qaas/runs/`.
+
 ### Skills, hooks and loops ✅ done
 
 **Skills** — 23 under `.claude/skills/<name>/SKILL.md`, carrying the procedure the

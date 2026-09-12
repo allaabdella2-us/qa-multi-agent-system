@@ -78,6 +78,7 @@ src/qaas/
 ├── sdk_compat.py    52  fails loudly when the SDK changes hook names
 ├── prompts/            one .md per agent + _shared.md appended to all
 ├── mcp/                seven in-process tool servers (see §6)
+├── ui/                 `qaas dashboard` — a reader of the ledger (see §13)
 └── adapters/           tracker (local | jira), vcs (local | github)
 ```
 
@@ -135,8 +136,13 @@ fix-cycle:  [VERIFIER, FIXER, REVIEWER]                              $20
 full-loop:  all eight                                             $60
 ```
 
-Note the shape: **REPRODUCER runs once per finding**, in a fresh context each time. So
-cost scales with how much was found, not with how many agents exist.
+Note the shape: **REPRODUCER runs once per finding at or above
+`thresholds.reproduce_min_severity`** (default `major`), in a fresh context each
+time. So cost scales with how much was found, not with how many agents exist —
+which is why the floor exists. A nightly run that found 85 mostly-minor issues
+queued 85 contexts and spent $45 without filing anything. Below the floor a
+finding is still filed, on the evidence discovery already produced; what it does
+not get is a committed failing test. `is_fileable` never asked for one.
 
 ### 5.2 Dispatching one agent
 
@@ -460,7 +466,47 @@ Four tiers, cheapest first:
 
 ---
 
-## 13. Known gaps
+## 13. The dashboard is a reader, not a participant
+
+`src/qaas/ui/` serves `qaas dashboard`: a localhost page showing a run as it
+happens — the phase rail, one card per agent, findings, refusals, cost. Three
+properties matter more than anything it draws.
+
+**It is read-only, and structurally so.** Every route is a GET; there is no code
+path from the page to a dispatch, a ticket or a write. A test asserts that the
+route table contains nothing but GET, so adding a POST means changing a test
+that says why it exists.
+
+**It adds no ledger kind and no router change.** The six phases are never
+written to the ledger — there is no `phase_started` — so the dashboard *derives*
+the phase from the `layer` of the agents that have started (`control → map`,
+`discovery → discover`, and so on; the `triage` layer splits by name, because the
+router dispatches those two phases by name too). Deriving rather than recording
+is what lets it open runs written long before it existed, including ones naming
+agents from a roster that no longer exists — those render as `not in this
+roster` instead of crashing the view.
+
+**One tail per run, not one per tab.** `ui/state.py` folds the ledger into a
+`RunView` one entry at a time, so replaying a file and following a live run are
+the same `apply()` calls in the same order. `ui/server.py` keeps a single
+`trace.tail` thread per run and fans out over SSE; a new browser tab gets a
+snapshot of the view that already exists and then deltas, so ten tabs re-read a
+40,000-line ledger zero extra times.
+
+Two smaller notes, both bug-derived. The header's progress bar measures elapsed
+against `max_wall_clock_s`, never dollars: no shipped run mode sets a budget
+ceiling, so a "% of budget" bar would be invented. And the cost comes from
+summing `agent_finished`, not from `results/*.json` — one run on disk has fifteen
+`agent_finished` lines for FORGE and a single `FORGE.json`, because it predates
+the per-invocation filename, and the append-only ledger is the half that survived.
+
+The web dependencies are optional (`pip install 'qaas-python[ui]'`) and
+`ui/state.py` imports none of them, which is what puts the read model in the
+default offline suite.
+
+---
+
+## 14. Known gaps
 
 Honesty about what is *not* proven, so nobody inherits a false impression:
 

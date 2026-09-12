@@ -46,7 +46,7 @@ def fake_agents(monkeypatch):
                         **{"class": "bug"},
                         title=f"{spec.name} finding {i}",
                         summary="Something is wrong.",
-                        severity=Severity.MAJOR,
+                        severity=cfg.get("severity", Severity.MAJOR),
                         confidence=0.9,
                         evidence=[{"type": "log", "uri": "artifact://a/b"}],
                     )
@@ -628,3 +628,84 @@ async def test_every_shipped_agent_is_actually_dispatchable(cfg, tmp_path, fake_
         f"{missing} are configured into full-loop and were never dispatched. "
         "An agent that loads but never runs is the failure this test exists for."
     )
+
+
+# -- what reproduction is worth spending a context on -----------------------
+#
+# Reproduction is the only phase whose cost scales with findings, and each
+# dispatch is a fresh frontier-model context. A nightly run on a personal site
+# produced 85 findings, most of them minor at high confidence, and spent $45
+# without filing anything. These pin the gate that stops that.
+
+
+async def test_a_finding_below_the_floor_is_filed_but_not_reproduced(cfg, tmp_path, fake_agents):
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 6, "severity": Severity.MINOR}
+
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+
+    assert "REPRODUCER" not in [n for n, _ in calls], "minor findings earn no context"
+    # Filing is unaffected: `is_fileable` wants evidence, confidence and "not
+    # not_reproducible", and `unattempted` passes. Discovery already produced
+    # the evidence, so the finding still reaches TRIAGE.
+    assert "TRIAGE" in [n for n, _ in calls]
+    assert report.stopped_early is None
+
+
+async def test_the_skip_says_how_many_and_which_knob(cfg, tmp_path, fake_agents):
+    _, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 4, "severity": Severity.TRIVIAL}
+
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+    store = RunStore(report.run_id, root=tmp_path, create=False)
+    skips = [e for e in store.ledger("skipped") if e.agent == "REPRODUCER"]
+
+    assert any(e.detail.get("count") == 4 for e in skips)
+    assert any("reproduce_min_severity" in (e.detail.get("reason") or "") for e in skips)
+
+
+async def test_severe_findings_are_still_reproduced_one_context_each(cfg, tmp_path, fake_agents):
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 3, "severity": Severity.BLOCKER}
+
+    await make_conductor(cfg, tmp_path).run("nightly")
+    assert sum(1 for n, _ in calls if n == "REPRODUCER") == 3
+
+
+async def test_a_mixed_run_reproduces_only_what_clears_the_floor(cfg, tmp_path, fake_agents):
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 2, "severity": Severity.CRITICAL}
+    behaviour["BROWSER"] = {"emit": 7, "severity": Severity.MINOR}
+
+    await make_conductor(cfg, tmp_path).run("nightly")
+    assert sum(1 for n, _ in calls if n == "REPRODUCER") == 2
+
+
+async def test_lowering_the_floor_restores_the_old_behaviour(cfg, tmp_path, fake_agents):
+    """One line in system.yaml buys back pre-0.0.2 reproduction of everything."""
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 5, "severity": Severity.TRIVIAL}
+
+    loose = cfg.model_copy(
+        update={"thresholds": cfg.thresholds.model_copy(
+            update={"reproduce_min_severity": Severity.TRIVIAL})}
+    )
+    await make_conductor(loose, tmp_path).run("nightly")
+    assert sum(1 for n, _ in calls if n == "REPRODUCER") == 5
+
+
+async def test_the_fan_out_escalation_leads_the_list(cfg, tmp_path, fake_agents):
+    """It is the line that explains the bill; it used to arrive third of sixteen."""
+    _, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 40, "severity": Severity.BLOCKER}
+
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+    assert report.escalations, "a capped fan-out must be reported"
+    assert "REPRODUCER fan-out capped" in report.escalations[0]
+    assert str(cfg.thresholds.max_findings_per_agent_run) in report.escalations[0]
