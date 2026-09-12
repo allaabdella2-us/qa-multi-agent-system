@@ -1,10 +1,12 @@
 <div align="center">
 
-<img src="docs/logo.jpg" alt="qaas — Agentic QA Harness" width="620">
+# QAAS
 
-# A multi-agent QA system that finds real defects — and proves it
+### Autonomous Quality Assurance · Agentic QA Harness
 
-**Reads your application → finds defects → reproduces each with a failing test → files the ticket → fixes it → reviews the fix → verifies it.**
+**A harness that lets a fleet of governed agents run the entire QA lifecycle autonomously.**
+
+Reads your application → finds the defects → files each with its evidence → fixes it → reviews the fix → verifies it → **moves the ticket to Done**.
 
 [![PyPI](https://img.shields.io/pypi/v/qaas-python?color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/qaas-python/)
 [![Python](https://img.shields.io/pypi/pyversions/qaas-python?color=3776AB&logo=python&logoColor=white)](https://pypi.org/project/qaas-python/)
@@ -25,6 +27,11 @@ Fifteen agents, each with its own context, tool allowlist and budget, coordinate
 a state machine that is ordinary Python — because a model cannot enforce a budget
 it is itself spending.
 
+They never talk to each other. They coordinate through **the board** — the same
+one your team already reads. That is the whole trick: a ticket is the shared
+memory, the work queue and the audit trail at once, and it is the only thing that
+crosses between them.
+
 <div align="center">
   <img src="docs/roster.png" alt="The fifteen agents by phase: Map — Mapper. Discovery, eight agents — Architect, API, Browser, DBA, Auditor, Socket, Guide, Load. Triage, two — Reproducer and Triage. Remediation, two — Fixer and Reviewer. Verify — Verifier. Reporting — Reporter." width="900">
 </div>
@@ -39,6 +46,7 @@ the rest.
 
 | | |
 |---|---|
+| 📋 **Coordination you can watch** | A finding becomes a ticket, and the ticket moves To Do → In Progress → Done as agents pick it up and finish with it. Nothing to learn: watching the system work is watching your board. |
 | 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **830 tests run offline, free, with no API key.** |
 | 🧱 **Every agent is its own `query()`** | Not subagents of a shared parent. Each gets a real context boundary, an enforceable tool allowlist, and its own cost number. |
 | 🔬 **Evidence or it did not happen** | `has_evidence()` and `is_fileable()` are methods on the envelope model, not requests in a prompt. An agent cannot talk its way past them. |
@@ -181,17 +189,11 @@ qaas board --no-create      # show the label and JQL, touch nothing
 ```
 
 > [!NOTE]
-> **Not a project per repository.** Creating a Jira project needs administrator
-> rights a bot account rarely has, and a project per repository is unmanageable
-> by the tenth one. A filter needs no special grant.
->
-> **Not always a board, either.** Team-managed (next-gen) projects own their own
-> board and cannot have a second one built over a filter — Jira's API will
-> happily create one and give it no page in the UI. So the project's style is
-> checked first, and on a team-managed project you get the filter alone. You are
-> told which you got, and the link always opens. Point `JIRA_PROJECT_KEY` at a
-> **company-managed** project and you get a real board per repository, with
-> To Do / In Progress / Done.
+> **A filter, not a project per repository** — creating projects needs admin
+> rights a bot account rarely has. On a **company-managed** project you also get
+> a real board with To Do / In Progress / Done; a team-managed one owns its own
+> board and you get the filter alone. Either way the link opens, and you are told
+> which you got. [Why, in MANUAL.md](MANUAL.md#a-view-per-repository).
 
 Run it twice on the same repository and it **reuses** what is there. A run is
 never failed over this: a run that found nine defects and could not make a view
@@ -311,21 +313,22 @@ be replayed against the tree that produced it.
 
 ---
 
-## 🛡️ Safety rails
+## 🛡️ What "governed" means
 
-Enforced in code, not requested in a prompt:
+Autonomy without limits is just a process with your credentials. Every one of
+these is enforced by a `PreToolUse` hook in `guardrails.py` — in code, never
+requested in a prompt:
 
 | rail | what it does |
 |---|---|
-| 📁 **Path scoping** | Writes checked against that agent's `write_paths`. Most agents cannot write at all. |
-| 🌿 **Branch scoping** | Git writes must match the agent's patterns (`qa/repro/*`, `fix/*`). `main` and force-push refused outright. |
-| ⛔ **Forbidden classes** | Migrations, auth, payment, secrets, infrastructure, CI — stop at a human however small the change looks. |
-| 🎟️ **Ticket rate limit** | Over the per-run cap the call is denied and the router escalates rather than filing. |
-| 🧪 **Immutable test** | The agent fixing a defect may not edit the test that defines it. |
-| 🚫 **No filesystem settings** | `setting_sources=[]` — a repository qaas is inspecting cannot inject settings, hooks or MCP servers into the process running it. |
+| 📁 **Path scoping** | Writes are checked against that agent's `write_paths`. Most agents cannot write at all. |
+| 🌿 **Branch scoping** | Git writes must match the agent's patterns (`qa/repro/*`, `fix/*`). `main` and force-push are refused outright. |
+| ⛔ **Forbidden classes** | Auth, payment, secrets, migrations, infrastructure, CI — these stop at a human however small the change looks. |
+| 🚫 **No filesystem settings** | `setting_sources=[]` — a repository qaas is inspecting cannot inject settings, hooks or MCP servers into the process holding your credentials. |
 
-Denials return a reason and are logged; they never kill the turn. The agent reads
-the refusal and adapts.
+A denial returns a reason and is logged; it never kills the turn. The agent reads
+the refusal and works around it. Also enforced: a per-run ticket cap, and the
+failing test that defines a defect is immutable to the agent fixing it.
 
 ---
 

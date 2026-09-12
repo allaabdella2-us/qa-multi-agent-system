@@ -3,7 +3,7 @@
 # the CLI are both `qaas`.
 name = "qaas-python"
 version = "0.0.2"
-description = "A multi-agent QA system: finds real defects, reproduces them, files tickets, fixes them, and proves the fix"
+description = "Autonomous Quality Assurance: a harness that lets a fleet of governed agents run the entire QA lifecycle — find, file, fix, verify"
 dynamic = ["readme"]
 license = "MIT"
 license-files = ["LICENSE"]
