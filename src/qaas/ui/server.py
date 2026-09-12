@@ -212,9 +212,15 @@ class Dashboard:
         min_confidence: float = 0.6,
         ledger_path: Path | None = None,
         poll: float = trace.POLL_INTERVAL_S,
+        cfg: Any = None,
     ) -> None:
         self.root = Path(root)
         self.specs = dict(specs or {})
+        #: The whole SystemConfig, for the configuration half of the page. None
+        #: is a legitimate state: `pip install` then `qaas dashboard` in a
+        #: directory holding only `.qaas/runs/` must still open, exactly as the
+        #: agent grid renders without specs.
+        self.cfg = cfg
         self.min_confidence = min_confidence
         #: The golden ledger of the active target, when it has one. Most targets
         #: never will -- it is a property of a calibration app, not of an
@@ -440,6 +446,19 @@ async def _stream(request: Request) -> Response:
     return EventSourceResponse(events())
 
 
+async def _config(request: Request) -> Response:
+    """Everything this installation is configured to do, in one payload.
+
+    Rebuilt per request rather than cached: a dashboard left open while someone
+    edits `system.yaml` should show the edit on reload. It is a GET like every
+    other route here -- the page reports configuration, it cannot change it.
+    """
+    from qaas.ui.config_view import ConfigView
+
+    dash: Dashboard = request.app.state.dash
+    return JSONResponse(ConfigView(dash.cfg).to_json())
+
+
 def build_app(dash: Dashboard) -> Starlette:
     """The whole HTTP surface, in one readable table."""
     routes = [
@@ -454,6 +473,7 @@ def build_app(dash: Dashboard) -> Starlette:
         Route("/api/runs/{run_id}/artifacts/{name:path}", _artifact),
         Route("/api/runs/{run_id}/score", _score),
         Route("/api/runs/{run_id}/map", _map),
+        Route("/api/config", _config),
         Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
     ]
     app = Starlette(routes=routes)

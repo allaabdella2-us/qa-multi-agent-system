@@ -607,3 +607,414 @@ $("quiet").addEventListener("change", () => renderFeed(state.view));
     }
   }, 1000);
 })();
+
+/* ---------- configuration ----------
+ *
+ * The runs view answers "what happened". This one answers "what would happen":
+ * the roster, the prompts in force, the servers, the models, the skills, the
+ * hooks, the rails and the governors. It is the same object graph `qaas
+ * validate`, `qaas prompts list`, `qaas doctor` and `qaas run --dry-run`
+ * already print, in one place instead of four terminal tables.
+ *
+ * Read-only, like every other part of this page. There is no form here and no
+ * route to post one to: `/api/config` is a GET, and a test asserts the route
+ * table holds nothing but GETs.
+ */
+
+const SECTIONS = [
+  { key: "agents",      icon: "i-agents",     label: "agents",
+    caption: "the roster: model, tools, prompt, rails" },
+  { key: "prompts",     icon: "i-prompts",    label: "prompts",
+    caption: "which file each agent is given, and from where" },
+  { key: "mcp_servers", icon: "i-mcp",        label: "mcp servers",
+    caption: "in-process, stdio and declared — and who may use each" },
+  { key: "models",      icon: "i-models",     label: "models",
+    caption: "model choice per agent, grouped by model" },
+  { key: "skills",      icon: "i-skills",     label: "skills",
+    caption: "procedure, as a plugin skill" },
+  { key: "hooks",       icon: "i-hooks",      label: "hooks",
+    caption: "the three events, and what each one may block" },
+  { key: "guardrails",  icon: "i-guardrails", label: "guardrails",
+    caption: "the write-permission matrix, per agent" },
+  { key: "run_modes",   icon: "i-modes",      label: "run modes",
+    caption: "who runs, how many at once, under what cap" },
+  { key: "thresholds",  icon: "i-loops",      label: "thresholds & loops",
+    caption: "the governors, and what each one costs" },
+  { key: "target",      icon: "i-target",     label: "target",
+    caption: "the application under test" },
+  { key: "settings",    icon: "i-settings",   label: "settings",
+    caption: "tracker, config layers, which variables are set" },
+];
+
+const cfgState = { data: null, section: "agents", item: 0, filter: "" };
+
+const yes = (value) => value
+  ? '<span class="flag on">yes</span>' : '<span class="flag">no</span>';
+const chips = (values, extra = "") => (values || []).length
+  ? `<div class="chips">${values.map((v) =>
+      `<span class="chip ${extra}">${esc(v)}</span>`).join("")}</div>`
+  : '<p class="muted">none</p>';
+const rules = (values) => (values || []).length
+  ? `<ul class="paths">${values.map((v) =>
+      `<li><code>${esc(v)}</code></li>`).join("")}</ul>`
+  : '<p class="muted">none</p>';
+
+/* Where a value came from, said in one line. "I edited the YAML and nothing
+ * changed" is answered by this badge: a nearer layer shadows it. */
+function sourceLine(source) {
+  if (!source || !source.path) return "";
+  const shadowed = (source.shadows || []).length
+    ? ` <span class="shadowing">shadows ${source.shadows.map(esc).join(", ")}</span>` : "";
+  return `<div class="source"><span class="layer-tag l-${esc(source.layer)}">${
+    esc(source.layer)}</span><code>${esc(source.path)}</code>${shadowed}</div>`;
+}
+
+function configRows(section, data) {
+  switch (section) {
+    case "agents":
+    case "guardrails": return data.agents || [];
+    case "prompts":    return data.prompts || [];
+    case "mcp_servers":return data.mcp_servers || [];
+    case "models":     return data.models || [];
+    case "skills":     return data.skills || [];
+    case "hooks":      return data.hooks || [];
+    case "run_modes":  return data.run_modes || [];
+    case "thresholds": return data.thresholds || [];
+    case "target":     return data.target ? [data.target] : [];
+    case "settings":   return data.settings ? [data.settings] : [];
+    default: return [];
+  }
+}
+
+function rowTitle(section, row) {
+  if (section === "models") return row.model;
+  if (section === "hooks") return row.event;
+  if (section === "target") return row.name || "no target";
+  if (section === "settings") return row.project || "project";
+  return row.name;
+}
+
+function rowSub(section, row) {
+  switch (section) {
+    case "agents": return `${row.layer} · ${row.model}`;
+    case "guardrails": return row.policy.read_only ? "read-only" :
+      `${(row.policy.write_paths || []).length} write paths`;
+    case "prompts": return row.agent ? `${row.agent} · ${row.chars} chars`
+                                     : `${row.chars} chars`;
+    case "mcp_servers": return `${row.kind} · ${row.used_by.length} agents`;
+    case "models": return `${row.count} agents`;
+    case "skills": return row.used_by.length
+      ? `${row.used_by.length} agents` : "unused";
+    case "hooks": return `blocking: ${row.blocking}`;
+    case "run_modes": return `${row.agents.length} agents · ${
+      hms(row.max_wall_clock_s)}`;
+    case "thresholds": return String(row.value);
+    default: return "";
+  }
+}
+
+function renderConfigNav() {
+  $("config-nav").innerHTML = SECTIONS.map((s) => {
+    const count = cfgState.data ? configRows(s.key, cfgState.data).length : 0;
+    return `<button data-section="${s.key}" class="${
+      s.key === cfgState.section ? "on" : ""}">
+      <svg class="i"><use href="#${s.icon}"/></svg>
+      <span class="nav-label">${s.label}</span>
+      <span class="nav-count">${count}</span>
+    </button>`;
+  }).join("");
+}
+
+function renderConfigList() {
+  const rows = configRows(cfgState.section, cfgState.data || {});
+  const needle = cfgState.filter.toLowerCase();
+  const shown = rows
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => !needle ||
+      JSON.stringify(row).toLowerCase().includes(needle));
+  $("config-items").innerHTML = shown.map(({ row, index }) =>
+    `<button class="config-item ${index === cfgState.item ? "on" : ""}"
+             data-index="${index}">
+      <span class="ci-name">${esc(rowTitle(cfgState.section, row))}</span>
+      <span class="ci-sub">${esc(rowSub(cfgState.section, row))}</span>
+    </button>`).join("") ||
+    '<div class="empty">nothing matches</div>';
+}
+
+function renderConfigDetail() {
+  const rows = configRows(cfgState.section, cfgState.data || {});
+  const row = rows[cfgState.item];
+  const section = SECTIONS.find((s) => s.key === cfgState.section);
+  if (!row) {
+    $("config-detail").innerHTML =
+      `<div class="empty">${esc(section ? section.caption : "")}</div>`;
+    return;
+  }
+  $("config-detail").innerHTML =
+    `<header class="cd-head">
+       <h2>${esc(rowTitle(cfgState.section, row))}</h2>
+       <p>${esc(section.caption)}</p>
+     </header>` + DETAIL[cfgState.section](row);
+}
+
+const DETAIL = {
+  agents: (a) => `
+    <p class="lede">${esc(a.role)}</p>
+    <div class="facts">
+      <div class="fact"><span>layer</span><b>${esc(a.layer)}</b></div>
+      <div class="fact"><span>model</span><b>${esc(a.model)}</b></div>
+      <div class="fact"><span>effort</span><b>${esc(a.effort)}</b></div>
+      <div class="fact"><span>max turns</span><b>${a.max_turns}</b></div>
+    </div>
+    <h3>tools</h3>${chips(a.builtin_tools)}
+    <h3>mcp servers <small>${a.mcp_servers.length}/6</small></h3>
+    ${chips(a.mcp_servers, "chip-mcp")}
+    <h3>skills</h3>${chips(a.skills, "chip-skill")}
+    <h3>output contract</h3>
+    ${a.must_call.length
+      ? `<p>The Stop hook blocks a turn that ends without calling these.</p>${
+          chips(a.must_call, "chip-must")}`
+      : '<p class="muted">none — this agent may stop whenever it likes</p>'}
+    <h3>prompt</h3>
+    <p><code>${esc(a.prompt.name)}</code> · ${a.prompt.chars} chars</p>
+    ${sourceLine(a.prompt.source)}
+    ${a.prompt.append
+      ? `<p>plus an override block: <code>${esc(a.prompt.append)}</code></p>` : ""}
+    <h3>defined in</h3>${sourceLine(a.source) || '<p class="muted">packaged</p>'}`,
+
+  guardrails: (a) => `
+    <p class="lede">Enforced by the <code>PreToolUse</code> hook in
+      <code>guardrails.py</code>, in code, never requested in a prompt. A denial
+      returns a reason and is logged; it never kills the turn.</p>
+    <div class="facts">
+      <div class="fact"><span>read only</span><b>${a.policy.read_only ? "yes" : "no"}</b></div>
+      <div class="fact"><span>may open pr</span><b>${a.policy.may_open_pr ? "yes" : "no"}</b></div>
+      <div class="fact"><span>max diff files</span><b>${a.policy.max_diff_files ?? "—"}</b></div>
+      <div class="fact"><span>max diff lines</span><b>${a.policy.max_diff_lines ?? "—"}</b></div>
+    </div>
+    <h3>may write</h3>
+    <p>Target-relative. A pattern written <code>*/x/*</code> will not match a
+       repository's own root-level <code>x/</code>.</p>
+    ${rules(a.policy.write_paths)}
+    <h3>branches</h3>${rules(a.policy.branch_patterns)}
+    <h3>forbidden — these stop at a human</h3>${rules(a.policy.forbidden_paths)}
+    <h3>protected</h3>${rules(a.policy.protected_paths)}
+    <h3>tickets</h3>
+    <dl class="kv">
+      <dt>may create</dt><dd>${yes(a.policy.may_create_tickets)}</dd>
+      <dt>may transition</dt><dd>${yes(a.policy.may_transition_tickets)}</dd>
+    </dl>`,
+
+  prompts: (p) => `
+    ${p.role ? `<p class="lede">${esc(p.role)}</p>` : ""}
+    <div class="facts">
+      <div class="fact"><span>agent</span><b>${esc(p.agent || "all")}</b></div>
+      <div class="fact"><span>size</span><b>${p.chars}</b></div>
+    </div>
+    <h3>in force from</h3>${sourceLine(p.source) || '<p class="muted">not found</p>'}
+    ${p.append ? `<h3>override block</h3>
+      <p><code>${esc(p.append)}</code> is inserted between the agent block and
+         the shared house rules — never after, because the house rules must stay
+         the last word.</p>` : ""}
+    <h3>make it yours</h3>
+    <pre class="snippet">qaas prompts eject ${esc(p.agent || "")}
+qaas prompts diff</pre>`,
+
+  mcp_servers: (m) => `
+    <div class="facts">
+      <div class="fact"><span>kind</span><b>${esc(m.kind)}</b></div>
+      <div class="fact"><span>origin</span><b>${m.declared ? "declared" : "builtin"}</b></div>
+      <div class="fact"><span>agents</span><b>${m.used_by.length}</b></div>
+    </div>
+    <h3>runs</h3><pre class="snippet">${esc(m.runs || "—")}</pre>
+    <h3>available to</h3>
+    ${m.used_by.length ? chips(m.used_by, "chip-agent") :
+      `<p class="warn">Declared and named by nobody. Declaring a server grants
+        nothing — an agent receives it only by naming it in its own
+        <code>mcp_servers</code> list, so this is usually a typo.</p>`}
+    ${m.env && m.env.length ? `<h3>environment</h3>
+      <p>Read from the environment at launch. Values are never shown here.</p>
+      ${chips(m.env, "chip-env")}` : ""}
+    ${m.declared ? `<p class="warn">A server's tools are allowed wholesale once
+      an agent names it. qaas checks that the agent declared the server; it
+      cannot inspect what a third-party server's tools actually do.
+      <b>A server you declare is a server you trust.</b></p>` : ""}`,
+
+  models: (m) => `
+    <div class="facts">
+      <div class="fact"><span>agents</span><b>${m.count}</b></div>
+    </div>
+    <h3>used by</h3>
+    <table class="grid-table"><thead><tr>
+      <th>agent</th><th>layer</th><th>effort</th><th>turns</th><th>cap</th>
+    </tr></thead><tbody>${m.agents.map((a) => `<tr>
+      <td><b>${esc(a.name)}</b></td><td>${esc(a.layer)}</td>
+      <td>${esc(a.effort)}</td><td>${a.max_turns}</td>
+      <td>${a.max_budget_usd == null ? "—" : money(a.max_budget_usd)}</td>
+    </tr>`).join("")}</tbody></table>
+    <p class="muted">Model is per-agent configuration — <code>model:</code> in
+      each agent's YAML. Today every provider is Claude through the Claude Agent
+      SDK; making the model a choice is the roadmap.</p>`,
+
+  skills: (s) => `
+    <p class="lede">${esc(s.summary || "—")}</p>
+    <div class="facts">
+      <div class="fact"><span>loaded as</span><b>${esc(s.qualified || s.name)}</b></div>
+      <div class="fact"><span>size</span><b>${s.chars}</b></div>
+      <div class="fact"><span>agents</span><b>${s.used_by.length}</b></div>
+    </div>
+    <h3>given to</h3>
+    ${s.used_by.length ? chips(s.used_by, "chip-agent")
+      : '<p class="muted">no agent lists this skill</p>'}
+    <h3>file</h3><p><code>${esc(s.path || "—")}</code></p>
+    <p class="muted">Skills reach an agent as a Claude Code plugin, so they
+      travel inside the wheel. The name is rewritten to
+      <code>${esc(s.qualified || "qaas:" + s.name)}</code>: the SDK matches skill
+      names down two channels with different rules, and the unqualified name
+      loads on one but never matches the allow rule on the other.</p>`,
+
+  hooks: (h) => `
+    <div class="facts">
+      <div class="fact"><span>event</span><b>${esc(h.event)}</b></div>
+      <div class="fact"><span>can block</span><b>${esc(h.blocking)}</b></div>
+    </div>
+    <h3>what it does</h3><p>${esc(h.what)}</p>
+    <h3>handlers</h3>${chips(h.handlers.split(", "))}`,
+
+  run_modes: (m) => `
+    <div class="facts">
+      <div class="fact"><span>trigger</span><b>${esc(m.trigger)}</b></div>
+      <div class="fact"><span>wall clock</span><b>${hms(m.max_wall_clock_s)}</b></div>
+      <div class="fact"><span>concurrency</span><b>${m.max_concurrency}</b></div>
+      <div class="fact"><span>budget cap</span>
+        <b>${m.max_budget_usd == null ? "none" : money(m.max_budget_usd)}</b></div>
+    </div>
+    <h3>roster <small>${m.agents.length}</small></h3>${chips(m.agents, "chip-agent")}
+    <h3>files tickets</h3><p>${yes(m.files_tickets)}</p>
+    <h3>run it</h3><pre class="snippet">qaas run --mode ${esc(m.name)} --dry-run</pre>
+    ${m.max_budget_usd == null ? `<p class="muted">No shipped mode sets a dollar
+      cap, which is why the dashboard's progress bar measures elapsed time and
+      never money: a percentage of nothing would be invented.</p>` : ""}`,
+
+  thresholds: (t) => `
+    <div class="facts">
+      <div class="fact"><span>value</span><b>${esc(String(t.value))}</b></div>
+    </div>
+    <h3>what it does</h3><p>${esc(t.note)}</p>
+    <h3>change it</h3>
+    <pre class="snippet">thresholds:
+  ${esc(t.name)}: ${esc(String(t.value))}</pre>
+    <p class="muted">in your project's <code>.qaas/config/system.yaml</code>.
+      Run <code>qaas score</code> afterwards — it is the only way to know
+      whether the change helped.</p>`,
+
+  target: (t) => !t.loaded
+    ? `<p class="lede">No target profile is loaded. <code>qaas init .</code>
+         inspects a repository and writes one.</p>`
+    : `<p class="lede">${esc(t.description || "—")}</p>
+    <div class="facts">
+      <div class="fact"><span>mode</span><b>${esc(t.environment_mode)}</b></div>
+      <div class="fact"><span>branch</span><b>${esc(t.default_branch || "—")}</b></div>
+      <div class="fact"><span>auth</span><b>${esc(t.auth_mode)}</b></div>
+    </div>
+    <h3>root</h3><p><code>${esc(t.root)}</code></p>
+    <h3>capabilities</h3>
+    <dl class="kv">${Object.entries(t.capabilities || {}).map(([k, v]) =>
+      `<dt>${esc(k)}</dt><dd>${yes(v)}</dd>`).join("")}</dl>
+    <h3>urls</h3>
+    <dl class="kv">
+      <dt>web</dt><dd>${esc(t.web_url || "—")}</dd>
+      <dt>api</dt><dd>${esc(t.api_url || "—")}</dd>
+    </dl>
+    ${(t.roles || []).length ? `<h3>roles</h3>
+      <table class="grid-table"><thead><tr>
+        <th>role</th><th>username</th><th>password from</th><th>set</th>
+      </tr></thead><tbody>${t.roles.map((r) => `<tr>
+        <td><b>${esc(r.role)}</b></td><td>${esc(r.username || "—")}</td>
+        <td><code>${esc(r.password_env || "—")}</code></td>
+        <td>${yes(r.set)}</td></tr>`).join("")}</tbody></table>
+      <p class="muted">Credentials never live in a profile: it names environment
+        variables, and this page reports only whether each one is set.</p>` : ""}`,
+
+  settings: (s) => `
+    <div class="facts">
+      <div class="fact"><span>tracker</span><b>${esc(s.tracker)}</b></div>
+      <div class="fact"><span>vcs</span><b>${esc(s.vcs || "—")}</b></div>
+      <div class="fact"><span>state root</span><b>${esc(s.state_root)}</b></div>
+    </div>
+    ${s.tracker_override ? `<p class="warn">
+      <code>QAAS_TRACKER=${esc(s.tracker_override)}</code> is set in this
+      environment and overrides the file.</p>` : ""}
+    <h3>config layers</h3>
+    <p>Nearest first. <code>system.yaml</code> is <b>first hit wins whole</b>;
+       agents, prompts and skills union by name with the nearer layer shadowing.</p>
+    <ol class="layers">${(s.config_dirs || []).map((d) => `<li>
+      <span class="layer-tag l-${esc(d.layer)}">${esc(d.layer)}</span>
+      <code>${esc(d.path)}</code>
+      ${d.exists ? "" : '<span class="muted">— absent</span>'}</li>`).join("")}</ol>
+    <h3>prompts from</h3>${rules(s.prompt_dirs)}
+    <h3>plugin</h3>${rules(s.plugin_dirs)}
+    <h3>environment</h3>
+    <p>Whether each variable is set. Values are never read into this page.
+       <code>qaas tracker-check</code> validates them, and prints nothing secret
+       either.</p>
+    <table class="grid-table"><thead><tr><th>variable</th><th>set</th></tr></thead>
+    <tbody>${(s.env || []).map((e) => `<tr>
+      <td><code>${esc(e.name)}</code></td><td>${yes(e.set)}</td>
+    </tr>`).join("")}</tbody></table>`,
+};
+
+async function loadConfig() {
+  if (cfgState.data) return;
+  try {
+    cfgState.data = await getJSON("/api/config");
+  } catch (err) {
+    $("config-detail").innerHTML =
+      `<div class="empty">configuration unavailable: ${esc(err)}</div>`;
+    return;
+  }
+  renderConfig();
+}
+
+function renderConfig() {
+  renderConfigNav();
+  renderConfigList();
+  renderConfigDetail();
+}
+
+function showView(view) {
+  $("grid-main").hidden = view !== "runs";
+  $("config").hidden = view !== "config";
+  for (const button of $("views").querySelectorAll("button")) {
+    button.classList.toggle("on", button.dataset.view === view);
+  }
+  if (view === "config") loadConfig();
+}
+
+$("views").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-view]");
+  if (button) showView(button.dataset.view);
+});
+
+$("config-nav").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-section]");
+  if (!button) return;
+  cfgState.section = button.dataset.section;
+  cfgState.item = 0;
+  cfgState.filter = "";
+  $("config-search").value = "";
+  renderConfig();
+});
+
+$("config-items").addEventListener("click", (event) => {
+  const button = event.target.closest(".config-item");
+  if (!button) return;
+  cfgState.item = Number(button.dataset.index);
+  renderConfigList();
+  renderConfigDetail();
+});
+
+$("config-search").addEventListener("input", (event) => {
+  cfgState.filter = event.target.value;
+  renderConfigList();
+});

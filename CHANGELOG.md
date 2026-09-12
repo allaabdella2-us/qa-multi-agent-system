@@ -47,6 +47,27 @@ The fan-out escalation now leads the escalation list and names the count and the
 cap, rather than arriving third in a list of sixteen — it is the line that
 explains the bill.
 
+### A configuration view
+
+`qaas dashboard` grew a second half. The runs view answers "what happened"; the
+configuration view answers "what would happen" — the roster with each agent's
+model, tools, skills and output contract; which prompt file is in force and
+which layer it came from; the MCP servers and who may use each; models grouped
+by model; the thirty skills and their qualified names; the three hook events
+and what each may block; the write-permission matrix per agent; the run modes;
+and the governors, each with the sentence explaining what it costs.
+
+That is the same object graph `qaas validate`, `qaas prompts list`, `qaas
+doctor` and `qaas run --dry-run` already print, in one place instead of four
+terminal tables. Two questions it answers that were previously a grep: which
+file defined this agent, and what that file shadows.
+
+It stays a reader. `/api/config` is a GET, the route-table test still passes,
+and there is no form on the page. A credential is reported as *whether the
+variable is set* and never as its value — a profile names an environment
+variable so the secret stays out of the file, and a token rendered into HTML is
+a token in a browser cache.
+
 ### The dashboard reads a resumed run correctly
 
 `qaas run --run-id <id>` appends a second `run_started` to a ledger that already

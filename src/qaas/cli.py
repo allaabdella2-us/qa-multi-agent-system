@@ -1154,6 +1154,10 @@ def _dashboard_kwargs(config_dir: Path | None) -> dict:
         "specs": dict(cfg.agents),
         "min_confidence": cfg.thresholds.min_confidence_to_file,
         "ledger_path": ledger if ledger and ledger.exists() else None,
+        # The whole config, for the page's configuration half. The specs alone
+        # cannot answer "which tracker", "which run modes" or "what does this
+        # threshold cost".
+        "cfg": cfg,
     }
 
 

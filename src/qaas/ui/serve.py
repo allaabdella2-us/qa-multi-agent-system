@@ -42,6 +42,7 @@ def build(
     specs: Mapping[str, AgentSpec] | None = None,
     min_confidence: float = 0.6,
     ledger_path: Path | None = None,
+    cfg=None,
 ):
     """The ASGI app, with the `[ui]` extra checked first so the error is a sentence."""
     require_extra()
@@ -53,6 +54,7 @@ def build(
             specs=specs,
             min_confidence=min_confidence,
             ledger_path=ledger_path,
+            cfg=cfg,
         )
     )
 

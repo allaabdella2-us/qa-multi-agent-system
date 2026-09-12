@@ -201,6 +201,30 @@ def test_no_route_writes_anything(client: TestClient) -> None:
         assert methods <= {"GET", "HEAD"}, route
 
 
+def test_config_is_served_and_names_the_roster(run_root: Path) -> None:
+    """The configuration half of the page, over the same read-only surface."""
+    from qaas.config import load_config
+
+    cfg = load_config(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config")
+    client = TestClient(build_app(Dashboard(run_root, specs=SPECS, cfg=cfg)))
+    payload = client.get("/api/config").json()
+    assert payload["loaded"] is True
+    assert {a["name"] for a in payload["agents"]} >= {"MAPPER", "FIXER", "VERIFIER"}
+    assert payload["run_modes"]
+
+
+def test_config_without_a_config_still_answers(run_root: Path) -> None:
+    """A dashboard opened in a directory holding only `.qaas/runs/`.
+
+    The agent grid already renders without specs. A 500 here would make the
+    whole page unusable for the case the runs half was built to survive.
+    """
+    client = TestClient(build_app(Dashboard(run_root)))
+    response = client.get("/api/config")
+    assert response.status_code == 200
+    assert response.json()["loaded"] is False
+
+
 def test_score_keeps_the_counts_as_counts(run_root: Path, tmp_path: Path) -> None:
     """The per-item lists ride alongside `summary()`, never over it.
 
