@@ -8,12 +8,12 @@
 
 [![PyPI](https://img.shields.io/pypi/v/qaas-python?color=3775A9&logo=pypi&logoColor=white)](https://pypi.org/project/qaas-python/)
 [![Python](https://img.shields.io/pypi/pyversions/qaas-python?color=3776AB&logo=python&logoColor=white)](https://pypi.org/project/qaas-python/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/LICENSE)
 [![CI](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml/badge.svg)](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-830%20offline-success)](#-contributing)
 [![Built on](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-D97757)](https://docs.claude.com/en/api/agent-sdk/overview)
 
-[Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Roadmap](#️-roadmap) · [Architecture](ARCHITECTURE.md)
+[Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Roadmap](#️-roadmap) · [Architecture](https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/ARCHITECTURE.md)
 
 </div>
 
@@ -26,7 +26,7 @@ a state machine that is ordinary Python — because a model cannot enforce a bud
 it is itself spending.
 
 <div align="center">
-  <img src="docs/roster.png" alt="The fifteen agents by phase: Map — Mapper. Discovery, eight agents — Architect, API, Browser, DBA, Auditor, Socket, Guide, Load. Triage, two — Reproducer and Triage. Remediation, two — Fixer and Reviewer. Verify — Verifier. Reporting — Reporter." width="900">
+  <img src="https://raw.githubusercontent.com/allaabdella2-us/qa-multi-agent-system/main/docs/roster.png" alt="The fifteen agents by phase: Map — Mapper. Discovery, eight agents — Architect, API, Browser, DBA, Auditor, Socket, Guide, Load. Triage, two — Reproducer and Triage. Remediation, two — Fixer and Reviewer. Verify — Verifier. Reporting — Reporter." width="900">
 </div>
 
 Six phases, and every agent in them is its own `query()`. **ROUTER** is the sixteenth
@@ -56,7 +56,7 @@ qaas run --mode pr-check --dashboard    # or: qaas dashboard
 ```
 
 <div align="center">
-  <img src="docs/dashboard.png" alt="The qaas dashboard during a live run: a phase rail with map, discover, reproduce and file lit and verify and report struck through; one card per agent showing its cost, findings and the tool it is calling right now; a timeline lane per agent; findings by severity with their Jira keys; and the ledger streaming on the right." width="900">
+  <img src="https://raw.githubusercontent.com/allaabdella2-us/qa-multi-agent-system/main/docs/dashboard.png" alt="The qaas dashboard during a live run: a phase rail with map, discover, reproduce and file lit and verify and report struck through; one card per agent showing its cost, findings and the tool it is calling right now; a timeline lane per agent; findings by severity with their Jira keys; and the ledger streaming on the right." width="900">
 </div>
 
 Fifteen agents do not run in one scrolling column. The dashboard is
@@ -415,13 +415,13 @@ The `llm`, `docker`, `github` and `jira` markers are deselected by default.
 > If you change a seeded defect in `target-app/`, retire its ledger entry with
 > `fixed_in:` in the same commit — a stale ledger silently corrupts every score.
 
-New to the codebase? [`ARCHITECTURE.md`](ARCHITECTURE.md) explains the entry
+New to the codebase? [`ARCHITECTURE.md`](https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/ARCHITECTURE.md) explains the entry
 point, the five phases, what moves between agents, and what the guardrails stop.
 
 ---
 
 <div align="center">
 
-**MIT licensed** · [LICENSE](LICENSE) 
+**MIT licensed** · [LICENSE](https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/LICENSE) 
 
 </div>
