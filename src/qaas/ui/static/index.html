@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qaas — mission control</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐦‍⬛</text></svg>">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="bird">🐦‍⬛</span><span class="wordmark">qaas</span></div>
+  <div class="run-id" id="run-id">—</div>
+  <div class="target" id="target">—</div>
+  <div class="mode" id="mode">—</div>
+  <div class="spacer"></div>
+  <div class="status" id="status"><span class="dot"></span><span id="status-text">—</span></div>
+  <div class="clock">
+    <div class="clock-row"><span id="elapsed">0:00</span><span class="of" id="cap">—</span></div>
+    <div class="meter"><div class="meter-fill" id="clock-fill"></div></div>
+  </div>
+  <div class="cost"><span id="cost">$0.00</span><small>spent</small></div>
+</header>
+
+<main class="grid">
+
+  <aside class="rail" id="rail">
+    <h2>runs</h2>
+    <div id="run-list"></div>
+  </aside>
+
+  <section class="stage">
+
+    <div class="phases" id="phases"></div>
+
+    <div class="counters" id="counters"></div>
+
+    <h2 class="section-title">agents <span class="hint" id="agent-hint"></span></h2>
+    <div class="agents" id="agents"></div>
+
+    <h2 class="section-title">timeline</h2>
+    <div class="timeline-wrap"><svg id="timeline" role="img" aria-label="agent timeline"></svg></div>
+
+    <nav class="tabs" id="tabs">
+      <button data-tab="findings" class="on">findings <b id="n-findings">0</b></button>
+      <button data-tab="guardrails">guardrails <b id="n-denials">0</b></button>
+      <button data-tab="tickets">tickets <b id="n-tickets">0</b></button>
+      <button data-tab="escalations">escalations <b id="n-escalations">0</b></button>
+      <button data-tab="artifacts">artifacts <b id="n-artifacts">0</b></button>
+      <button data-tab="score">score</button>
+    </nav>
+    <div class="panel" id="panel"></div>
+
+  </section>
+
+  <aside class="stream">
+    <h2>ledger
+      <label class="toggle"><input type="checkbox" id="quiet" checked> decisions only</label>
+    </h2>
+    <div id="feed"></div>
+  </aside>
+
+</main>
+
+<div class="drawer" id="drawer" hidden>
+  <div class="drawer-head">
+    <strong id="drawer-title">—</strong>
+    <button id="drawer-close" aria-label="close">✕</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

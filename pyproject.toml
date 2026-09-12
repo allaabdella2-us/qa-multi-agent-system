@@ -2,7 +2,7 @@
 # Distribution name is `qaas-python` (`qaas` was taken); the import package and
 # the CLI are both `qaas`.
 name = "qaas-python"
-version = "0.0.1"
+version = "0.0.2"
 description = "A multi-agent QA system: finds real defects, reproduces them, files tickets, fixes them, and proves the fix"
 readme = "README.md"
 license = "MIT"
@@ -34,6 +34,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
+# `qaas dashboard` only. All three already arrive transitively through
+# claude-agent-sdk -> mcp, so in practice this extra installs nothing new; it is
+# here so the UI pins what it imports rather than relying on another package's
+# dependency graph continuing to supply it. Starlette and not FastAPI because
+# the whole HTTP surface is read-only GETs with no request bodies to validate.
+ui = ["starlette>=1.6", "uvicorn>=0.30", "sse-starlette>=2.1"]
 
 [project.scripts]
 qaas = "qaas.cli:app"

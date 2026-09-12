@@ -15,6 +15,7 @@ import os
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from qaas.envelope import Severity
 from qaas.target import TargetProfile, load_target
 
 # §5.3 is explicit that no agent gets more than six MCP servers, because tool
@@ -155,6 +156,10 @@ class Thresholds(BaseModel):
 
     min_confidence_to_file: float = 0.6
     max_findings_per_agent_run: int = 25
+    #: Findings less severe than this are filed on discovery's evidence instead
+    #: of each earning a fresh REPRODUCER context. See `_phase_reproduce` for
+    #: the run that made this necessary.
+    reproduce_min_severity: Severity = Severity.MAJOR
     max_tickets_per_run: int = 10
     flake_runs: int = 5
     max_mender_arbiter_round_trips: int = 2

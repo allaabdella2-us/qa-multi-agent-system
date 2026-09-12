@@ -356,11 +356,55 @@ class Router:
             store.log("skipped", agent="REPRODUCER", reason="no findings to reproduce")
             return
 
+        # Reproduction is the one phase whose cost scales with *findings*, and
+        # each dispatch is a fresh frontier-model context. A nightly run on a
+        # personal site produced 85 findings -- most of them minor, at high
+        # confidence -- and every one of them queued its own context. The run
+        # spent $45 and filed nothing.
+        #
+        # A less severe finding still gets filed: `is_fileable` asks for
+        # evidence, confidence and "not not_reproducible", and discovery already
+        # supplied the evidence -- `unattempted` passes that gate. What it does
+        # not get is a committed failing test, which is the right thing to spend
+        # a context on for a blocker and the wrong thing for a trivium.
+        #
+        # This cannot move `qaas score`: the scorecard reads envelopes, and
+        # REPRODUCER emits none. It trades reproduction depth for cost, nothing else.
+        floor = self.config.thresholds.reproduce_min_severity
+        below = [e for e in drafts if e.severity.rank > floor.rank]
+        if below:
+            drafts = [e for e in drafts if e.severity.rank <= floor.rank]
+            store.log(
+                "skipped",
+                agent="REPRODUCER",
+                reason=(
+                    f"{len(below)} findings below {floor.value} are filed on discovery's "
+                    f"evidence rather than reproduced (thresholds.reproduce_min_severity)"
+                ),
+                count=len(below),
+                floor=floor.value,
+            )
+        if not drafts:
+            store.log(
+                "skipped",
+                agent="REPRODUCER",
+                reason=f"no finding reached {floor.value}; nothing to reproduce",
+            )
+            return
+
         cap = self.config.thresholds.max_findings_per_agent_run
         if len(drafts) > cap:
-            note = f"{len(drafts)} findings exceed the per-run cap of {cap}; triaging the most severe"
-            report.escalations.append(note)
-            store.log("escalation", agent="REPRODUCER", reason=note)
+            # Named first and counted, because this line is the one that explains
+            # the bill and it used to arrive third in a list of sixteen.
+            note = (
+                f"REPRODUCER fan-out capped: {len(drafts)} findings at or above "
+                f"{floor.value} exceed the per-run cap of {cap}; reproducing the "
+                f"{cap} most severe and filing the rest on discovery's evidence"
+            )
+            report.escalations.insert(0, note)
+            store.log(
+                "escalation", agent="REPRODUCER", reason=note, cap=cap, findings=len(drafts)
+            )
             drafts = sorted(drafts, key=lambda e: (e.severity.rank, -e.confidence))[:cap]
 
         jobs = [

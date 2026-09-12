@@ -20,7 +20,7 @@ usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (BROWSER) runs
 
-pytest                                   # 767 tests, no API calls, no network
+pytest                                   # 830 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
@@ -67,7 +67,16 @@ MAPPER    API/BROWSER/…      REPRODUCER    TRIAGE    VERIFIER    REPORTER
 
 Discovery agents run concurrently up to the mode's cap; REPRODUCER runs **once per
 finding** in a fresh context (so cost scales with findings, not agents); VERIFIER
-loops with bounded reopens and escalates rather than cycling. `Budget.check()`
+loops with bounded reopens and escalates rather than cycling.
+
+Because that cost scales with findings, `_phase_reproduce` gates on
+`thresholds.reproduce_min_severity` (default `major`) before it fans out. A run
+that found 85 mostly-minor issues opened 85 contexts and spent $45 filing
+nothing. A finding below the floor is still **filed** — `is_fileable` wants
+evidence, confidence and "not `not_reproducible`", and `unattempted` passes all
+three — it just does not get a committed failing test. The gate cannot move
+`qaas score`, because the scorecard reads envelopes and REPRODUCER emits none;
+that is what makes it a pure cost lever rather than a calibration change. `Budget.check()`
 runs before every dispatch and raises `BudgetExceeded`, which is a control
 working, not an error.
 
@@ -262,6 +271,32 @@ own root-level `x/`. Target profiles layer by filename across config dirs
 provisions a profile through the same helper as `qaas init` (`_provision_target`
 in `cli.py`). Keep it one code path — two ways to decide what is under test is
 two sets of rules about where someone else's code lands on disk.
+
+### The dashboard reads; it never participates
+
+`src/qaas/ui/` is `qaas dashboard` — a localhost page over a run's ledger. Every
+route is a GET and a test asserts the route table contains nothing else; there is
+no path from the page to a dispatch, a ticket or a write.
+
+It adds **no `LedgerKind` member and no router change**, and must not grow one.
+Phase boundaries are not in the ledger, so the phase is *derived* from the
+`layer` of the agents that have started (`triage` splits by name, because the
+router dispatches REPRODUCER and TRIAGE by name too). Deriving is what lets it
+open runs written before it existed — including the ones naming the earlier
+roster (CARTOGRAPHER, FORGE, VAULT), which render as `not in this roster` rather
+than crashing the view. Anything reading the ledger must treat an agent name as
+data, not as a key into today's config.
+
+`ui/state.py` folds entries one at a time, so replay and live tail are the same
+`apply()` calls; it imports no web dependency, which is what keeps the read model
+in the offline suite. `ui/server.py` keeps **one** `trace.tail` thread per run and
+fans out over SSE — a browser tab gets a snapshot of the existing view plus
+deltas, never its own re-read of a 40,000-line file. Two numbers are deliberate:
+the progress bar measures elapsed against `max_wall_clock_s` and never dollars
+(no shipped mode sets a budget cap, so a percentage would be invented), and cost
+sums `agent_finished` rather than `results/*.json`, because a run predating the
+per-invocation filename has fifteen ledger lines for FORGE and one clobbered
+`FORGE.json`.
 
 ### Runtime state
 
