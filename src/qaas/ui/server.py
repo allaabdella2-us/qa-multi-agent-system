@@ -213,6 +213,7 @@ class Dashboard:
         ledger_path: Path | None = None,
         poll: float = trace.POLL_INTERVAL_S,
         cfg: Any = None,
+        config_dirs: list[Path] | None = None,
     ) -> None:
         self.root = Path(root)
         self.specs = dict(specs or {})
@@ -221,6 +222,9 @@ class Dashboard:
         #: directory holding only `.qaas/runs/` must still open, exactly as the
         #: agent grid renders without specs.
         self.cfg = cfg
+        #: The config search path, nearest first. The override file is written
+        #: to the nearest writable layer, which is the project's own `.qaas`.
+        self.config_dirs = list(config_dirs or [])
         self.min_confidence = min_confidence
         #: The golden ledger of the active target, when it has one. Most targets
         #: never will -- it is a property of a calibration app, not of an
@@ -459,6 +463,51 @@ async def _config(request: Request) -> Response:
     return JSONResponse(ConfigView(dash.cfg).to_json())
 
 
+async def _set_override(request: Request) -> Response:
+    """The one route on this page that writes, and the only one that ever will.
+
+    It changes tuning -- which model an agent runs, a turn cap, a threshold --
+    by merging into `overrides.yaml`. It cannot change what an agent is
+    *allowed to do*: `config_write` refuses anything outside
+    `TUNABLE_AGENT_FIELDS`, so the write-permission matrix stays a file that a
+    person edits. That distinction is the whole reason a POST is acceptable
+    here at all, and `test_the_write_route_cannot_touch_a_policy` is what keeps
+    it true.
+    """
+    from qaas.ui.config_write import OverrideError, reset, set_values
+
+    dash: Dashboard = request.app.state.dash
+    if not dash.config_dirs:
+        return JSONResponse({"error": "no config directory is writable here"}, status_code=409)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "expected a JSON body"}, status_code=400)
+
+    try:
+        if body.get("reset"):
+            data = reset(dash.config_dirs)
+        else:
+            data = set_values(
+                dash.config_dirs,
+                section=str(body.get("section") or ""),
+                key=body.get("agent"),
+                values=dict(body.get("values") or {}),
+            )
+    except OverrideError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    # Reload so the response is what a run would now see, not what was asked
+    # for. They differ whenever a nearer layer still shadows the field.
+    from qaas.config import load_config
+
+    try:
+        dash.cfg = load_config(search=dash.config_dirs)
+    except Exception:
+        pass
+    return JSONResponse({"overrides": data})
+
+
 def build_app(dash: Dashboard) -> Starlette:
     """The whole HTTP surface, in one readable table."""
     routes = [
@@ -474,6 +523,7 @@ def build_app(dash: Dashboard) -> Starlette:
         Route("/api/runs/{run_id}/score", _score),
         Route("/api/runs/{run_id}/map", _map),
         Route("/api/config", _config),
+        Route("/api/config/override", _set_override, methods=["POST"]),
         Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
     ]
     app = Starlette(routes=routes)

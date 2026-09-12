@@ -116,22 +116,35 @@ const LAYERS = [
   ["reporting",   "report"],
 ];
 
+/* Two lines, and a third only when there is something to say.
+ *
+ * The card used to carry its own layer label under the name, which the band
+ * header above it already states for every card in it -- fifteen agents cost a
+ * screen and a half, and the repeated word was a whole line of that. What is
+ * left is what changes: the name, the state, and the three numbers. */
 function agentCard(a) {
   const label = { running: `turn ${a.turns || "—"}`, done: "done",
                   failed: "failed", skipped: "skipped", queued: "queued",
                   never_ran: "never ran" }[a.status];
-  return `<div class="card" data-status="${a.status}" data-agent="${esc(a.name)}">
-    <div class="name">${esc(a.name)}</div>
-    <div class="layer ${a.layer ? "" : "unknown"}">${esc(a.layer || "not in this roster")}</div>
-    <div class="state"><span class="pip"></span>${esc(label)}</div>
-    <div class="nums">
-      <span><b>${money(a.cost_usd)}</b></span>
-      <span><b>${a.findings}</b> find</span>
-      ${a.denials ? `<span class="warn-chip"><b>${a.denials}</b> denied</span>` : ""}
+  const note = a.error ? `<div class="err" title="${esc(a.error)}">${esc(a.error)}</div>`
+    : a.status === "running" && a.last_tool
+      ? `<div class="tool">▸ ${esc(a.last_tool)}</div>`
+    : a.status === "skipped" && a.reason
+      ? `<div class="why" title="${esc(a.reason)}">${esc(a.reason)}</div>`
+    : "";
+  return `<div class="card" data-status="${a.status}" data-agent="${esc(a.name)}"
+               title="${esc(a.name)} — ${esc(a.layer || "not in this roster")}">
+    <div class="top">
+      <span class="pip"></span>
+      <span class="name">${esc(a.name)}</span>
+      <span class="state">${esc(label)}</span>
     </div>
-    ${a.status === "running" && a.last_tool ? `<div class="tool">▸ ${esc(a.last_tool)}</div>` : ""}
-    ${a.status === "skipped" && a.reason ? `<div class="why">${esc(a.reason)}</div>` : ""}
-    ${a.error ? `<div class="err" title="${esc(a.error)}">${esc(a.error)}</div>` : ""}
+    <div class="nums">
+      <b>${money(a.cost_usd)}</b>
+      <span><b>${a.findings}</b>f</span>
+      ${a.denials ? `<span class="warn-chip"><b>${a.denials}</b>d</span>` : ""}
+      ${a.layer ? "" : '<span class="warn-chip">retired</span>'}
+    </div>${note}
   </div>`;
 }
 
@@ -722,7 +735,8 @@ function renderConfigNav() {
       <span class="nav-label">${s.label}</span>
       <span class="nav-count">${count}</span>
     </button>`;
-  }).join("");
+  }).join("") +
+    `<button id="reset-overrides" class="reset">reset overrides</button>`;
 }
 
 function renderConfigList() {
@@ -762,10 +776,14 @@ const DETAIL = {
     <p class="lede">${esc(a.role)}</p>
     <div class="facts">
       <div class="fact"><span>layer</span><b>${esc(a.layer)}</b></div>
-      <div class="fact"><span>model</span><b>${esc(a.model)}</b></div>
-      <div class="fact"><span>effort</span><b>${esc(a.effort)}</b></div>
-      <div class="fact"><span>max turns</span><b>${a.max_turns}</b></div>
+      ${field(a.name, "model", "model", a.model, MODELS)}
+      ${field(a.name, "effort", "effort", a.effort, EFFORTS)}
+      ${field(a.name, "max_turns", "max turns", a.max_turns)}
     </div>
+    <p class="muted">Model, effort and the turn cap are editable and write to
+      <code>overrides.yaml</code>. Everything below is not: an agent's policy,
+      tools, servers and output contract are what the guardrails enforce, and
+      they are edited in the config file on purpose.</p>
     <h3>tools</h3>${chips(a.builtin_tools)}
     <h3>mcp servers <small>${a.mcp_servers.length}/6</small></h3>
     ${chips(a.mcp_servers, "chip-mcp")}
@@ -898,15 +916,13 @@ qaas prompts diff</pre>`,
 
   thresholds: (t) => `
     <div class="facts">
-      <div class="fact"><span>value</span><b>${esc(String(t.value))}</b></div>
+      ${field(null, t.name, "value", t.value,
+              t.name === "reproduce_min_severity" ? SEVERITIES : null)}
     </div>
     <h3>what it does</h3><p>${esc(t.note)}</p>
-    <h3>change it</h3>
-    <pre class="snippet">thresholds:
-  ${esc(t.name)}: ${esc(String(t.value))}</pre>
-    <p class="muted">in your project's <code>.qaas/config/system.yaml</code>.
-      Run <code>qaas score</code> afterwards — it is the only way to know
-      whether the change helped.</p>`,
+    <p class="muted">Editing writes to <code>overrides.yaml</code> beside your
+      config. Run <code>qaas score</code> afterwards — it is the only way to
+      know whether the change helped, rather than just changed something.</p>`,
 
   target: (t) => !t.loaded
     ? `<p class="lede">No target profile is loaded. <code>qaas init .</code>
@@ -1045,4 +1061,106 @@ $("theme").addEventListener("click", () => {
   // Nothing else to repaint: the timeline is drawn SVG, but every fill it
   // writes is a `var(--k-*)` string rather than a resolved colour, so it
   // follows the tokens without being redrawn. Keep it that way.
+});
+
+/* ---------- editing an override ----------
+ *
+ * The only writing this page does. It changes what a model *is* -- which model
+ * an agent runs, a turn cap, a threshold -- and never what an agent is
+ * *allowed to do*. The server refuses anything outside its tunable set, so
+ * this is a convenience over `overrides.yaml` rather than a second authority:
+ * every field here has an equivalent line in that file, and deleting the file
+ * undoes all of it.
+ */
+
+const MODELS = ["claude-opus-5", "claude-opus-4-7", "claude-sonnet-5",
+                "claude-haiku-4-5-20251001"];
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const SEVERITIES = ["trivial", "minor", "major", "critical", "blocker"];
+
+/* An editable fact. A select where the values are a closed set, a text box
+ * where they are a number -- and the same card shape as a read-only fact, so
+ * the panel does not become a form. */
+function field(agent, name, label, value, options) {
+  const attrs = `data-agent="${agent ? esc(agent) : ""}" data-field="${esc(name)}"`;
+  const control = options
+    ? `<select class="edit" ${attrs}>${
+        options.concat(options.includes(String(value)) ? [] : [String(value)])
+          .map((o) => `<option${o === String(value) ? " selected" : ""}>${esc(o)}</option>`)
+          .join("")}</select>`
+    : `<input class="edit" type="text" inputmode="decimal"
+              value="${esc(String(value ?? ""))}" ${attrs}>`;
+  return `<div class="fact editable"><span>${esc(label)}</span>${control}</div>`;
+}
+
+async function saveOverride(section, agent, name, value) {
+  const detail = $("config-detail");
+  detail.classList.add("saving");
+  try {
+    const response = await fetch("/api/config/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ section, agent, values: { [name]: value } }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || response.statusText);
+    // Re-fetch rather than patching in place: a nearer layer can still shadow
+    // the field, and showing what was asked for instead of what a run would
+    // now see is the one thing this panel must not do.
+    cfgState.data = await getJSON("/api/config");
+    renderConfig();
+    toast("saved to overrides.yaml");
+  } catch (err) {
+    toast(String(err.message || err), true);
+  } finally {
+    detail.classList.remove("saving");
+  }
+}
+
+function toast(text, bad = false) {
+  let node = $("toast");
+  if (!node) {
+    node = document.createElement("div");
+    node.id = "toast";
+    document.body.appendChild(node);
+  }
+  node.textContent = text;
+  node.className = bad ? "bad" : "";
+  node.classList.add("on");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => node.classList.remove("on"), bad ? 6000 : 2200);
+}
+
+$("config-detail").addEventListener("change", (event) => {
+  const control = event.target.closest(".edit");
+  if (!control) return;
+  const agent = control.dataset.agent || null;
+  const name = control.dataset.field;
+  let value = control.value.trim();
+  // A number typed into a text box arrives as a string, and the loader's
+  // `extra="forbid"` model would reject it. An empty box means "drop the
+  // override", which the server reads as null.
+  if (value === "") value = null;
+  else if (control.tagName === "INPUT" && value !== "" && !Number.isNaN(Number(value))) {
+    value = Number(value);
+  }
+  saveOverride(agent ? "agents" : "thresholds", agent, name, value);
+});
+
+/* One button to undo every override at once, since the file is the unit. */
+$("config-nav").addEventListener("click", async (event) => {
+  if (!event.target.closest("#reset-overrides")) return;
+  try {
+    const response = await fetch("/api/config/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reset: true }),
+    });
+    if (!response.ok) throw new Error((await response.json()).error);
+    cfgState.data = await getJSON("/api/config");
+    renderConfig();
+    toast("overrides cleared");
+  } catch (err) {
+    toast(String(err.message || err), true);
+  }
 });

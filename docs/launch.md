@@ -48,13 +48,13 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 > PyPI: https://pypi.org/project/qaas-python/
 > Code and architecture: https://github.com/allaabdella2-us/qa-multi-agent-system
-> 858 tests run offline with no API key, so you can read how the guardrails work before spending anything.
+> 861 tests run offline with no API key, so you can read how the guardrails work before spending anything.
 
 ### Variant B — the builder's post (engineering audience)
 
 > The design decision that shaped everything in qaas: the orchestrator is code, not a prompt. A model cannot enforce a budget it is itself spending.
 >
-> qaas is an open-source harness that runs fifteen QA agents through map → discover → reproduce → file → fix → review → verify → report, and the router that orders them, caps their concurrency, governs the budget and breaks the loops is a Python state machine. That is also why 858 tests run offline, free, with no API key.
+> qaas is an open-source harness that runs fifteen QA agents through map → discover → reproduce → file → fix → review → verify → report, and the router that orders them, caps their concurrency, governs the budget and breaks the loops is a Python state machine. That is also why 861 tests run offline, free, with no API key.
 >
 > Three things are enforced in code rather than requested in a prompt:
 >
@@ -76,7 +76,7 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 ### Variant C — short (repost or comment thread)
 
-> Open-sourced qaas: fifteen governed agents that find defects in a running application, reproduce each one into a failing test, file it, fix it, verify the fix, and move the ticket to Done on your Jira board. The orchestrator is Python, not a prompt. No merge method exists. 858 tests run without an API key.
+> Open-sourced qaas: fifteen governed agents that find defects in a running application, reproduce each one into a failing test, file it, fix it, verify the fix, and move the ticket to Done on your Jira board. The orchestrator is Python, not a prompt. No merge method exists. 861 tests run without an API key.
 >
 > Real numbers: 14 of 15 reproductions became failing tests; a real React site yielded 17 findings for about $20.
 >
@@ -317,7 +317,7 @@ implementation, and the plan for it is written down in `PROVIDERS_PLAN.md`.
 
 **"It's just prompts."**
 The prompts are the least of it. The router, the guardrails, the evidence gate
-and the ledger are Python, and 858 tests exercise them without a model in the
+and the ledger are Python, and 861 tests exercise them without a model in the
 loop. Ask which part of a competitor's system still works with the API key
 removed.
 
@@ -420,7 +420,7 @@ qaas prompts eject API                 # make a prompt yours
 | claim | source |
 |---|---|
 | 15 agents, ROUTER is Python, six phases | `README.md`, `CLAUDE.md` |
-| 858 offline tests, no API key | README badge; 858 passing locally on 2026-09-12 |
+| 861 offline tests, no API key | README badge; 861 passing locally on 2026-09-12 |
 | 16 seeded defects + 4 planted non-defects | `target-app/defects.yaml` |
 | 28 ledger event kinds | `store.LedgerKind` |
 | 14 of 15 reproductions → failing test; 13 raised confidence; 2 falsified, one critical 0.90 → 0.10 | `CHANGELOG.md`, 0.0.2 entry, from 22 runs in this project's `.qaas/runs/` |

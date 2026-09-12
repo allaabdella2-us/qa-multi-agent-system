@@ -279,7 +279,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
  * to the wrapper too made each band a grid item, so the five layers laid out
  * as columns instead of stacking. */
 .agent-bands { display: block; }
-.band { margin-bottom: 14px; padding-left: 11px; position: relative; }
+.band { margin-bottom: 10px; padding-left: 11px; position: relative; }
 .band::before {
   content: ""; position: absolute; inset: 2px auto 2px 0; width: 2px;
   border-radius: 2px; background: var(--line);
@@ -298,10 +298,10 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
              color: var(--ink-faint); letter-spacing: 0; text-transform: none; }
 .band-cost { min-width: 54px; text-align: right; color: var(--ink-dim); }
 
-.agents { display: grid; gap: 10px;
-          grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); }
+.agents { display: grid; gap: 6px;
+          grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); }
 .card {
-  border: 1px solid var(--line); border-radius: 9px; padding: 11px;
+  border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px;
   background: var(--bg-card); position: relative; overflow: hidden; text-align: left;
 }
 .card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--line); }
@@ -314,27 +314,32 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .card[data-status="skipped"],
 .card[data-status="never_ran"] { opacity: .55; }
 
-.card .name { font-family: var(--mono); font-weight: 700; font-size: 12.5px; letter-spacing: .02em; }
-.card .layer { font-size: 9.5px; text-transform: uppercase; letter-spacing: .11em;
-               color: var(--ink-faint); }
-.card .layer.unknown { color: var(--k-yellow); }
-.card .state { display: flex; align-items: center; gap: 6px; margin: 7px 0 6px;
-               font-family: var(--mono); font-size: 11px; }
-.card .state .pip { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-faint); }
-.card[data-status="running"] .state .pip { background: var(--accent);
-                                           animation: pulse 1.2s ease-in-out infinite; }
-.card[data-status="done"]    .state .pip { background: var(--k-green); }
-.card[data-status="failed"]  .state .pip { background: var(--k-red); }
-.card .nums { display: flex; gap: 10px; font-family: var(--mono); font-size: 11px;
-              color: var(--ink-dim); }
-.card .nums b { color: var(--ink); font-weight: 600; }
+.card .top { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.card .name { font-family: var(--mono); font-weight: 700; font-size: 11.5px;
+              letter-spacing: .02em; overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; }
+.card .state { margin-left: auto; font-family: var(--mono); font-size: 10px;
+               color: var(--ink-faint); white-space: nowrap; }
+.card .pip { width: 5px; height: 5px; border-radius: 50%; flex: none;
+             background: var(--ink-faint); align-self: center; }
+.card[data-status="running"] .pip { background: var(--accent);
+                                    animation: pulse 1.2s ease-in-out infinite; }
+.card[data-status="done"]    .pip { background: var(--k-green); }
+.card[data-status="failed"]  .pip { background: var(--k-red); }
+.card .nums { display: flex; gap: 8px; margin-top: 3px; font-family: var(--mono);
+              font-size: 10.5px; color: var(--ink-faint); }
+.card .nums b { color: var(--ink-dim); font-weight: 600; }
+.card .nums > b:first-child { color: var(--ink); }
 .card .tool {
-  margin-top: 7px; font-family: var(--mono); font-size: 10.5px; color: var(--k-cyan);
+  margin-top: 4px; font-family: var(--mono); font-size: 10px; color: var(--k-cyan);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.card .why { margin-top: 6px; font-size: 10.5px; color: var(--ink-faint); }
-.card .err { margin-top: 6px; font-size: 10.5px; color: var(--k-red);
-             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .why, .card .err {
+  margin-top: 4px; font-size: 10px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card .why { color: var(--ink-faint); }
+.card .err { color: var(--k-red); }
 .card .warn-chip { color: var(--k-yellow); }
 
 /* ---------- timeline ---------- */
@@ -607,7 +612,12 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   color: var(--k-cyan); padding: 1px 4px; border-radius: 3px;
   overflow-wrap: anywhere;
 }
-.config-detail .facts { margin-bottom: 6px; }
+/* `auto-fit` collapses the track list, so a lone fact stretched the full
+   panel width for one dropdown. `auto-fill` keeps the tracks. */
+.config-detail .facts {
+  margin-bottom: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 230px));
+}
 /* A fact can hold a filesystem path, which is longer than any card. Wrap it
  * rather than letting it run off the right edge of the panel. */
 .config-detail .fact { min-width: 0; }
@@ -671,3 +681,41 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
   .config-nav { display: flex; flex-wrap: wrap; gap: 4px; }
   .config-nav button { width: auto; }
 }
+
+/* ---------- editable overrides ----------
+ *
+ * A control inside the same card shape as a read-only fact, so the panel reads
+ * as instrumentation with a few adjustable dials rather than as a form. Only
+ * tuning is editable; a policy is displayed and never input.
+ */
+
+.fact.editable { padding-bottom: 6px; }
+.edit {
+  width: 100%; background: none; border: 0; border-bottom: 1px dashed var(--line);
+  color: var(--ink); font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+  padding: 1px 0 3px; outline: none; border-radius: 0;
+  -webkit-appearance: none; appearance: none;
+}
+.edit:hover  { border-bottom-color: var(--ink-faint); }
+.edit:focus  { border-bottom-color: var(--accent); border-bottom-style: solid; }
+select.edit  { cursor: pointer; }
+select.edit option { background: var(--bg-card); color: var(--ink); }
+.config-detail.saving { opacity: .55; pointer-events: none; }
+
+.reset {
+  display: block; width: 100%; margin-top: 10px; padding: 7px 9px;
+  border-radius: 6px; border: 1px dashed var(--line); background: none;
+  color: var(--ink-faint); font-size: 11px;
+}
+.reset:hover { color: var(--k-red); border-color: rgba(228,102,111,.45);
+               border-style: solid; }
+
+#toast {
+  position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 12px);
+  padding: 8px 14px; border-radius: 7px; background: var(--bg-card);
+  border: 1px solid var(--line); color: var(--ink-dim); font-size: 11.5px;
+  box-shadow: 0 8px 28px var(--shadow); opacity: 0; pointer-events: none;
+  transition: opacity .16s, transform .16s; z-index: 60; max-width: 70vw;
+}
+#toast.on  { opacity: 1; transform: translate(-50%, 0); }
+#toast.bad { color: var(--k-red); border-color: rgba(228,102,111,.45); }

@@ -193,12 +193,103 @@ def test_index_and_static_are_served(client: TestClient) -> None:
     assert client.get("/static/index.html").status_code == 200
 
 
-def test_no_route_writes_anything(client: TestClient) -> None:
-    # The dashboard is read-only by construction. If a POST ever appears, this
-    # is the test that should have to change first.
+#: The single route on this page allowed to write, and what it may write. The
+#: old form of this test asserted every route was a GET and said "if a POST
+#: ever appears, this is the test that should have to change first". It did.
+#: What replaces it is narrower, not weaker: one path, named here, and a second
+#: test proving that path cannot reach a policy.
+WRITE_ROUTES = {"/api/config/override"}
+
+
+def test_only_the_override_route_writes(client: TestClient) -> None:
     for route in build_app(Dashboard(Path("."))).routes:
         methods = getattr(route, "methods", None) or {"GET"}
-        assert methods <= {"GET", "HEAD"}, route
+        if methods <= {"GET", "HEAD"}:
+            continue
+        assert route.path in WRITE_ROUTES, (
+            f"{route.path} accepts {sorted(methods)}. A new writing route on "
+            "the dashboard is an architectural change, not a feature: add it "
+            "here deliberately or not at all."
+        )
+
+
+def test_the_write_route_cannot_touch_a_policy(tmp_path: Path) -> None:
+    """Tuning, never permission — the reason a POST is acceptable here at all.
+
+    A page on loopback is still reachable by anything running as this user. It
+    may change which model an agent runs; it must not be able to widen what
+    that agent may write, which is the matrix `guardrails.py` enforces.
+    """
+    import shutil
+
+    from qaas.config import load_config
+
+    config = tmp_path / "cfg"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config",
+                    config)
+    cfg = load_config(search=[config])
+    before = list(cfg.agents["FIXER"].policy.write_paths)
+    client = TestClient(build_app(Dashboard(tmp_path, cfg=cfg, config_dirs=[config])))
+
+    for payload in (
+        {"section": "agents", "agent": "FIXER", "values": {"policy": {"write_paths": ["/"]}}},
+        {"section": "agents", "agent": "FIXER", "values": {"builtin_tools": ["Bash"]}},
+        {"section": "agents", "agent": "FIXER", "values": {"must_call": []}},
+        {"section": "agents", "agent": "FIXER", "values": {"mcp_servers": ["vcs"]}},
+    ):
+        response = client.post("/api/config/override", json=payload)
+        assert response.status_code == 400, payload
+        assert "guardrails" in response.json()["error"]
+
+    assert load_config(search=[config]).agents["FIXER"].policy.write_paths == before
+
+
+def test_a_tunable_field_round_trips(tmp_path: Path) -> None:
+    """The thing the door is for, and that deleting the file undoes all of it."""
+    import shutil
+
+    from qaas.config import load_config
+
+    config = tmp_path / "cfg"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config",
+                    config)
+    cfg = load_config(search=[config])
+    client = TestClient(build_app(Dashboard(tmp_path, cfg=cfg, config_dirs=[config])))
+
+    assert client.post("/api/config/override", json={
+        "section": "agents", "agent": "FIXER", "values": {"model": "claude-opus-4-7"},
+    }).status_code == 200
+    reloaded = load_config(search=[config])
+    assert reloaded.agents["FIXER"].model == "claude-opus-4-7"
+    # The fork it is not: everything else about the agent still comes from the
+    # packaged file, so a later change to its policy still reaches this project.
+    assert reloaded.agents["FIXER"].policy.write_paths == cfg.agents["FIXER"].policy.write_paths
+
+    assert client.post("/api/config/override", json={"reset": True}).status_code == 200
+    assert load_config(search=[config]).agents["FIXER"].model == "claude-opus-5"
+
+
+def test_a_value_that_would_not_load_is_refused_before_it_is_written(tmp_path: Path) -> None:
+    """Validated against a real `load_config` first.
+
+    Writing and validating afterwards leaves a project whose every command
+    fails until someone finds the file.
+    """
+    import shutil
+
+    from qaas.config import OVERRIDES_FILE, load_config
+
+    config = tmp_path / "cfg"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config",
+                    config)
+    client = TestClient(build_app(
+        Dashboard(tmp_path, cfg=load_config(search=[config]), config_dirs=[config])))
+
+    response = client.post("/api/config/override", json={
+        "section": "thresholds", "values": {"min_confidence_to_file": "banana"},
+    })
+    assert response.status_code == 400
+    assert not (config / OVERRIDES_FILE).exists(), "a refused value was written anyway"
 
 
 def test_config_is_served_and_names_the_roster(run_root: Path) -> None:
