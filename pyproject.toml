@@ -4,7 +4,7 @@
 name = "qaas-python"
 version = "0.0.2"
 description = "A multi-agent QA system: finds real defects, reproduces them, files tickets, fixes them, and proves the fix"
-readme = "README.md"
+dynamic = ["readme"]
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
@@ -51,8 +51,29 @@ Issues = "https://github.com/allaabdella2-us/qa-multi-agent-system/issues"
 Changelog = "https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/CHANGELOG.md"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-fancy-pypi-readme"]
 build-backend = "hatchling.build"
+
+# The README keeps relative paths, because local previews and GitHub are where it
+# is actually read and a relative path shows the file sitting next to it. PyPI
+# resolves nothing against the repository and the sdist ships README.md without
+# docs/, so the project page would show a broken image. This rewrites the paths
+# to absolute at build time: one README, both audiences, no copy to keep in sync.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+# Images -> raw.githubusercontent, which serves bytes.
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = 'src="(?!https?://)([^"]+)"'
+replacement = 'src="https://raw.githubusercontent.com/allaabdella2-us/qa-multi-agent-system/main/\1"'
+
+# Links -> github.com/blob, which serves a page. In-page anchors are left alone.
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|#)([^)]+)\)'
+replacement = '](https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/\1)'
 
 [tool.hatch.build.targets.wheel]
 # Non-.py files under this tree ship too, which is how prompts/ already reaches
