@@ -1018,3 +1018,31 @@ $("config-search").addEventListener("input", (event) => {
   cfgState.filter = event.target.value;
   renderConfigList();
 });
+
+/* ---------- theme ----------
+ *
+ * Three states, not two: explicit light, explicit dark, and no choice at all —
+ * which is the default and follows the operating system. The button cycles
+ * between the two explicit states, because someone who clicks a theme switch
+ * wants the theme they picked to stick, including when their system flips at
+ * sunset.
+ *
+ * `index.html` reads the stored value in a blocking inline script so the first
+ * paint is already correct; this only handles the click.
+ */
+$("theme").addEventListener("click", () => {
+  const root = document.documentElement;
+  const current = root.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  const next = current === "dark" ? "light" : "dark";
+  root.dataset.theme = next;
+  try {
+    localStorage.setItem("qaas-theme", next);
+  } catch (err) {
+    // A private window or blocked site data. The theme still applies for this
+    // page; it just will not survive a reload, which is better than throwing.
+  }
+  // Nothing else to repaint: the timeline is drawn SVG, but every fill it
+  // writes is a `var(--k-*)` string rather than a resolved colour, so it
+  // follows the tokens without being redrawn. Keep it that way.
+});

@@ -47,6 +47,26 @@ The fan-out escalation now leads the escalation list and names the count and the
 cap, rather than arriving third in a list of sixteen — it is the line that
 explains the bill.
 
+### Light and dark
+
+A toggle in the top bar, and a full light palette behind it. Three states, not
+two: explicit light, explicit dark, and no choice at all — which is the default
+and follows the operating system, so a page opened on a light machine is light
+without anyone having to ask for it.
+
+Getting there meant tokenising four surfaces that had been written as literal
+hex inside their rules. A literal is a colour the second palette cannot reach,
+which is how a page that "supports light mode" ends up with three black panels
+in it; a test now fails on any opaque colour outside a palette block, and
+another fails if either light palette stops redefining a token the dark one
+sets. The event colours are darkened rather than reused: a refusal and a
+regression have to catch the eye at the same speed against white as against
+near-black.
+
+The stored choice is read in a blocking inline script in the head. `app.js` is
+a module, so it runs after first paint, and choosing the theme there showed a
+frame of the wrong one on every load.
+
 ### A configuration view
 
 `qaas dashboard` grew a second half. The runs view answers "what happened"; the

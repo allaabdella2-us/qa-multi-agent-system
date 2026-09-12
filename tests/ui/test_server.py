@@ -244,3 +244,79 @@ def test_score_keeps_the_counts_as_counts(run_root: Path, tmp_path: Path) -> Non
     assert isinstance(body["false_positives"], int)
     assert isinstance(body["false_positive_ids"], list)
     assert isinstance(body["missed"], list)
+
+
+# -- theme ------------------------------------------------------------------
+#
+# The page ships two palettes. There is no Python behind them, so what can be
+# asserted is the part that silently rots: a colour written as a literal inside
+# a rule is one the second palette cannot reach, which is how a page that
+# "supports light mode" ends up with three black panels in it.
+
+
+def _css() -> str:
+    from qaas.ui.server import STATIC_DIR
+
+    return (STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+
+def test_both_palettes_define_every_token() -> None:
+    """A half-swapped palette is worse than either theme on its own.
+
+    The event colours were chosen against a near-black ground; `--k-bold` is
+    `#f2f5fa`, which is invisible on white. Every token the dark palette
+    defines has to be redefined rather than inherited.
+    """
+    import re
+
+    def tokens(text: str) -> set[str]:
+        return set(re.findall(r"(--[a-z0-9-]+)\s*:", text))
+
+    blocks = re.findall(r"\{([^{}]*)\}", _css())
+    dark = tokens(blocks[0])
+    assert "--bg" in dark, "the :root dark palette should be the first block"
+
+    # *Every* light block, not the largest one. There are two -- the media
+    # query for someone who never touched the toggle, and the attribute
+    # selector for the choice itself -- and checking only one lets the other
+    # drift until a theme is half applied depending on the system setting.
+    light_blocks = [b for b in blocks[1:] if "--bg:" in b]
+    assert len(light_blocks) == 2, (
+        f"expected a media-query palette and a [data-theme] palette, "
+        f"found {len(light_blocks)}"
+    )
+    # The type faces are the same in both themes; everything else is a colour.
+    for index, block in enumerate(light_blocks):
+        missing = dark - tokens(block) - {"--mono", "--sans"}
+        assert not missing, f"light palette {index} never redefines: {sorted(missing)}"
+
+
+def test_no_opaque_colour_is_written_outside_a_palette_block() -> None:
+    """A literal hex in a rule cannot be themed.
+
+    Translucent `rgba()` accents are fine — they tint whatever is beneath them
+    and work in both. An opaque hex is a surface, and a surface must be a token.
+    """
+    import re
+
+    css = _css()
+    body = css[css.index("* { box-sizing"):]          # past both palettes
+    literals = [m for m in re.findall(r":\s*(#[0-9a-fA-F]{3,8})\b", body)]
+    assert not literals, f"untokenised surfaces: {literals}"
+
+
+def test_the_theme_is_chosen_before_first_paint() -> None:
+    """`app.js` is a module, so it runs after the document has rendered.
+
+    Choosing the theme there shows a frame of the wrong one on every load. The
+    stored value is read in a blocking inline script in the head instead.
+    """
+    from qaas.ui.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    head = html[: html.index("</head>")]
+    assert "qaas-theme" in head, "the stored theme is not read before paint"
+    assert 'data-theme="dark"' not in html, (
+        "a hardcoded theme attribute would override the stored choice and "
+        "prefers-color-scheme both"
+    )
