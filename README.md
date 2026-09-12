@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🐦‍⬛ qaas
+<img src="docs/logo.jpg" alt="qaas — Agentic QA Harness" width="620">
 
-### A multi-agent QA system that finds real defects — and proves it
+# A multi-agent QA system that finds real defects — and proves it
 
 **Reads your application → finds defects → reproduces each with a failing test → files the ticket → fixes it → reviews the fix → verifies it.**
 
