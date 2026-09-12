@@ -161,3 +161,50 @@ def test_two_targets_and_no_name_stays_unresolved(tmp_path, monkeypatch):
     (cfgdir / "targets" / "b.yaml").write_text("name: b\nroot: .\n")
     cfg = load_config(search=(cfgdir, PACKAGED_CONFIG))
     assert cfg.target is None and cfg.profile is None
+
+
+# -- the dashboard's static assets ------------------------------------------
+
+
+def test_the_dashboard_assets_resolve_from_the_package_not_the_checkout():
+    """`qaas dashboard` serves files, which is the shape of the bug above.
+
+    The assets live beside `qaas/ui/server.py` and are found with
+    `Path(__file__).parent`, so they resolve identically from a checkout and
+    from `site-packages`. Hatchling ships every non-`.py` file under
+    `src/qaas/`, so no packaging rule has to name them -- but nothing else in
+    the suite would notice if one went missing, and a dashboard whose stylesheet
+    404s is exactly as broken as a CLI with no config.
+    """
+    from qaas.ui.server import STATIC_DIR
+
+    assert STATIC_DIR.is_dir(), STATIC_DIR
+    assert STATIC_DIR.is_relative_to(package_root())
+    for name in ("index.html", "app.css", "app.js"):
+        asset = STATIC_DIR / name
+        assert asset.is_file(), f"{name} is missing from {STATIC_DIR}"
+        assert asset.stat().st_size > 0, name
+
+
+def test_the_read_model_does_not_need_the_ui_extra(monkeypatch):
+    """`qaas.ui.state` must import with no web dependency installed.
+
+    That separation is what lets the read model be covered by the default
+    offline suite whether or not `[ui]` is present -- and what makes a missing
+    extra a sentence from `require_extra()` rather than an ImportError from an
+    unrelated command.
+    """
+    import ast
+
+    source = (package_root() / "ui" / "state.py").read_text(encoding="utf-8")
+    imported = {
+        node.module.split(".")[0]
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom) and node.module
+    } | {
+        alias.name.split(".")[0]
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert not imported & {"starlette", "uvicorn", "sse_starlette", "fastapi"}, imported

@@ -18,6 +18,7 @@ from qaas import trace as trace_mod
 from qaas.paths import Workspace, package_root, packaged_prompts, project_root
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config, target_files
 from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
+from qaas.ui.serve import DEFAULT_PORT
 
 #: Colour by what a line *means*, not by which subsystem wrote it: a refusal and
 #: a regression should catch the eye at the same speed in a 2000-line timeline.
@@ -1060,6 +1061,102 @@ def map(root: Path = Root, version: str | None = None) -> None:
     console.print_json(data=payload)
 
 
+def _start_dashboard(root: Path, config_dir: Path | None) -> str | None:
+    """Bring the dashboard up *before* the first agent dispatches.
+
+    The same reasoning as the Jira board above: a view that appears once the run
+    is over is a report, not something to watch it on. It never fails a run --
+    the findings matter more than the view -- so a missing `[ui]` extra or a
+    busy port is a line of output, not an exit.
+    """
+    from qaas.ui import MissingUIExtra
+    from qaas.ui.serve import build, free_port, serve_in_background
+
+    try:
+        app_ = build(root, **_dashboard_kwargs(config_dir))
+        port = free_port("127.0.0.1", DEFAULT_PORT)
+    except (MissingUIExtra, OSError) as exc:
+        console.print(f"[yellow]dashboard not started: {exc}[/yellow]")
+        return None
+    serve_in_background(app_, "127.0.0.1", port)
+    url = f"http://127.0.0.1:{port}/"
+    console.print(f"[dim]dashboard:[/dim] {url}")
+    return url
+
+
+@app.command()
+def dashboard(
+    run_id: str = typer.Argument(None, help="Run to open. Defaults to the live run, else the newest."),
+    config_dir: Path | None = ConfigDir,
+    root: Path = Root,
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Interface to bind. Leave it on localhost: the ledger carries agent task "
+        "previews, refused command lines and target paths.",
+    ),
+    port: int = typer.Option(DEFAULT_PORT, "--port", help="Port to bind; the next few are tried if it is taken."),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open a browser at the URL."),
+) -> None:
+    """Watch a run in a browser: agents, phases, findings, refusals, cost.
+
+    Read-only. It shows a run; it cannot start one.
+    """
+    from qaas.ui import MissingUIExtra
+    from qaas.ui.serve import build, free_port, open_browser as launch, serve
+    from qaas.ui.state import pick_run
+
+    chosen = pick_run(root, run_id)
+    if chosen is None:
+        console.print("[dim]no runs yet — qaas run --mode pr-check[/dim]")
+        raise typer.Exit(1)
+
+    try:
+        app_ = build(root, **_dashboard_kwargs(config_dir))
+    except MissingUIExtra as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(1) from None
+
+    bound = free_port(host, port)
+    url = f"http://{host}:{bound}/#{chosen}"
+    live = "[green]live[/green]" if _is_live(root, chosen) else "[dim]finished[/dim]"
+    console.print(f"[bold]qaas dashboard[/bold]  {url}")
+    console.print(f"[dim]showing[/dim] {chosen} ({live})  [dim]ctrl-c to stop[/dim]")
+    if open_browser:
+        launch(url)
+    try:
+        serve(app_, host, bound)
+    except KeyboardInterrupt:  # pragma: no cover - interactive only
+        pass
+
+
+def _is_live(root: Path, run_id: str) -> bool:
+    from qaas.ui.state import is_live
+
+    return is_live(RunStore(run_id, root=root, create=False))
+
+
+def _dashboard_kwargs(config_dir: Path | None) -> dict:
+    """Agent specs and the golden ledger, when a config can be loaded.
+
+    A project with no config is a legitimate state -- `pip install` then `qaas
+    dashboard` in a directory holding only `.qaas/runs/` should still open. The
+    specs only enrich the view with each agent's layer and model; without them
+    the grid still renders, exactly as it does for a run naming agents from a
+    roster that no longer exists.
+    """
+    try:
+        cfg = load_config(config_dir)
+    except Exception:
+        return {}
+    ledger = _ledger_path(cfg)
+    return {
+        "specs": dict(cfg.agents),
+        "min_confidence": cfg.thresholds.min_confidence_to_file,
+        "ledger_path": ledger if ledger and ledger.exists() else None,
+    }
+
+
 @app.command()
 def run(
     mode: str = typer.Option(..., "--mode", "-m", help="Run mode from system.yaml."),
@@ -1072,6 +1169,9 @@ def run(
     run_id: str = typer.Option(None, "--run-id", help="Continue an existing run rather than starting one."),
     ticket: list[str] = typer.Option(None, "--ticket", help="Restrict a fix-cycle to these tickets."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Render the plan without calling the API."),
+    dashboard_: bool = typer.Option(
+        False, "--dashboard", help="Serve the live dashboard alongside the run."
+    ),
     force: bool = typer.Option(False, "--force", help="With --repo: regenerate the target profile instead of reusing it."),
 ) -> None:
     """Execute a run. Costs real money unless --dry-run."""
@@ -1176,6 +1276,7 @@ def run(
     # Before the first agent, not after the first ticket: the board is what
     # someone watches a run *on*, and one that appears at the end is a report.
     board_info = _ensure_board(cfg)
+    dash_url = _start_dashboard(root, config_dir) if dashboard_ else None
 
     def on_event(kind: str, detail: dict) -> None:
         if kind == "agent_started":
@@ -1194,6 +1295,8 @@ def run(
     console.print()
     console.print_json(data=report.summary())
     console.print(f"\n[dim]watch it back:[/dim] qaas trace {report.run_id}")
+    if dash_url:
+        console.print(f"[dim]dashboard:[/dim] {dash_url}#{report.run_id}")
     if board_info is not None and board_info.url:
         console.print(f"[dim]board:[/dim] {board_info.url}")
     if report.failed or report.stopped_early:

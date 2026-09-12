@@ -10,7 +10,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/qaas-python?color=3776AB&logo=python&logoColor=white)](https://pypi.org/project/qaas-python/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml/badge.svg)](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-767%20offline-success)](#-contributing)
+[![Tests](https://img.shields.io/badge/tests-830%20offline-success)](#-contributing)
 [![Built on](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-D97757)](https://docs.claude.com/en/api/agent-sdk/overview)
 
 [Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Roadmap](#️-roadmap) · [Architecture](ARCHITECTURE.md)
@@ -39,12 +39,29 @@ the rest.
 
 | | |
 |---|---|
-| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **767 tests run offline, free, with no API key.** |
+| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **830 tests run offline, free, with no API key.** |
 | 🧱 **Every agent is its own `query()`** | Not subagents of a shared parent. Each gets a real context boundary, an enforceable tool allowlist, and its own cost number. |
 | 🔬 **Evidence or it did not happen** | `has_evidence()` and `is_fileable()` are methods on the envelope model, not requests in a prompt. An agent cannot talk its way past them. |
 | 📊 **Measured, not asserted** | A deliberately buggy demo app ships with a golden ledger of **16 seeded defects + 4 planted non-defects**. `qaas score` reports recall *and* precision, so a prompt change has a number attached. |
 | 🔒 **Merge is impossible by construction** | No merge method exists anywhere. `gh pr merge` is refused. Pull requests open as drafts. Shipping stays a human decision. |
 | 🔍 **Every action is on the record** | 28 kinds of ledger event — every tool call, denial, verdict and escalation. `qaas trace` reads it back as a timeline. |
+
+---
+
+## 📺 Watch it work
+
+```bash
+pip install 'qaas-python[ui]'
+qaas run --mode pr-check --dashboard    # or: qaas dashboard
+```
+
+<div align="center">
+  <img src="docs/dashboard.png" alt="The qaas dashboard during a live run: a phase rail with map, discover, reproduce and file lit and verify and report struck through; one card per agent showing its cost, findings and the tool it is calling right now; a timeline lane per agent; findings by severity with their Jira keys; and the ledger streaming on the right." width="900">
+</div>
+
+Fifteen agents do not run in one scrolling column. The dashboard is
+**read-only** — it shows a run, it cannot start one — and it reads the same
+`ledger.jsonl` that `qaas trace` does, so it opens finished runs too.
 
 ---
 
@@ -386,7 +403,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest                 # 767 tests, offline, free — keep it that way
+pytest                 # 830 tests, offline, free — keep it that way
 pytest -m docker       # needs: cd target-app && docker compose up -d
 qaas validate
 ```
