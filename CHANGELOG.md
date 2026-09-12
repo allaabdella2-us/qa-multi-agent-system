@@ -7,8 +7,24 @@
 `thresholds.reproduce_min_severity` (default `major`) decides which findings are
 worth a REPRODUCER context. Reproduction is the one phase whose cost scales with
 *findings* rather than agents, and each dispatch is a fresh frontier-model
-context — a nightly run that found 85 mostly-minor issues queued 85 of them,
-spent $45 and filed nothing.
+context: a nightly run that found 85 issues, most of them minor, spent $45 there
+and filed nothing.
+
+That number is worth reading closely, because it says where each control
+applies. `max_findings_per_agent_run` had already held that run to **25**
+dispatches — 25 × ~$1.75 is the $45 — and the cap has always taken the most
+severe findings first. So on a run that exceeds the cap, the cap is the lever and
+this floor changes little; lower the cap if that is the run you have. The floor
+is for the ordinary run that never reaches it, which is every run in this
+project's own history: across 22 of them it takes reproduction from 132
+dispatches to 98, roughly $231 to $172.
+
+What that buys is measurable in the same 22 runs. Of the 15 findings REPRODUCER
+actually took, 14 produced a committed failing test and 13 came back with their
+confidence raised. Two were falsified — including a `critical` "read-only viewer
+can create and place orders" that went 0.90 → 0.10 and would otherwise have been
+filed. A floor of `major` still catches that one. The one it gives up is a
+`minor` accessibility false positive.
 
 A finding below the floor is **still filed**, on the evidence discovery already
 produced: `is_fileable` asks for evidence, confidence and "not
