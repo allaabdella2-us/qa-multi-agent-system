@@ -27,10 +27,12 @@ Fifteen agents, each with its own context, tool allowlist and budget, coordinate
 a state machine that is ordinary Python — because a model cannot enforce a budget
 it is itself spending.
 
-They never talk to each other. They coordinate through **the board** — the same
-one your team already reads. That is the whole trick: a ticket is the shared
-memory, the work queue and the audit trail at once, and it is the only thing that
-crosses between them.
+They never message each other. Work moves between them on **the board you already
+use** — a finding becomes a ticket, and the ticket moves To Do → In Progress →
+Done as agents pick it up and finish with it. Most agent systems build a private
+bus and then a dashboard so people can watch it; here the coordination channel is
+the surface your team already reads, so tickets moving is not a picture of the
+system working — it *is* the system working.
 
 <div align="center">
   <img src="docs/roster.png" alt="The fifteen agents by phase: Map — Mapper. Discovery, eight agents — Architect, API, Browser, DBA, Auditor, Socket, Guide, Load. Triage, two — Reproducer and Triage. Remediation, two — Fixer and Reviewer. Verify — Verifier. Reporting — Reporter." width="900">
@@ -46,7 +48,7 @@ the rest.
 
 | | |
 |---|---|
-| 📋 **Coordination you can watch** | A finding becomes a ticket, and the ticket moves To Do → In Progress → Done as agents pick it up and finish with it. Nothing to learn: watching the system work is watching your board. |
+| 📋 **The board is the work queue** | Agents pick work up from the tracker and move it as they go. Every ticket carries its repo label and defect fingerprint, stamped in code rather than asked of a model — so the queue is also the provenance. |
 | 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **830 tests run offline, free, with no API key.** |
 | 🧱 **Every agent is its own `query()`** | Not subagents of a shared parent. Each gets a real context boundary, an enforceable tool allowlist, and its own cost number. |
 | 🔬 **Evidence or it did not happen** | `has_evidence()` and `is_fileable()` are methods on the envelope model, not requests in a prompt. An agent cannot talk its way past them. |
