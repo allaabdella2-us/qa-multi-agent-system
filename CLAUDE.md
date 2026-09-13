@@ -4,15 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`qaas` — a multi-agent QA system built on the Claude Agent SDK. Agents read a
-target application, find defects, reproduce them, and file tickets. It is built
+`qaas` — a harness around Claude Code itself, not a program that calls an API.
+Each agent is a real Claude Code session (see "Two things that shape
+everything"): its own process, context, tool allowlist and budget, run in a
+phase order by a Python state machine that can refuse any tool call any of them
+makes. Agents read a target application, find defects, reproduce them into
+failing tests, file tickets, fix them and verify the fix. It is built
 to the design in `qa-agent-system-architecture.md`; `BUILD_PLAN.md` is the
 milestone checklist. Code comments cite that document by section (`§8.1`,
 `§5.3`) — when changing behaviour those sections describe, read the section
 first, and update the plan's milestone table when work lands. `ARCHITECTURE.md`
 walks the code as it now stands, `MANUAL.md` is the user-facing command
-reference and `tutorial/` a nine-chapter tour — a change that outdates this file
-usually outdates those too.
+reference, `docs/dashboard.md` covers `qaas dashboard`, `PROVIDERS_PLAN.md` is
+the staged plan for making the model a choice, and `tutorial/` a nine-chapter
+tour — a change that outdates this file usually outdates those too.
 
 ## Commands
 
@@ -32,19 +37,35 @@ qaas doctor --target corvid              # what a target makes possible
 qaas prompts list / eject / diff         # prompt overrides in .qaas/prompts/
 qaas tracker-check                       # Jira credentials, before spending anything
 qaas run --mode pr-check --dry-run       # renders each agent's options, no API call
-qaas run --mode nightly --only API   # real run, costs money
+qaas run --mode nightly --only API       # real run, costs money
+qaas run --mode fix-cycle --from-board "Ready for Fix"   # the board picks the work
 qaas runs / qaas show <run-id> / qaas map
-qaas trace <run-id> --follow --quiet     # watch a live run's decisions
+qaas trace <run-id> [--follow] [--quiet] [--agent NAME] [--kind KIND] [--json]
+qaas dashboard [<run-id>]                # the ledger and the config, in a browser
 qaas board                               # find-or-create this target's Jira board
-qaas trace <run-id> [--agent NAME] [--kind KIND] [--json]   # the ledger, readably
 qaas score [<run-id>]                    # recall/precision against the golden ledger
 qaas sweep                               # run + score + fail below the precision gate
 
 cd target-app && docker compose up -d    # the demo app under test
 ```
 
+**Before pushing, run what CI runs** (`.github/workflows/ci.yml`) — there is no
+linter or formatter configured, so these three are the whole gate:
+
+```bash
+pytest -q                                # offline, free, no API key
+qaas validate                            # config, prompts and allowlists cohere
+qaas run --mode pr-check --dry-run       # every agent's options assemble
+```
+
+CI adds one more on the packaging job: the wheel must not contain `target-app/`.
+
 Markers `llm`, `docker`, `github`, `jira` are deselected by `addopts`; the
 default `pytest` run is offline and free, and must stay that way.
+
+`qaas dashboard` needs the `[ui]` extra and reads `.qaas/` **relative to the
+working directory** — run it from the target project's checkout, not from here,
+or you will be looking at the demo app's runs.
 
 ## Architecture
 
