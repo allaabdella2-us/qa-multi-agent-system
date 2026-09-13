@@ -143,6 +143,47 @@ auth:
 
 ---
 
+### Overriding a value
+
+Model, effort, turn caps and thresholds can be changed without editing a
+committed file. They live in `overrides.yaml` beside your config:
+
+```yaml
+# .qaas/config/overrides.yaml
+agents:
+  FIXER:
+    model: claude-opus-4-7      # a different model for this agent only
+    max_turns: 60
+  LOAD:
+    enabled: false              # keep it out of every roster
+thresholds:
+  min_confidence_to_file: 0.75
+  reproduce_min_severity: critical
+```
+
+`qaas run --dry-run` shows the result immediately. Delete the file and every
+value returns to what shipped. The **configuration** tab of `qaas dashboard`
+edits this file through a form, which is the same thing with fewer typos.
+
+**This layer merges; every other one replaces whole.** Dropping an
+`agents/fixer.yaml` into `.qaas/config/agents/` shadows the packaged file
+*entirely* — right when you are forking an agent, wrong when you want to change
+one line, because the fork freezes that agent's policy, prompt and tool list on
+the day you copied it and later fixes never reach you.
+
+> [!WARNING]
+> **Only tuning lives here.** An agent's `policy`, `mcp_servers`,
+> `builtin_tools`, `skills` and `must_call` are ignored in this file however
+> they are written. Those are the write-permission matrix the guardrails
+> enforce, and they are changed in `agents/<name>.yaml`, where a human reads a
+> diff. Editable: `model`, `effort`, `max_turns`, `max_budget_usd`, `enabled`,
+> and every `thresholds:` value.
+
+Run `qaas score` after changing a threshold or a model. It is the only way to
+know whether the change helped rather than just changed something.
+
+---
+
 ## 🎛️ Run modes
 
 | mode | agents | when |
@@ -260,13 +301,40 @@ refusal the guardrails issued as it happens.
 | `--host H` | default `127.0.0.1`. Leave it there — the ledger carries agent task previews, refused command lines and your target's paths |
 | `--no-open` | do not open a browser |
 
-It is **read-only**: it shows a run, it cannot start one, file anything or spend
-anything. Ctrl-c stops the view and never the run, exactly like `--follow`.
-
 Two things it shows that the CLI does not. A **skipped** agent says why it was
 skipped, which is the answer to "why didn't BROWSER run". And an agent named by
 an older roster is drawn as `not in this roster` rather than dropped, so runs
 recorded before a rename still open.
+
+It **cannot start a run, file a ticket, write a branch or touch your target**.
+Ctrl-c stops the view and never the run, exactly like `--follow`. The one thing
+it can write is `overrides.yaml` — see [Overriding a value](#overriding-a-value).
+
+> [!IMPORTANT]
+> It reads `.qaas/` relative to the directory you start it in. From your
+> application's checkout you get that application's runs; from the qaas checkout
+> you get the demo app's.
+
+`qaas run --dashboard` serves from a background thread, so the page ends with the
+run. Start `qaas dashboard` in its own terminal to keep watching afterwards.
+
+#### The configuration half
+
+The **configuration** tab in the top bar answers the other question: not what
+happened, but what *would* happen. Eleven sections — the roster with each
+agent's model, tools, skills and output contract; which prompt is in force and
+from which layer; the MCP servers and who may use each; the thirty skills; the
+three hook events; the write-permission matrix per agent; the run modes; every
+governor with the sentence saying what it costs; the target; and the settings.
+
+It is the same object graph `qaas validate`, `qaas prompts list`, `qaas doctor`
+and `qaas run --dry-run` print, in one place instead of four terminal tables,
+plus two answers those do not give: **which file defined this agent and what it
+shadows**, and **which credential variables are set** (never their values).
+
+There is a light/dark toggle at the right of the top bar.
+
+[The full guide is in `docs/dashboard.md`.](docs/dashboard.md)
 
 ### Measuring
 
@@ -527,8 +595,11 @@ summary of it — nothing is hidden from you.
 | document | for |
 |---|---|
 | [README](README.md) | what this is and why |
+| [docs/dashboard.md](docs/dashboard.md) | the dashboard: both views, editing overrides, what it cannot do |
+| [docs/jira-setup.md](docs/jira-setup.md) | connecting a real Jira, end to end |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | the system in one document |
-| [qa-agent-system-architecture.md](qa-agent-system-architecture.md) | the original design, including the 8 agents not yet built |
+| [tutorial/](tutorial/) | a nine-chapter tour of how it is built |
+| [qa-agent-system-architecture.md](qa-agent-system-architecture.md) | the original design this was built to |
 
 ---
 

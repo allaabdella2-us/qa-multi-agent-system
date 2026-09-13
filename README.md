@@ -69,9 +69,14 @@ qaas run --mode pr-check --dashboard    # or: qaas dashboard
   <img src="docs/dashboard.png" alt="The qaas dashboard during a live run: a phase rail with map, discover, reproduce and file lit and verify and report struck through; one card per agent showing its cost, findings and the tool it is calling right now; a timeline lane per agent; findings by severity with their Jira keys; and the ledger streaming on the right." width="900">
 </div>
 
-Fifteen agents do not run in one scrolling column. The dashboard is
-**read-only** — it shows a run, it cannot start one — and it reads the same
-`ledger.jsonl` that `qaas trace` does, so it opens finished runs too.
+Fifteen agents do not run in one scrolling column. It reads the same
+`ledger.jsonl` that `qaas trace` does, so it opens finished runs too — and a
+second **configuration** view shows what every agent is set to: model, tools,
+skills, prompts, the rails and the governors, with the model and the thresholds
+editable in place.
+
+It cannot start a run, file a ticket or touch your target.
+[Full guide](docs/dashboard.md).
 
 ---
 

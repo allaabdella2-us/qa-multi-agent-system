@@ -472,10 +472,26 @@ Four tiers, cheapest first:
 happens — the phase rail, one card per agent, findings, refusals, cost. Three
 properties matter more than anything it draws.
 
-**It is read-only, and structurally so.** Every route is a GET; there is no code
-path from the page to a dispatch, a ticket or a write. A test asserts that the
-route table contains nothing but GET, so adding a POST means changing a test
-that says why it exists.
+**It reads, with one deliberate exception.** There is no code path from the page
+to a dispatch, a ticket, a branch or the target's files. Every route is a GET
+except **one**, and `test_only_the_override_route_writes` names it in
+`WRITE_ROUTES`: adding a second means changing a test that says why it exists.
+
+That one route writes `overrides.yaml`, and the shape of the exception is the
+point — it changes what a model *is* (which model an agent runs, a turn cap, a
+threshold) and never what an agent is *allowed to do*. `config.TUNABLE_AGENT_FIELDS`
+is the whole vocabulary; `policy`, `mcp_servers`, `builtin_tools`, `skills` and
+`must_call` are absent deliberately, because a page reachable by anything
+running as this user must not be a second, quieter door onto the §8.1 matrix
+that `guardrails.py` enforces. A refused field is named in the error rather than
+dropped, and the candidate is validated through a real `load_config` in a
+scratch copy before it lands.
+
+`overrides.yaml` is also the only **partial** config layer in the system.
+Everything else replaces whole — an `agents/fixer.yaml` in a nearer directory
+shadows the packaged file entirely — which is right for forking an agent and
+wrong for changing one line, because the fork freezes that agent's policy and
+prompt on the day it was copied.
 
 **It adds no ledger kind and no router change.** The six phases are never
 written to the ledger — there is no `phase_started` — so the dashboard *derives*
@@ -510,13 +526,22 @@ default offline suite.
 
 Honesty about what is *not* proven, so nobody inherits a false impression:
 
-- **Eight of sixteen agents.** ARCHITECT, DBA, SOCKET, GUIDE, AUDITOR, LOAD and
-  REPORTER are designed but not built.
-- **The extensibility claim is untested.** "A new agent needs only a prompt and a
-  YAML" is the architecture's central promise, and no one has added a ninth agent
-  to check it.
+- **Seeded defects are easier than real ones.** The calibration corpus is a demo
+  app whose bugs the system was told about. A good score there shows the loop
+  works end to end and does not spray false positives; it does not show it will
+  find the hard bug in a codebase nobody planted anything in.
+- **One real repository, not a population.** All fifteen agents have now run
+  against a real application outside this project, and the loop closed there:
+  seventeen findings, ten filed, one fixed on a branch, reviewed, re-verified and
+  moved to Done. That is one data point. Precision on unfamiliar code is still
+  the number this project most needs and least has.
 - **`fix-cycle` leaves the working tree on a `fix/*` branch.** Harmless when
   watched; it would corrupt the next run of an unattended `qaas sweep` on cron.
-- **Only ever run against the bundled demo app**, whose bugs it was told about.
-- **`wont_fix` and `duplicate`** have no matching status in the connected Jira
-  workflow, so those transitions would fail.
+- **`wont_fix` and `duplicate`** have no matching status in a typical Jira
+  workflow, so those transitions fail where the project has not defined them.
+- **A reopen can land on the wrong-looking column.** `open` resolves through an
+  alias list against the project's own statuses, so a workflow whose only
+  open-ish state is `Backlog` reopens to `Backlog`. The transition is correct;
+  the board just does not appear to move.
+- **One provider.** Everything runs on the Claude Agent SDK. The seam is about
+  forty lines and the plan is written (`PROVIDERS_PLAN.md`), but it is a plan.
