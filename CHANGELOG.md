@@ -47,6 +47,24 @@ The fan-out escalation now leads the escalation list and names the count and the
 cap, rather than arriving third in a list of sixteen — it is the line that
 explains the bill.
 
+### Saying what it actually is
+
+Every document now leads with the same sentence, because "built on the Claude
+Agent SDK" sounded like an imported package and undersold the thing by a mile:
+
+> qaas is not a program that calls an API. It is a harness around Claude Code
+> itself. Fifteen real Claude Code sessions, each with its own context, its own
+> tool allowlist, its own budget, run in a phase order by a Python state machine
+> that can refuse any tool call any of them makes.
+
+It is also literally how it works: the SDK resolves `shutil.which("claude")` and
+spawns that binary once per agent invocation. The context boundary, the tool
+allowlist and the per-agent cost number are separate operating-system processes,
+not bookkeeping — which is the difference between a claim and a fact.
+
+The README tagline and the PyPI description are the short form: *a harness that
+runs fifteen governed Claude Code sessions over your repo*.
+
 ### The board can start the work
 
 ```bash

@@ -4,7 +4,7 @@
 
 ### Autonomous Quality Assurance · Agentic QA Harness
 
-**A harness that lets a fleet of governed agents run the entire QA lifecycle autonomously.**
+**A harness that runs fifteen governed Claude Code sessions over your repo.**
 
 Reads your application → finds the defects → files each with its evidence → fixes it → reviews the fix → verifies it → **moves the ticket to Done**.
 
@@ -23,9 +23,11 @@ Reads your application → finds the defects → files each with its evidence �
 
 Most "AI QA" tools generate tests. **This one behaves like a QA team.**
 
-Fifteen agents, each with its own context, tool allowlist and budget, coordinated by
-a state machine that is ordinary Python — because a model cannot enforce a budget
-it is itself spending.
+**qaas is not a program that calls an API. It is a harness around Claude Code
+itself.** Fifteen real Claude Code sessions, each with its own context, its own
+tool allowlist and its own budget, run in a phase order by a Python state
+machine that can refuse any tool call any of them makes — because a model cannot
+enforce a budget it is itself spending.
 
 They never message each other. Work moves between them on **the board you already
 use** — a finding becomes a ticket, and the ticket moves To Do → In Progress →

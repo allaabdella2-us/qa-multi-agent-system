@@ -5,6 +5,13 @@
 refused. The **configuration** view answers *what would happen* — the roster,
 the prompts in force, the servers, the models, the rails and the governors.
 
+Worth knowing before you read a card: qaas is not a program that calls an API.
+It is a harness around Claude Code itself. Each agent card on this page is a
+**real Claude Code session** — its own process, its own context, its own tool
+allowlist, its own budget — run in a phase order by a Python state machine that
+can refuse any tool call any of them makes. The cost on a card is that process's
+cost. The refusals on it were denied before the tool ran.
+
 ```bash
 pip install 'qaas-python[ui]'
 qaas dashboard

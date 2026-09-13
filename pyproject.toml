@@ -3,7 +3,7 @@
 # the CLI are both `qaas`.
 name = "qaas-python"
 version = "0.0.2"
-description = "Autonomous Quality Assurance: a harness that lets a fleet of governed agents run the entire QA lifecycle — find, file, fix, verify"
+description = "A harness that runs fifteen governed Claude Code sessions over your repo: find, reproduce, file, fix, verify"
 dynamic = ["readme"]
 license = "MIT"
 license-files = ["LICENSE"]

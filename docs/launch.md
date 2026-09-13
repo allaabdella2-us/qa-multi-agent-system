@@ -24,7 +24,7 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 > The tickets moving is not a picture of the system working. It *is* the system working.
 >
-> I've open-sourced qaas: a harness that lets a fleet of governed agents run the entire QA lifecycle on their own.
+> I've open-sourced qaas: a harness that runs fifteen governed Claude Code sessions over your repo, to run the entire QA lifecycle on their own.
 >
 > Fifteen agents. One maps your application. Eight go looking for defects: API, browser, database, security, architecture, load. One reproduces each finding into a failing test. One files it. One fixes it, one reviews the fix, one verifies it, and the ticket moves To Do → In Progress → Done on the Jira board your team already reads.
 >
@@ -55,7 +55,7 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 > The design decision that shaped everything in qaas: the orchestrator is code, not a prompt. A model cannot enforce a budget it is itself spending.
 >
-> qaas is an open-source harness that runs fifteen QA agents through map → discover → reproduce → file → fix → review → verify → report, and the router that orders them, caps their concurrency, governs the budget and breaks the loops is a Python state machine. That is also why 866 tests run offline, free, with no API key.
+> qaas is an open-source harness around Claude Code itself. Not a program that calls an API: fifteen real Claude Code sessions, each with its own context, tool allowlist and budget, run through map → discover → reproduce → file → fix → review → verify → report. The router that orders them, caps their concurrency, governs the budget and can refuse any tool call any of them makes is a Python state machine. That is also why 866 tests run offline, free, with no API key.
 >
 > Three things are enforced in code rather than requested in a prompt:
 >
@@ -111,14 +111,22 @@ The alternatives are worse:
 - **"QA copilot"** is wrong in kind. A copilot sits beside a person; this runs unattended for thirty minutes.
 - **"Tool"** underclaims. A tool does one thing; this holds fifteen things.
 
-**What it is a harness *around*, precisely.** Not an API. The SDK resolves
-`shutil.which("claude")` and spawns the **Claude Code CLI as a subprocess**, one
-per agent invocation. So qaas holds fifteen real Claude Code sessions and
-decides what each may touch. That is a better sentence than "built on the Claude
-Agent SDK", which sounds like an imported package: *a harness that runs fifteen
-governed Claude Code sessions over your repository.* It also makes the context
-boundary and the per-agent cost number concrete — they are separate processes,
-not bookkeeping.
+**What it is a harness *around*, precisely — use this sentence.**
+
+> qaas is not a program that calls an API. It is a harness around Claude Code
+> itself. Fifteen real Claude Code sessions, each with its own context, its own
+> tool allowlist, its own budget, run in a phase order by a Python state machine
+> that can refuse any tool call any of them makes.
+
+And the short form, for a headline or a bio:
+
+> **A harness that runs fifteen governed Claude Code sessions over your repo.**
+
+Both beat "built on the Claude Agent SDK", which sounds like an imported
+package. The SDK resolves `shutil.which("claude")` and spawns that binary once
+per agent invocation — so the context boundary and the per-agent cost number are
+separate operating-system processes, not bookkeeping. Say the long version when
+you have a paragraph and the short one when you have a line.
 
 **The caveat.** "Harness" usually implies the thing inside is swappable. Today it
 is not: every agent is Claude Code. So the accurate phrase is *a harness whose

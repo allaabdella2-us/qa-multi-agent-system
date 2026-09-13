@@ -10,10 +10,19 @@ A guide to `qaas` for someone who has never opened it. Read this before
 
 `qaas` points a team of AI agents at an application, finds real defects in it,
 reproduces them with runnable failing tests, files tickets, fixes some of them,
-reviews the fixes, and verifies the fix actually worked. It is not a chatbot with
-tools bolted on. It is a Python state machine that invokes agents the way a build
-system invokes compilers: on a schedule, within a budget, with hard limits on
-what each one may touch.
+reviews the fixes, and verifies the fix actually worked.
+
+It is not a chatbot with tools bolted on, and it is **not a program that calls an
+API**. It is a harness around Claude Code itself: the SDK resolves
+`shutil.which("claude")` and spawns that binary once per agent invocation, so a
+run is fifteen real Claude Code sessions — each with its own context, its own
+tool allowlist and its own budget — run in a phase order by a Python state
+machine that can refuse any tool call any of them makes. It invokes agents the
+way a build system invokes compilers: on a schedule, within a budget, with hard
+limits on what each one may touch.
+
+That is what makes the context boundary and the per-agent cost number real
+rather than bookkeeping. They are separate operating-system processes.
 
 The thing it is pointed at is called the **target**. A bundled deliberately-buggy
 demo app (`target-app/`) ships with it, along with a list of every bug seeded

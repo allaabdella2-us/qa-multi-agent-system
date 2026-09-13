@@ -13,6 +13,16 @@
 
 ---
 
+**What you are installing.** qaas is not a program that calls an API. It is a
+harness around Claude Code itself. Fifteen real Claude Code sessions, each with
+its own context, its own tool allowlist and its own budget, run in a phase order
+by a Python state machine that can refuse any tool call any of them makes.
+
+That is why the next section is about installing the Claude Code CLI, not about
+an API key.
+
+---
+
 ## 📦 Install
 
 ```bash

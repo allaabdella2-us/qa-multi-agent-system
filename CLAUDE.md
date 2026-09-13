@@ -53,10 +53,17 @@ default `pytest` run is offline and free, and must stay that way.
 1. **ROUTER is Python, not a prompt.** `router.py` is an ordinary state
    machine: phase ordering, concurrency, the budget governor, loop breakers,
    escalation. A model cannot enforce a budget it is itself spending.
-2. **Each agent is its own top-level `query()`**, not an SDK subagent. That is
-   what gives a real context boundary, a per-agent tool allowlist, and a
-   per-agent cost number. `agents=`/`AgentDefinition` is only for intra-agent
-   fan-out.
+2. **Each agent is its own top-level `query()`**, not an SDK subagent — and that
+   `query()` is **a Claude Code process**. The SDK resolves
+   `shutil.which("claude")` and spawns the binary once per invocation, so qaas is
+   not a program that calls an API: it is a harness around Claude Code itself,
+   holding fifteen real sessions and deciding what each may touch. That is what
+   makes the context boundary, the tool allowlist and the per-agent cost number
+   real rather than bookkeeping — they are separate OS processes.
+   `agents=`/`AgentDefinition` is only for intra-agent fan-out. It also means the
+   CLI is a hard requirement however you authenticate, which `qaas validate`
+   checks: `ANTHROPIC_API_KEY` is how that CLI signs in, not an alternative to
+   installing it.
 
 ### Phase pipeline (`router.py`)
 
