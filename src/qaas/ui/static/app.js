@@ -109,11 +109,11 @@ const ORDER = { running: 0, done: 1, failed: 2, queued: 3, never_ran: 4, skipped
  * config does not know still gets a band, because a ledger written by an
  * earlier roster names agents no config can place. */
 const LAYERS = [
-  ["control",     "map"],
-  ["discovery",   "find"],
-  ["triage",      "reproduce &amp; file"],
-  ["remediation", "fix, review &amp; verify"],
-  ["reporting",   "report"],
+  ["control",     "understand the system", "i-l-map"],
+  ["discovery",   "find what's wrong",     "i-l-find"],
+  ["triage",      "prove and prioritise",  "i-l-triage"],
+  ["remediation", "fix, review and verify","i-l-fix"],
+  ["reporting",   "share the results",     "i-l-report"],
 ];
 
 /* Two lines, and a third only when there is something to say.
@@ -148,16 +148,26 @@ function agentCard(a) {
   </div>`;
 }
 
-function layerBand(title, caption, members) {
+/* A band is sized by how many agents are in it, and the row wraps.
+ *
+ * Stacked one per row, the four small layers cost four rows to show six cards
+ * between them -- triage, remediation and reporting each had more empty space
+ * than content. Flexing on the member count lets discovery keep a row to
+ * itself while the small ones share one, without hardcoding which layers
+ * those are: a roster with eight triage agents rearranges itself. */
+function layerBand(title, caption, icon, members) {
   const running = members.filter((a) => a.status === "running").length;
   const settled = members.filter((a) => a.status === "done").length;
   const cost = members.reduce((sum, a) => sum + (a.cost_usd || 0), 0);
   const state = running ? "running" : settled === members.length ? "done" : "idle";
-  return `<section class="band" data-state="${state}">
+  const n = members.length;
+  return `<section class="band" data-state="${state}" data-layer="${esc(title)}"
+                   style="flex: ${n} 1 ${n * 158}px">
     <div class="band-head">
-      <span class="band-name">${title}</span>
+      <svg class="i band-icon"><use href="#${esc(icon)}"/></svg>
+      <span class="band-name">${esc(title)}</span>
       <span class="band-caption">${caption}</span>
-      <span class="band-stat">${settled}/${members.length}</span>
+      <span class="band-stat">${settled}/${n}</span>
       <span class="band-stat band-cost">${money(cost)}</span>
     </div>
     <div class="agents">${members.map(agentCard).join("")}</div>
@@ -171,16 +181,17 @@ function renderAgents(v) {
 
   const known = new Set(LAYERS.map(([name]) => name));
   const bands = LAYERS
-    .map(([name, caption]) => [name, caption, agents.filter((a) => a.layer === name).sort(within)])
-    .filter(([, , members]) => members.length);
+    .map(([name, caption, icon]) =>
+      [name, caption, icon, agents.filter((a) => a.layer === name).sort(within)])
+    .filter(([, , , members]) => members.length);
 
   // Agents whose layer this config cannot place -- a ledger from an earlier
   // roster -- get their own band rather than being dropped or mixed in.
   const stray = agents.filter((a) => !known.has(a.layer)).sort(within);
-  if (stray.length) bands.push(["unplaced", "not in this roster", stray]);
+  if (stray.length) bands.push(["unplaced", "not in this roster", "i-l-report", stray]);
 
   $("agents").innerHTML =
-    bands.map(([name, caption, members]) => layerBand(name, caption, members)).join("") ||
+    bands.map((band) => layerBand(...band)).join("") ||
     '<div class="empty">no agents dispatched yet</div>';
 
   const retired = agents.filter((a) => !a.layer).length;

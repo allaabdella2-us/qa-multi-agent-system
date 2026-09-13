@@ -40,6 +40,14 @@
   --scroll:    #222733;
   --shadow:    rgba(0,0,0,.55);
 
+  /* One hue per roster layer, the same vocabulary as the README diagram. Mid
+     tones, because they sit on a card ground in either theme. */
+  --layer-control:     #5b8def;
+  --layer-discovery:   #3fa46a;
+  --layer-triage:      #8b6fd4;
+  --layer-remediation: #d98a3f;
+  --layer-reporting:   #d9537f;
+
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
@@ -72,6 +80,12 @@
   --scroll:    #c8ced8;
   --shadow:    rgba(23,28,38,.18);
 
+  --layer-control:     #2f5fc4;
+  --layer-discovery:   #1f7a42;
+  --layer-triage:      #6741b8;
+  --layer-remediation: #a9611b;
+  --layer-reporting:   #b32a58;
+
   --k-bold:    #12161d;
   --k-cyan:    #0d7b8c;
   --k-yellow:  #8a6100;
@@ -101,6 +115,12 @@
   --accent:    #c2521f;
   --scroll:    #c8ced8;
   --shadow:    rgba(23,28,38,.18);
+
+  --layer-control:     #2f5fc4;
+  --layer-discovery:   #1f7a42;
+  --layer-triage:      #6741b8;
+  --layer-remediation: #a9611b;
+  --layer-reporting:   #b32a58;
 
   /* The CLI's vocabulary, darkened to keep the same contrast against white
      that the originals have against #0b0d10. A refusal and a regression must
@@ -278,28 +298,43 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 /* The container is NOT `.agents`: that class is the card grid, and giving it
  * to the wrapper too made each band a grid item, so the five layers laid out
  * as columns instead of stacking. */
-.agent-bands { display: block; }
-.band { margin-bottom: 10px; padding-left: 11px; position: relative; }
+/* Bands wrap, sized by how many agents each holds (the inline `flex` basis in
+ * `layerBand`). Stacked one per row the four small layers spent four rows on
+ * six cards; flexing lets discovery keep a row while triage, remediation and
+ * reporting share one, and a differently shaped roster rearranges itself
+ * rather than needing this rule changed. */
+.agent-bands { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-start; }
+.band { margin-bottom: 6px; padding-left: 11px; position: relative; min-width: 0; }
 .band::before {
   content: ""; position: absolute; inset: 2px auto 2px 0; width: 2px;
-  border-radius: 2px; background: var(--line);
+  border-radius: 2px; background: var(--band, var(--line));
 }
 .band[data-state="running"]::before { background: var(--accent); }
-.band[data-state="done"]::before    { background: var(--k-green); }
+
+/* One hue per layer, so a band is recognisable before its label is read --
+ * the same vocabulary as the roster diagram in the README. */
+.band[data-layer="control"]     { --band: var(--layer-control); }
+.band[data-layer="discovery"]   { --band: var(--layer-discovery); }
+.band[data-layer="triage"]      { --band: var(--layer-triage); }
+.band[data-layer="remediation"] { --band: var(--layer-remediation); }
+.band[data-layer="reporting"]   { --band: var(--layer-reporting); }
+
 .band-head {
-  display: flex; align-items: baseline; gap: 9px; margin-bottom: 7px;
+  display: flex; align-items: center; gap: 8px; margin-bottom: 7px;
   font-size: 10px; text-transform: uppercase; letter-spacing: .13em;
 }
-.band-name { color: var(--ink-dim); font-weight: 700; }
+.band-icon { width: 12px; height: 12px; color: var(--band, var(--ink-faint)); }
+.band-name { color: var(--band, var(--ink-dim)); font-weight: 700; }
 .band[data-state="running"] .band-name { color: var(--accent); }
 .band-caption { color: var(--ink-faint); text-transform: none; letter-spacing: .02em;
-                font-size: 10.5px; }
+                font-size: 10.5px; white-space: nowrap; overflow: hidden;
+                text-overflow: ellipsis; min-width: 0; }
 .band-stat { margin-left: auto; font-family: var(--mono); font-size: 10.5px;
              color: var(--ink-faint); letter-spacing: 0; text-transform: none; }
 .band-cost { min-width: 54px; text-align: right; color: var(--ink-dim); }
 
 .agents { display: grid; gap: 6px;
-          grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); }
+          grid-template-columns: repeat(auto-fill, minmax(146px, 1fr)); }
 .card {
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px;
   background: var(--bg-card); position: relative; overflow: hidden; text-align: left;
