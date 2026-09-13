@@ -195,3 +195,122 @@ def test_a_nearer_layer_shadows_a_profile_of_the_same_name(tmp_path, monkeypatch
     found = cli._target_files(None)
     assert set(found) == {"app"}
     assert found["app"].read_text().strip().endswith("from-state")
+
+
+# -- `qaas run --from-board` ------------------------------------------------
+#
+# The one place the board drives the system rather than recording it. A person
+# drags a card into a chosen status and the next run works on exactly those
+# tickets. It is a pull, not a subscription: put it on a timer and "drag a card
+# and an agent picks it up" is literally true, without fifteen agents polling a
+# rate-limited API for the rest of the run. Everything after the tickets are
+# chosen is scheduled by ROUTER out of the ledger exactly as before -- the board
+# chooses the *work*, never the order it happens in.
+
+def _board_project(tmp_path: Path, *, status: str, label: str = "repo-corvid"):
+    """A run holding one ticketed envelope, and a local ticket in `status`."""
+    from qaas.adapters.tracker import build_tracker
+    from qaas.envelope import (
+        Dedupe, DefectClass, DefectEnvelope, Domain, Evidence, Impact, Location,
+        Reproduction, Severity, TrackerRef,
+    )
+    from qaas.store import AgentResult, RunStore
+
+    config = tmp_path / ".qaas" / "config"
+    config.mkdir(parents=True)
+    (config / "system.yaml").write_text((Path(CONFIG) / "system.yaml").read_text())
+    (config / "agents").symlink_to(Path(CONFIG) / "agents")
+
+    root = tmp_path / ".qaas"
+    store = RunStore("run-board", root=root, create=True)
+    store.log("run_started", mode="full-loop", agents=["API"], wall_clock_s=900,
+              target_root=str(tmp_path))
+    envelope = DefectEnvelope(
+        run_id="run-board", discovered_by="API", domain=Domain.SECURITY,
+        defect_class=DefectClass.VULNERABILITY, title="Cross-tenant order read",
+        summary="An org can read another org's orders.",
+        location=Location(service="orders", paths=["api/app/routes/orders.py:44"]),
+        evidence=[Evidence(type="log", uri="artifact://run-board/x.log")],
+        reproduction=Reproduction(status="reproduced", steps=["GET /v1/orders"]),
+        impact=Impact(user_facing=True, security_relevant=False),
+        severity=Severity.BLOCKER, confidence=0.9, dedupe=Dedupe(),
+        jira=TrackerRef(key="QAAS-1"),
+    )
+    store.put_envelope(envelope)
+    store.put_result(AgentResult(agent="API", cost_usd=1.0))
+    store.log("run_finished", run_id="run-board", cost_usd=1.0)
+
+    tracker = build_tracker("local", root)
+    issue = tracker.create_issue(
+        project="QAAS", title=envelope.title, body="x",
+        labels=[label, f"qaas-env-{envelope.id}"], severity="blocker",
+        envelope_id=envelope.id,
+    )
+    tracker.transition(issue.key, status, by="a human", comment="dragged the card")
+    return config, root
+
+
+def _board_run(runner, tmp_path, search_for, *, card_sits_in="in_review",
+               target="corvid", monkeypatch=None):
+    """Put the card in one status, search for another. They are different
+    things, and every test below turns on the difference."""
+    config, _ = _board_project(tmp_path, status=card_sits_in)
+    if monkeypatch is not None:
+        monkeypatch.setenv("QAAS_TARGET", target)
+        monkeypatch.chdir(tmp_path)
+    return runner.invoke(
+        cli.app,
+        ["run", "--mode", "fix-cycle", "--config", str(config),
+         "--root", str(tmp_path / ".qaas"), "--from-board", search_for, "--dry-run"],
+    )
+
+
+def test_from_board_picks_up_a_dragged_card(runner, tmp_path, monkeypatch):
+    result = _board_run(runner, tmp_path, "in_review", monkeypatch=monkeypatch)
+    assert result.exit_code == 0, result.output
+    assert "QAAS-1" in result.output
+    # And it resolves the run holding that envelope, so nobody has to know it.
+    assert "run-board" in result.output
+
+
+def test_from_board_matches_the_status_case_blind(runner, tmp_path, monkeypatch):
+    """"Ready for Fix" is whatever casing someone typed making the column.
+
+    Both backends match a status exactly, so asking the adapter to filter meant
+    `--from-board "ready for fix"` silently found nothing on a board that had
+    three cards sitting in it.
+    """
+    result = _board_run(runner, tmp_path, "IN_REVIEW", monkeypatch=monkeypatch)
+    assert result.exit_code == 0, result.output
+    assert "QAAS-1" in result.output
+
+
+def test_from_board_ignores_a_status_nobody_is_in(runner, tmp_path, monkeypatch):
+    result = _board_run(runner, tmp_path, "closed", monkeypatch=monkeypatch)
+    assert result.exit_code == 0, result.output
+    assert "no tickets in 'closed'" in result.output
+
+
+def test_from_board_is_scoped_to_this_repository(runner, tmp_path, monkeypatch):
+    """A shared project holds every repo's tickets; the label is what separates
+    them. Without it one repository's run would fix another's defects."""
+    config, root = _board_project(tmp_path, status="in_review", label="repo-elsewhere")
+    monkeypatch.setenv("QAAS_TARGET", "corvid")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        cli.app,
+        ["run", "--mode", "fix-cycle", "--config", str(config), "--root", str(root),
+         "--from-board", "in_review", "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no tickets" in result.output
+    assert "QAAS-1" not in result.output
+
+
+def test_from_board_is_resolved_before_the_dry_run_renders(runner, tmp_path, monkeypatch):
+    """`--dry-run` exists to answer "what would this do". A plan that omits
+    which tickets it would work on is a rehearsal of a different run."""
+    result = _board_run(runner, tmp_path, "in_review", monkeypatch=monkeypatch)
+    board_line = result.output.index("from the board")
+    plan_line = result.output.index("VERIFIER")
+    assert board_line < plan_line, result.output

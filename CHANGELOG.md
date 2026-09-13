@@ -47,6 +47,38 @@ The fan-out escalation now leads the escalation list and names the count and the
 cap, rather than arriving third in a list of sixteen — it is the line that
 explains the bill.
 
+### The board can start the work
+
+```bash
+qaas run --mode fix-cycle --from-board "Ready for Fix"
+```
+
+Every ticket carrying this repository's label that currently sits in that status
+becomes the run's work list. It finds the run that produced each finding, so
+nobody has to know a run id. Drag a card into the column, and the next run picks
+it up; on a timer, "drag a card and an agent starts work" is literally true.
+
+This is the one thing in the system driven *by* the board rather than recorded
+on it, and the limit is deliberate. It is a pull, not a subscription: the board
+chooses the **work**, and ROUTER still schedules everything after that out of
+the ledger. Fifteen agents polling a rate-limited API for the length of a run
+would buy nothing, and the budget governor and loop breakers have to live in
+code regardless.
+
+The status is your project's own word for it and is matched case-blind, because
+"Ready for Fix" is whatever casing someone typed when they made the column. The
+repo label is what scopes it — a shared Jira project holds every repository's
+tickets. And the tickets resolve before `--dry-run` renders, since "what would
+this pick up" is the question `--dry-run` exists to answer.
+
+### The Claude Code CLI is checked, and said out loud
+
+`qaas validate` now fails if `claude` is not on the PATH. Each agent runs as a
+Claude Code subprocess, so the CLI is required whichever way you authenticate —
+`ANTHROPIC_API_KEY` is how that CLI signs in, not an alternative to installing
+it. The docs said "one or the other", so every offline command passed and the
+first paid run died inside the SDK naming a binary nobody had been told about.
+
 ### Tuning is editable from the page
 
 The configuration view's model, effort, turn cap and thresholds are now

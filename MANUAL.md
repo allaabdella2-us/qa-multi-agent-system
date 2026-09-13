@@ -23,12 +23,27 @@ Requires **Python 3.12+**.
 
 ### Authentication
 
-qaas drives the Claude Agent SDK. It needs one of:
+qaas runs **each agent as a Claude Code session**. The SDK spawns the `claude`
+binary as a subprocess, once per agent invocation — so the Claude Code CLI is
+**required**, whichever way you authenticate.
 
-| option | how |
-|---|---|
-| **Claude Code CLI** (easiest) | `claude` on your `PATH` and signed in — nothing else to do |
-| **API key** | `export ANTHROPIC_API_KEY=sk-ant-...` |
+```bash
+claude --version          # if this fails, install it first
+```
+
+[Install it here.](https://claude.com/claude-code) Then pick how it signs in:
+
+| | how | what you pay |
+|---|---|---|
+| **Signed in** (easiest) | `claude` and log in once | your Claude Code plan's quota |
+| **API key** | `export ANTHROPIC_API_KEY=sk-ant-...` | per token, on your API bill |
+
+`ANTHROPIC_API_KEY` is **not** an alternative to installing the CLI. It is how
+that CLI authenticates when you have not logged in.
+
+> [!TIP]
+> `qaas validate` checks for the binary, so you find out before a run spends
+> anything rather than during one.
 
 ### Optional extras
 
@@ -476,6 +491,52 @@ decision you should make).
 > [!NOTE]
 > **Merge is impossible by construction.** No merge method exists anywhere in the
 > codebase, `gh pr merge` is refused, and pull requests open as drafts.
+
+### Let the board start the work
+
+One thing in qaas is driven *by* the board rather than recorded on it. Pick a
+status — make a column called `Ready for Fix`, or reuse one you have — and:
+
+```bash
+qaas run --mode fix-cycle --from-board "Ready for Fix"
+```
+
+It takes every ticket carrying **this repository's label** that currently sits
+in that status, finds the run that produced each finding, and runs the fix cycle
+on exactly those. Drag a card into the column and the next run picks it up. Put
+that line on a cron or a timer and "drag a card, an agent starts work" is
+literally true:
+
+```cron
+*/10 * * * * cd ~/code/your-app && qaas run --mode fix-cycle --from-board "Ready for Fix"
+```
+
+`--dry-run` tells you what it *would* take, for free:
+
+```console
+$ qaas run --mode fix-cycle --from-board "Ready for Fix" --dry-run
+from the board Ready for Fix (repo-checkout): QAAS-31, QAAS-33
+working from run-20260912T121805-b2c052
+```
+
+Notes worth having:
+
+- **The status is your project's own word for it**, matched case-blind. `"ready
+  for fix"` and `"Ready For Fix"` find the same column.
+- **The label is what scopes it.** A shared Jira project holds every
+  repository's tickets; without `repo-<target>` one repo's run would fix
+  another's defects.
+- **You do not name a run.** It finds the newest run whose envelopes carry those
+  ticket keys, because the fix cycle needs the finding's evidence and failing
+  test, and those live with the run that produced them.
+- **It is a pull, not a subscription.** The board chooses the *work*; ROUTER
+  still schedules everything after that out of the ledger. Fifteen agents do not
+  poll a rate-limited API for the length of a run.
+- **The local tracker only knows the house statuses** (`open`, `in_progress`,
+  `in_review`, `resolved`, `closed`, `wont_fix`, `duplicate`). Custom column
+  names need a real Jira.
+
+---
 
 ### Customising prompts
 

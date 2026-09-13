@@ -6,6 +6,7 @@ below is traced to its source in the last section; nothing here is a guess.
 **Before you post — a checklist**
 
 - [ ] 0.0.2 is on PyPI and `pip install qaas-python` installs it (the post quotes the command).
+- [ ] The first comment says the Claude Code CLI is required. `pip install` alone is not enough — every offline command passes without it and the first paid run dies inside the SDK.
 - [ ] The Firestore finding on your own site is **fixed** before you describe it in public. Naming an unauthenticated-write rule on a live site is a disclosure. Either fix it first or describe it as "a database rule that accepted unauthenticated writes" with no site named.
 - [ ] Do **not** name the plaintext-password finding from your site. It is your repository; it does not need to be in a launch post.
 - [ ] Take the Jira board screenshot (§3) *before* the run that produces it is torn down.
@@ -36,7 +37,7 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 > – 2 confident findings, one rated critical at 0.90, were falsified before anything was filed
 > – on a real React site: 17 findings for about $20, including a database rule that accepted unauthenticated writes. Discovery held it at 0.45 confidence. Reproduction took it to 0.97.
 >
-> Today it runs on the Claude Agent SDK. Making the model a choice (OpenAI, OpenRouter, Ollama) is the roadmap, and where I'd most like help.
+> Under the hood each agent is a real Claude Code session, governed: its own context, its own tool allowlist, its own budget. Making the model a choice (OpenAI, OpenRouter, Ollama) is the roadmap, and where I'd most like help.
 >
 > pip install qaas-python
 >
@@ -48,13 +49,13 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 > PyPI: https://pypi.org/project/qaas-python/
 > Code and architecture: https://github.com/allaabdella2-us/qa-multi-agent-system
-> 861 tests run offline with no API key, so you can read how the guardrails work before spending anything.
+> 866 tests run offline with no API key, so you can read how the guardrails work before spending anything.
 
 ### Variant B — the builder's post (engineering audience)
 
 > The design decision that shaped everything in qaas: the orchestrator is code, not a prompt. A model cannot enforce a budget it is itself spending.
 >
-> qaas is an open-source harness that runs fifteen QA agents through map → discover → reproduce → file → fix → review → verify → report, and the router that orders them, caps their concurrency, governs the budget and breaks the loops is a Python state machine. That is also why 861 tests run offline, free, with no API key.
+> qaas is an open-source harness that runs fifteen QA agents through map → discover → reproduce → file → fix → review → verify → report, and the router that orders them, caps their concurrency, governs the budget and breaks the loops is a Python state machine. That is also why 866 tests run offline, free, with no API key.
 >
 > Three things are enforced in code rather than requested in a prompt:
 >
@@ -68,7 +69,7 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 >
 > Measured so far: 14 of 15 reproductions produced a committed failing test; 2 confident findings were falsified before filing; a pr-check on a real React site found 17 defects for about $20.
 >
-> It runs on the Claude Agent SDK today. The provider seam is about forty lines, and the plan for OpenAI, OpenRouter and Ollama behind it is written down in the repo. That is the contribution I most want. An agent is a prompt plus a YAML file and no Python, so a new agent is the other easy first PR.
+> Each agent is a real Claude Code session, spawned as its own process — which is what makes the context boundary and the per-agent cost number real rather than bookkeeping. The provider seam is about forty lines, and the plan for OpenAI, OpenRouter and Ollama behind it is written down in the repo. That is the contribution I most want. An agent is a prompt plus a YAML file and no Python, so a new agent is the other easy first PR.
 >
 > pip install qaas-python
 >
@@ -76,7 +77,7 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 ### Variant C — short (repost or comment thread)
 
-> Open-sourced qaas: fifteen governed agents that find defects in a running application, reproduce each one into a failing test, file it, fix it, verify the fix, and move the ticket to Done on your Jira board. The orchestrator is Python, not a prompt. No merge method exists. 861 tests run without an API key.
+> Open-sourced qaas: fifteen governed Claude Code sessions that find defects in a running application, reproduce each one into a failing test, file it, fix it, verify the fix, and move the ticket to Done on your Jira board. The orchestrator is Python, not a prompt. No merge method exists. 866 tests run without an API key.
 >
 > Real numbers: 14 of 15 reproductions became failing tests; a real React site yielded 17 findings for about $20.
 >
@@ -110,11 +111,26 @@ The alternatives are worse:
 - **"QA copilot"** is wrong in kind. A copilot sits beside a person; this runs unattended for thirty minutes.
 - **"Tool"** underclaims. A tool does one thing; this holds fifteen things.
 
-**The caveat.** "Harness" usually implies the thing inside is swappable. Today the
-model is not: it runs on the Claude Agent SDK only. So the accurate phrase is
-*a harness whose first provider is Claude*, and the provider seam in the roadmap
-is the work that makes the word fully earned. Say it plainly in the post. Hiding
-it is the one thing that would make a reader distrust the rest.
+**What it is a harness *around*, precisely.** Not an API. The SDK resolves
+`shutil.which("claude")` and spawns the **Claude Code CLI as a subprocess**, one
+per agent invocation. So qaas holds fifteen real Claude Code sessions and
+decides what each may touch. That is a better sentence than "built on the Claude
+Agent SDK", which sounds like an imported package: *a harness that runs fifteen
+governed Claude Code sessions over your repository.* It also makes the context
+boundary and the per-agent cost number concrete — they are separate processes,
+not bookkeeping.
+
+**The caveat.** "Harness" usually implies the thing inside is swappable. Today it
+is not: every agent is Claude Code. So the accurate phrase is *a harness whose
+first engine is Claude Code*, and the provider seam in the roadmap is the work
+that earns the word fully. Say it plainly. Hiding it is the one thing that would
+make a reader distrust the rest.
+
+**And say what that implies for the roadmap**, before someone else does: the
+OpenAI and Ollama work is not swapping an API client. Claude Code *is* the agent
+loop today — tool calling, turn handling, the hook events. Another provider
+means writing that loop. `PROVIDERS_PLAN.md` says so; in conversation people
+will assume it is one line.
 
 ---
 
@@ -292,8 +308,11 @@ the bundled demo app and for `compose` mode.
 
 **Which models does it use?**
 Model is per-agent configuration (`model:` in each agent's YAML). Today every
-provider is Claude through the Claude Agent SDK. Auth is the Claude Code CLI if
-you are signed in, otherwise `ANTHROPIC_API_KEY`.
+provider is Claude. Each agent runs as a **Claude Code session** — the SDK
+spawns the `claude` binary once per agent invocation — so the Claude Code CLI is
+required whichever way you authenticate. Signed in, a run spends your Claude
+Code plan's quota; with `ANTHROPIC_API_KEY` set, it bills per token. Say which
+one your cost figures came from, because the answer differs.
 
 **Can I use OpenAI, Gemini, OpenRouter or Ollama?**
 Not yet. See §7 for exactly what is planned and why.
@@ -317,7 +336,7 @@ implementation, and the plan for it is written down in `PROVIDERS_PLAN.md`.
 
 **"It's just prompts."**
 The prompts are the least of it. The router, the guardrails, the evidence gate
-and the ledger are Python, and 861 tests exercise them without a model in the
+and the ledger are Python, and 866 tests exercise them without a model in the
 loop. Ask which part of a competitor's system still works with the API key
 removed.
 
@@ -420,7 +439,7 @@ qaas prompts eject API                 # make a prompt yours
 | claim | source |
 |---|---|
 | 15 agents, ROUTER is Python, six phases | `README.md`, `CLAUDE.md` |
-| 861 offline tests, no API key | README badge; 861 passing locally on 2026-09-12 |
+| 866 offline tests, no API key | README badge; 866 passing locally on 2026-09-12 |
 | 16 seeded defects + 4 planted non-defects | `target-app/defects.yaml` |
 | 28 ledger event kinds | `store.LedgerKind` |
 | 14 of 15 reproductions → failing test; 13 raised confidence; 2 falsified, one critical 0.90 → 0.10 | `CHANGELOG.md`, 0.0.2 entry, from 22 runs in this project's `.qaas/runs/` |

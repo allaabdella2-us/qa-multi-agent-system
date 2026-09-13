@@ -12,7 +12,7 @@ Reads your application → finds the defects → files each with its evidence �
 [![Python](https://img.shields.io/pypi/pyversions/qaas-python?color=3776AB&logo=python&logoColor=white)](https://pypi.org/project/qaas-python/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![CI](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml/badge.svg)](https://github.com/allaabdella2-us/qa-multi-agent-system/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-861%20offline-success)](#-contributing)
+[![Tests](https://img.shields.io/badge/tests-866%20offline-success)](#-contributing)
 [![Built on](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-D97757)](https://docs.claude.com/en/api/agent-sdk/overview)
 
 [Quickstart](#-quickstart-in-60-seconds) · [Your repo](#-point-it-at-your-repository) · [Jira](#-file-into-jira) · [Roadmap](#️-roadmap) · [Architecture](ARCHITECTURE.md)
@@ -49,7 +49,7 @@ the rest.
 | | |
 |---|---|
 | 📋 **The board is the work queue** | Agents pick work up from the tracker and move it as they go. Every ticket carries its repo label and defect fingerprint, stamped in code rather than asked of a model — so the queue is also the provenance. |
-| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **861 tests run offline, free, with no API key.** |
+| 🧠 **The orchestrator is code, not a prompt** | A model cannot enforce a budget it is spending. Phase ordering, concurrency, retries and the loop breakers live in `router.py`. That is also why **866 tests run offline, free, with no API key.** |
 | 🧱 **Every agent is its own `query()`** | Not subagents of a shared parent. Each gets a real context boundary, an enforceable tool allowlist, and its own cost number. |
 | 🔬 **Evidence or it did not happen** | `has_evidence()` and `is_fileable()` are methods on the envelope model, not requests in a prompt. An agent cannot talk its way past them. |
 | 📊 **Measured, not asserted** | A deliberately buggy demo app ships with a golden ledger of **16 seeded defects + 4 planted non-defects**. `qaas score` reports recall *and* precision, so a prompt change has a number attached. |
@@ -103,7 +103,10 @@ qaas run --repo https://github.com/you/your-app --dry-run
 > Nothing above contacts an API. `--dry-run` prints exactly what each agent would
 > receive — model, budget, turn cap, tool allowlist, prompt size.
 
-**Auth:** the Claude Code CLI if you are signed in, otherwise `ANTHROPIC_API_KEY`.
+**You need the [Claude Code CLI](https://claude.com/claude-code) installed.** Each
+agent runs as a `claude` subprocess, so it is required either way: sign in to use
+your plan's quota, or set `ANTHROPIC_API_KEY` to pay per token. `qaas validate`
+checks for it.
 
 ---
 
@@ -194,6 +197,17 @@ the filter too.
 qaas board                  # find or create this target's view
 qaas board --no-create      # show the label and JQL, touch nothing
 ```
+
+**And the board can start the work.** Drag a card into a status you choose, and
+the next run picks it up:
+
+```bash
+qaas run --mode fix-cycle --from-board "Ready for Fix"
+```
+
+That is one thing genuinely driven *by* the board rather than recorded on it.
+Everything after the tickets are chosen is still scheduled in `router.py` — the
+board picks the work, never the order.
 
 > [!NOTE]
 > **A filter, not a project per repository** — creating projects needs admin
@@ -413,7 +427,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest                 # 861 tests, offline, free — keep it that way
+pytest                 # 866 tests, offline, free — keep it that way
 pytest -m docker       # needs: cd target-app && docker compose up -d
 qaas validate
 ```

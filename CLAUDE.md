@@ -20,7 +20,7 @@ usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (BROWSER) runs
 
-pytest                                   # 861 tests, no API calls, no network
+pytest                                   # 866 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
@@ -248,6 +248,20 @@ correctly and were invisible on the view. `ensure_repo_board` repairs the JQL;
 
 None of this can fail a run — the filter is the fallback and the findings matter
 more than the view.
+
+**`--from-board` is the one place the board drives the system.** `qaas run --mode
+fix-cycle --from-board "<status>"` resolves the tickets carrying this repo's
+label that sit in that status, finds the run holding their envelopes, and feeds
+them in as `--ticket` would. It is deliberately a **pull, not a subscription**:
+the board chooses the *work*, and ROUTER still schedules everything after that
+out of the ledger. Agents polling a tracker for the length of a run would put a
+rate-limited dependency on the control path and buy nothing, because the budget
+governor and the loop breakers have to live in code regardless. Two details are
+bug-derived: the status is matched **case-blind in the CLI, not by the adapter**
+(both backends match exactly, and a column's name is whatever casing someone
+typed, so asking the adapter to filter found nothing on a board with cards in
+it); and resolution happens **before** the `--dry-run` return, because "what
+would this pick up" is the question `--dry-run` exists to answer.
 
 ### Targets make it portable
 

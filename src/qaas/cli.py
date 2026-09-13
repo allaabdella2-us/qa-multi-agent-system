@@ -602,6 +602,20 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
             f"[dim]{rm.max_wall_clock_s}s[/dim]{filing}"
         )
 
+    # The SDK spawns the Claude Code CLI -- `shutil.which("claude")` -- once per
+    # agent invocation. Without it on PATH every offline command still passes,
+    # `validate` says "config ok", and the first paid run dies inside the SDK
+    # naming a binary the user was never told they needed. This is the command
+    # whose whole job is "tell me what is wrong before I spend anything".
+    if shutil.which("claude") is None:
+        problems.append(
+            "the Claude Code CLI is not on your PATH. qaas runs each agent as a "
+            "`claude` subprocess, so it is required whichever way you "
+            "authenticate: https://claude.com/claude-code. ANTHROPIC_API_KEY is "
+            "how that CLI signs in when you are not logged in -- it is not an "
+            "alternative to installing it."
+        )
+
     if notes:
         console.print("\n[dim]notes:[/dim]")
         for note in notes:
@@ -1164,6 +1178,68 @@ def _dashboard_kwargs(config_dir: Path | None) -> dict:
     }
 
 
+#: How many of this repo's tickets `--from-board` reads before matching status.
+#: Generous because the filter is applied locally, bounded because a shared
+#: project can hold thousands and this runs before every board-driven cycle.
+BOARD_SCAN_LIMIT = 200
+
+
+def _tickets_in_status(cfg, status: str, root: Path) -> set[str]:
+    """Ticket keys sitting in `status` on this repo's board.
+
+    The one place the board drives the system rather than recording it. A person
+    drags a card into the status they have chosen as the trigger, and the next
+    run works on exactly those tickets -- no run id to look up, no ticket key to
+    copy.
+
+    It is a pull, not a subscription: put this on a cron or a timer and "drag a
+    card and an agent picks it up" is literally true, without fifteen agents
+    polling a rate-limited API for the rest of the run. Everything after this
+    point is scheduled by ROUTER out of the ledger exactly as before -- the
+    board chooses the *work*, never the order it happens in.
+
+    The repo label is what scopes it. Without that, a shared project would hand
+    one repository's run the tickets of every other repository on the board.
+    """
+    from qaas.adapters.tracker import TrackerError, build_tracker, repo_label
+
+    label = repo_label(cfg.target)
+    tracker = build_tracker(str(cfg.tracker), root)
+    try:
+        # Scoped by label and matched on status *here*, rather than asking the
+        # adapter to filter by status too. A status name is the project's own
+        # vocabulary -- "Ready for Fix" is whatever casing someone typed when
+        # they made the column -- and both backends match it exactly, so
+        # `--from-board "ready for fix"` silently found nothing. Comparing
+        # case-blind locally is the only way the flag behaves the way the person
+        # who dragged the card expects.
+        issues = tracker.search(label=label, limit=BOARD_SCAN_LIMIT)
+    except TrackerError as exc:
+        console.print(f"[red]the board could not be read:[/red] {exc}")
+        raise typer.Exit(1) from None
+    wanted = status.strip().lower()
+    return {i.key for i in issues if i.status.strip().lower() == wanted}
+
+
+def _run_holding_tickets(root: Path, tickets: set[str]) -> str | None:
+    """The newest run whose envelopes carry one of these ticket keys.
+
+    Newest first and first hit wins: a defect refiled across several runs is the
+    case this exists for, and the most recent run is the one whose evidence and
+    failing test match the tree the fix will be written against.
+    """
+    from qaas.store import RunStore, list_runs
+
+    for candidate in list_runs(root):
+        store = RunStore(candidate, root=root, create=False)
+        try:
+            if any(e.jira.key in tickets for e in store.envelopes() if e.jira.key):
+                return candidate
+        except Exception:
+            continue          # a half-written run is not a reason to stop looking
+    return None
+
+
 @app.command()
 def run(
     mode: str = typer.Option(..., "--mode", "-m", help="Run mode from system.yaml."),
@@ -1175,6 +1251,14 @@ def run(
     clone_to: Path = typer.Option(None, "--clone-to", help="Where to clone, for a git URL. Default: <state>/targets/."),
     run_id: str = typer.Option(None, "--run-id", help="Continue an existing run rather than starting one."),
     ticket: list[str] = typer.Option(None, "--ticket", help="Restrict a fix-cycle to these tickets."),
+    from_board: str = typer.Option(
+        None,
+        "--from-board",
+        metavar="STATUS",
+        help="Take the tickets from the board: every issue carrying this repo's "
+             "label that currently sits in STATUS. Drag a card there and the next "
+             "run picks it up.",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Render the plan without calling the API."),
     dashboard_: bool = typer.Option(
         False, "--dashboard", help="Serve the live dashboard alongside the run."
@@ -1266,6 +1350,41 @@ def run(
         f"concurrency {rm.max_concurrency}"
     )
 
+    # Resolved before the dry-run return on purpose: reading the board is free
+    # and read-only, and "what would this pick up?" is precisely the question
+    # `--dry-run` exists to answer. Rendering a plan that silently omits which
+    # tickets it would work on is a rehearsal of a different run.
+    tickets = list(ticket) if ticket else None
+    if from_board:
+        from qaas.adapters.tracker import repo_label
+
+        found = _tickets_in_status(cfg, from_board, root)
+        label = repo_label(cfg.target) or "this repo's label"
+        if not found:
+            console.print(
+                f"[yellow]no tickets in '{from_board}'[/yellow] carrying {label}"
+                " — nothing to do"
+            )
+            raise typer.Exit(0)
+        console.print(
+            f"[dim]from the board[/dim] {from_board} ({label}): "
+            f"{', '.join(sorted(found))}"
+        )
+        tickets = sorted(set(tickets or []) | found)
+        # The fix cycle reads each finding, its evidence and its failing test
+        # out of the run that produced it, so "which run" is not optional -- it
+        # is just something a person dragging a card should not have to know.
+        if run_id is None:
+            run_id = _run_holding_tickets(root, found)
+            if run_id is None:
+                console.print(
+                    "[red]those tickets name no envelope in any run under "
+                    f"{root}[/red]. The fix cycle needs the run that found the "
+                    "defect; this board may be pointed at a different checkout."
+                )
+                raise typer.Exit(1)
+            console.print(f"[dim]working from[/dim] {run_id}")
+
     if dry_run:
         # The same search path the run itself would use, so `prompt: N chars`
         # counts any override rather than always reporting the packaged bytes.
@@ -1296,7 +1415,7 @@ def run(
         elif kind == "stopped":
             console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
 
-    router = Router(cfg, root=root, on_event=on_event, tickets=list(ticket) if ticket else None)
+    router = Router(cfg, root=root, on_event=on_event, tickets=tickets)
     report = asyncio.run(router.run(mode, run_id=run_id))
 
     console.print()
