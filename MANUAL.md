@@ -33,27 +33,25 @@ Requires **Python 3.12+**.
 
 ### Authentication
 
-qaas runs **each agent as a Claude Code session**. The SDK spawns the `claude`
-binary as a subprocess, once per agent invocation — so the Claude Code CLI is
-**required**, whichever way you authenticate.
+qaas runs **each agent as a Claude Code session** — the SDK spawns a `claude`
+binary as a subprocess, once per agent invocation.
 
-```bash
-claude --version          # if this fails, install it first
-```
+**You almost certainly already have that binary.** The `claude-agent-sdk` wheel
+bundles one for common platforms, and the SDK prefers it over anything on your
+`PATH`, so `pip install qaas-python` is usually all the installing there is. On
+a platform with no bundled build you need [the CLI](https://claude.com/claude-code)
+on your `PATH` instead. `qaas validate` tells you which one you have, or that
+you have neither.
 
-[Install it here.](https://claude.com/claude-code) Then pick how it signs in:
+What you *do* have to provide is **authentication**:
 
 | | how | what you pay |
 |---|---|---|
-| **Signed in** (easiest) | `claude` and log in once | your Claude Code plan's quota |
+| **Signed in** (easiest) | run `claude` once and log in | your Claude Code plan's quota |
 | **API key** | `export ANTHROPIC_API_KEY=sk-ant-...` | per token, on your API bill |
 
-`ANTHROPIC_API_KEY` is **not** an alternative to installing the CLI. It is how
-that CLI authenticates when you have not logged in.
-
-> [!TIP]
-> `qaas validate` checks for the binary, so you find out before a run spends
-> anything rather than during one.
+Which one you use changes what a run costs you, so it is worth knowing which
+your numbers came from.
 
 ### Optional extras
 

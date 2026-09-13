@@ -6,7 +6,7 @@ below is traced to its source in the last section; nothing here is a guess.
 **Before you post — a checklist**
 
 - [ ] 0.0.2 is on PyPI and `pip install qaas-python` installs it (the post quotes the command).
-- [ ] The first comment says the Claude Code CLI is required. `pip install` alone is not enough — every offline command passes without it and the first paid run dies inside the SDK.
+- [ ] The first comment says what a user must supply: `pip install qaas-python` brings the Claude Code binary with it (the SDK wheel bundles one), but they still have to be signed in to `claude` or have `ANTHROPIC_API_KEY` set.
 - [ ] The Firestore finding on your own site is **fixed** before you describe it in public. Naming an unauthenticated-write rule on a live site is a disclosure. Either fix it first or describe it as "a database rule that accepted unauthenticated writes" with no site named.
 - [ ] Do **not** name the plaintext-password finding from your site. It is your repository; it does not need to be in a launch post.
 - [ ] Take the Jira board screenshot (§3) *before* the run that produces it is torn down.
@@ -316,11 +316,12 @@ the bundled demo app and for `compose` mode.
 
 **Which models does it use?**
 Model is per-agent configuration (`model:` in each agent's YAML). Today every
-provider is Claude. Each agent runs as a **Claude Code session** — the SDK
-spawns the `claude` binary once per agent invocation — so the Claude Code CLI is
-required whichever way you authenticate. Signed in, a run spends your Claude
-Code plan's quota; with `ANTHROPIC_API_KEY` set, it bills per token. Say which
-one your cost figures came from, because the answer differs.
+provider is Claude. Each agent runs as a **Claude Code session** — the SDK spawns
+a `claude` binary once per agent invocation, and the wheel bundles that binary,
+so `pip install qaas-python` is usually the whole install. What a user must
+supply is authentication: signed in, a run spends their Claude Code plan's
+quota; with `ANTHROPIC_API_KEY` set, it bills per token. Say which one your cost
+figures came from, because the answer differs.
 
 **Can I use OpenAI, Gemini, OpenRouter or Ollama?**
 Not yet. See §7 for exactly what is planned and why.

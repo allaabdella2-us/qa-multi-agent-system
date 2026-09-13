@@ -60,10 +60,11 @@ default `pytest` run is offline and free, and must stay that way.
    holding fifteen real sessions and deciding what each may touch. That is what
    makes the context boundary, the tool allowlist and the per-agent cost number
    real rather than bookkeeping — they are separate OS processes.
-   `agents=`/`AgentDefinition` is only for intra-agent fan-out. It also means the
-   CLI is a hard requirement however you authenticate, which `qaas validate`
-   checks: `ANTHROPIC_API_KEY` is how that CLI signs in, not an alternative to
-   installing it.
+   `agents=`/`AgentDefinition` is only for intra-agent fan-out. The binary
+   normally comes with the wheel -- `claude_agent_sdk/_bundled/claude`, which
+   the SDK prefers over `PATH` -- so `qaas validate` mirrors that order rather
+   than calling `shutil.which` alone, which reported a problem to every user
+   whose only copy was the bundled one.
 
 ### Phase pipeline (`router.py`)
 

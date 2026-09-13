@@ -105,10 +105,11 @@ qaas run --repo https://github.com/you/your-app --dry-run
 > Nothing above contacts an API. `--dry-run` prints exactly what each agent would
 > receive — model, budget, turn cap, tool allowlist, prompt size.
 
-**You need the [Claude Code CLI](https://claude.com/claude-code) installed.** Each
-agent runs as a `claude` subprocess, so it is required either way: sign in to use
-your plan's quota, or set `ANTHROPIC_API_KEY` to pay per token. `qaas validate`
-checks for it.
+**Auth:** every agent runs as a Claude Code subprocess, and the SDK wheel bundles
+that binary — so `pip install` is usually the whole install. You just have to be
+authenticated: sign in to `claude` once to use your plan's quota, or set
+`ANTHROPIC_API_KEY` to pay per token. `qaas validate` reports which binary it
+found.
 
 ---
 

@@ -602,19 +602,25 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
             f"[dim]{rm.max_wall_clock_s}s[/dim]{filing}"
         )
 
-    # The SDK spawns the Claude Code CLI -- `shutil.which("claude")` -- once per
-    # agent invocation. Without it on PATH every offline command still passes,
-    # `validate` says "config ok", and the first paid run dies inside the SDK
-    # naming a binary the user was never told they needed. This is the command
-    # whose whole job is "tell me what is wrong before I spend anything".
-    if shutil.which("claude") is None:
+    # Each agent runs as a Claude Code subprocess, so `validate` -- the command
+    # whose whole job is "tell me what is wrong before I spend anything" --
+    # should say when there is no binary to spawn.
+    #
+    # Mirror the SDK's own resolution order and not just `shutil.which`. The
+    # wheel *bundles* a `claude` executable and the SDK prefers it over PATH
+    # (`subprocess_cli._find_cli`), so on a normal `pip install` there is
+    # nothing to install separately. Checking PATH alone reported a problem to
+    # every user whose only copy was the bundled one -- which is most of them.
+    where = _claude_cli()
+    if where is None:
         problems.append(
-            "the Claude Code CLI is not on your PATH. qaas runs each agent as a "
-            "`claude` subprocess, so it is required whichever way you "
-            "authenticate: https://claude.com/claude-code. ANTHROPIC_API_KEY is "
-            "how that CLI signs in when you are not logged in -- it is not an "
-            "alternative to installing it."
+            "no Claude Code binary to run. Normally the claude-agent-sdk wheel "
+            "bundles one; this install has neither that nor `claude` on PATH, "
+            "which usually means a platform with no bundled build. Install the "
+            "CLI: https://claude.com/claude-code"
         )
+    elif shutil.which("claude") and where != shutil.which("claude"):
+        notes.append(f"claude: bundled with the SDK ({where})")
 
     if notes:
         console.print("\n[dim]notes:[/dim]")
@@ -627,6 +633,27 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
             console.print(f"  - {p}")
         raise typer.Exit(1)
     console.print("\n[green]config ok[/green]")
+
+
+def _claude_cli() -> str | None:
+    """The binary the SDK will actually spawn, or None.
+
+    Mirrors `claude_agent_sdk`'s own order -- **bundled first, then PATH** --
+    rather than guessing. The wheel ships a `claude` executable for common
+    platforms, so `pip install qaas-python` is usually enough on its own and a
+    PATH-only check calls a working install broken.
+    """
+    try:
+        from claude_agent_sdk._internal.transport import subprocess_cli
+
+        bundled = (
+            Path(subprocess_cli.__file__).parent.parent.parent / "_bundled" / "claude"
+        )
+        if bundled.is_file():
+            return str(bundled)
+    except Exception:
+        pass
+    return shutil.which("claude")
 
 
 def _describe_writes(spec) -> str:

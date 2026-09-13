@@ -89,13 +89,19 @@ repo label is what scopes it — a shared Jira project holds every repository's
 tickets. And the tickets resolve before `--dry-run` renders, since "what would
 this pick up" is the question `--dry-run` exists to answer.
 
-### The Claude Code CLI is checked, and said out loud
+### `qaas validate` says which Claude Code binary it will run
 
-`qaas validate` now fails if `claude` is not on the PATH. Each agent runs as a
-Claude Code subprocess, so the CLI is required whichever way you authenticate —
-`ANTHROPIC_API_KEY` is how that CLI signs in, not an alternative to installing
-it. The docs said "one or the other", so every offline command passed and the
-first paid run died inside the SDK naming a binary nobody had been told about.
+Each agent runs as a Claude Code subprocess, so `validate` — the command whose
+job is "tell me what is wrong before I spend anything" — now reports when there
+is no binary to spawn, and notes when the one it found is the bundled one.
+
+It mirrors the SDK's own resolution order, which is **bundled first, then
+`PATH`**: the `claude-agent-sdk` wheel ships a `claude` executable for common
+platforms and the SDK prefers it. So `pip install qaas-python` is usually the
+whole install, and what a user must actually supply is authentication — signed
+in to `claude` for plan quota, or `ANTHROPIC_API_KEY` to pay per token. The
+difference decides what a run costs them, which is worth saying next to any
+cost figure.
 
 ### Tuning is editable from the page
 
