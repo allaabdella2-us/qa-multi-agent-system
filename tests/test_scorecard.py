@@ -10,7 +10,18 @@ import pytest
 import yaml
 
 from qaas.envelope import DefectEnvelope, Domain, Severity
-from qaas.scorecard import GoldenLedger, score, similarity
+from qaas.scorecard import (
+    MATCH_THRESHOLD,
+    GoldenDefect,
+    GoldenLedger,
+    Match,
+    Scorecard,
+    score,
+    similarity,
+)
+
+#: The calibration corpus this repository ships.
+LEDGER = Path(__file__).resolve().parents[1] / "target-app" / "defects.yaml"
 
 LEDGER_PATH = Path(__file__).resolve().parents[1] / "target-app" / "defects.yaml"
 
@@ -436,3 +447,114 @@ def test_the_shipped_ledger_still_loads():
     """The obligation this guards is a human's; this is what makes it visible."""
     ledger = GoldenLedger.load(LEDGER_PATH)
     assert ledger.defects and ledger.not_defects
+
+
+# -- what the calibration numbers actually measure ---------------------------
+
+
+def _golden(**kw):
+    base = dict(
+        id="API-01", domain="api", defect_class="bug", severity="major",
+        title="Cross-tenant order read", detail="An org can read another org's orders.",
+        endpoint="GET /v1/orders", paths=("api/app/routes/orders.py",),
+        keywords=("tenant", "leak", "org"),
+    )
+    base.update(kw)
+    return GoldenDefect(**base)
+
+
+def _finding(title, summary, **kw):
+    payload = dict(
+        run_id="r", discovered_by="API", domain="api", **{"class": "bug"},
+        title=title, summary=summary, severity="major", confidence=0.9,
+        location={"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
+        evidence=[{"type": "log", "uri": "artifact://a/b"}],
+    )
+    payload.update(kw)
+    return DefectEnvelope.model_validate(payload)
+
+
+def test_naming_the_right_place_is_not_finding_the_right_defect():
+    """An anchor is *where*, never *what*.
+
+    With `weights = (0.45, 0.30, 0.35)` the right endpoint plus the right file
+    scored 0.75 against a 0.5 threshold on keyword overlap of exactly zero -- so
+    "this endpoint is slow" was credited with having found the cross-tenant leak
+    that lives in the same handler. Recall counted it, the real defect landed in
+    `missed`, and the number the whole project is calibrated on moved the wrong
+    way.
+    """
+    golden = _golden()
+    wrong = _finding("Response time is slow", "This endpoint takes two seconds.")
+    right = _finding("Cross-tenant order read", "An org can read another org's orders.")
+    assert similarity(wrong, golden) < MATCH_THRESHOLD
+    assert similarity(right, golden) >= MATCH_THRESHOLD
+
+
+def test_an_entry_with_no_keywords_still_matches_on_its_anchor():
+    """The rule applies only where there is something to overlap with."""
+    golden = _golden(keywords=())
+    assert similarity(_finding("Anything", "at all"), golden) >= MATCH_THRESHOLD
+
+
+def test_a_websocket_finding_can_match_a_websocket_defect_recorded_under_api():
+    """API-09 is `WEBSOCKET /v1/orders/stream` filed under domain `api`.
+
+    SOCKET owns the realtime surface and reports `websocket`, so with an
+    exact-equality domain gate that agent could only ever miss the one entry in
+    its own domain and be charged a false positive for finding it.
+    """
+    golden = _golden(id="API-09", endpoint="WEBSOCKET /v1/orders/stream",
+                     keywords=("websocket", "stream", "contract"))
+    reported = _finding(
+        "Orders stream is absent from the contract",
+        "The websocket stream endpoint appears in no published contract.",
+        domain="websocket",
+        location={"endpoint": "WEBSOCKET /v1/orders/stream",
+                  "paths": ["api/app/routes/stream.py"]},
+    )
+    assert similarity(reported, golden) >= MATCH_THRESHOLD
+
+
+def test_duplicates_count_against_precision():
+    """A run that finds three defects and files forty restatements of them used
+    to score 100%. That is the ticket spam `qaas sweep --min-precision` exists
+    to catch, so the one number CI reads could not see its own failure mode."""
+    card = Scorecard(total_golden=1, total_envelopes=4)
+    card.matches.append(
+        Match(golden_id="API-01", envelope_id="a", score=0.9,
+              reported_severity="major", expected_severity="major")
+    )
+    card.duplicates.extend(["b", "c", "d"])
+    assert card.precision == pytest.approx(0.25)
+
+
+def test_scoring_one_domain_does_not_charge_the_others_as_noise():
+    """`--domain` narrowed only the golden side.
+
+    Every finding outside the chosen domains stayed in the envelope list with
+    nothing left that could match it, so scoring a nightly run with
+    `--domain api` reported every frontend and database finding the run
+    correctly made as a false positive.
+    """
+    ledger = GoldenLedger(defects=[_golden()], not_defects=[])
+    envelopes = [
+        _finding("Cross-tenant order read", "An org can read another org's orders."),
+        _finding("Button has no label", "The submit control is unlabelled.",
+                 domain="frontend", location={"ui_route": "/orders", "paths": ["web/src/x.tsx"]}),
+    ]
+    card = score(envelopes, ledger, domains={"api"})
+    assert card.false_positives == [], "a frontend finding was charged to an api-only scoring"
+    assert card.precision == pytest.approx(1.0)
+
+
+def test_ui_08_is_a_defect_and_reporting_it_is_not_a_false_positive():
+    """It sat under `not_defects` with no `why_correct` -- the one field that
+    section's entries exist to carry -- while its own detail called it "a latent
+    defect". So a correct report of the missing pager was scored as noise."""
+    ledger = GoldenLedger.load(LEDGER)
+    assert "UI-08" in {d.id for d in ledger.defects}
+    assert "UI-08" not in {n.id for n in ledger.not_defects}
+    assert all(n.why_correct for n in ledger.not_defects), (
+        "every not_defects entry must say why the code is correct"
+    )

@@ -267,6 +267,52 @@ class TurnRecord:
         return [t for t in required if t not in self.called]
 
 
+#: `must_call` entries that only exist on a remote-backed vcs. `LocalGit`
+#: implements neither, and `_remote_refusal` turns a call into an `err()` --
+#: which `on_post_tool` deliberately does not count, because an errored
+#: `record_verdict` must not satisfy VERIFIER's contract. Correct in general and
+#: wrong here: FIXER's `must_call: [mcp__vcs__open_pr]` against the committed
+#: `vcs: local` is a contract no behaviour can satisfy, so the Stop hook blocked,
+#: burned a turn, blocked once more and logged `contract_unmet` on every single
+#: fix -- for a tool the installation does not have.
+_REMOTE_ONLY_TOOLS = {"mcp__vcs__open_pr": "open_pr", "mcp__vcs__push": "push"}
+
+
+def satisfiable_contract(ctx: ToolContext) -> list[str]:
+    """This agent's `must_call`, minus what the configured backend cannot do.
+
+    Dropped rather than failed at config load: `vcs: local` is the committed
+    default and a perfectly good way to run, and an agent whose deliverable is
+    "open a pull request" against a backend with no remote has simply produced
+    everything it could. The drop is recorded so it is visible in the ledger
+    rather than inferred from a contract that quietly got shorter.
+    """
+    required = list(ctx.agent.must_call)
+    unsupported = [t for t in required if t in _REMOTE_ONLY_TOOLS]
+    if not unsupported:
+        return required
+
+    try:
+        from qaas.adapters.vcs import build_vcs
+
+        adapter = build_vcs(str(ctx.config.vcs), ctx.target_root)
+    except Exception:  # noqa: BLE001 — an unbuildable backend cannot support anything
+        adapter = None
+
+    dropped = [
+        t for t in unsupported
+        if adapter is None or not hasattr(adapter, _REMOTE_ONLY_TOOLS[t])
+    ]
+    if dropped:
+        ctx.store.log(
+            "skipped", agent=ctx.agent.name,
+            reason=f"the '{ctx.config.vcs}' vcs backend has no remote, so these "
+                   "must_call tools cannot exist for this run",
+            tools=dropped,
+        )
+    return [t for t in required if t not in dropped]
+
+
 def build_hooks(
     guard: Guardrail, ctx: ToolContext, record: TurnRecord | None = None
 ) -> dict[str, list[HookMatcher]]:
@@ -302,7 +348,9 @@ def build_hooks(
         tool = _field(input_data, "tool_name")
         response = _field(input_data, "tool_response")
 
-        if isinstance(response, dict) and response.get("isError"):
+        if isinstance(response, dict) and (
+            response.get("isError") or response.get("is_error")
+        ):
             ctx.store.log("tool_error", agent=ctx.agent.name, tool=tool, tool_use_id=tool_use_id)
             return {}
 
@@ -327,6 +375,8 @@ def build_hooks(
                 }
         return {}
 
+    required = satisfiable_contract(ctx)
+
     async def on_stop(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
         # `stop_hook_active` is true when this hook already blocked once. Without
         # honouring it, an agent that genuinely cannot satisfy its contract loops
@@ -335,12 +385,12 @@ def build_hooks(
             ctx.store.log(
                 "contract_unmet",
                 agent=ctx.agent.name,
-                missing=record.missing(ctx.agent.must_call),
+                missing=record.missing(required),
                 note="allowed to stop after one block",
             )
             return {}
 
-        missing = record.missing(ctx.agent.must_call)
+        missing = record.missing(required)
         if not missing:
             return {}
 

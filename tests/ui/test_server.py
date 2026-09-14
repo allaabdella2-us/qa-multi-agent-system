@@ -13,16 +13,18 @@ import pytest
 from starlette.testclient import TestClient
 
 from qaas.store import RunStore
+from support import write_scratch_target
+
 from qaas.ui.server import Dashboard, build_app
 
-from .conftest import SPECS, build_run
+from .conftest import SPECS, build_run, local_client
 
 RUN = "run-20260101T000000-aaaaaa"
 
 
 @pytest.fixture
 def client(run_root: Path) -> TestClient:
-    return TestClient(build_app(Dashboard(run_root, specs=SPECS)))
+    return local_client(build_app(Dashboard(run_root, specs=SPECS)))
 
 
 # -- run listing and selection --------------------------------------------
@@ -37,12 +39,12 @@ def test_runs_lists_newest_first_with_cost(client: TestClient) -> None:
 def test_live_picks_the_unfinished_run(tmp_path: Path) -> None:
     build_run(tmp_path, "run-20260101T000000-aaaaaa", finish=False)
     build_run(tmp_path, "run-20260102T000000-bbbbbb", finish=True)
-    client = TestClient(build_app(Dashboard(tmp_path, specs=SPECS)))
+    client = local_client(build_app(Dashboard(tmp_path, specs=SPECS)))
     assert client.get("/api/runs/live").json()["run_id"] == "run-20260101T000000-aaaaaa"
 
 
 def test_live_says_so_when_there_are_no_runs(tmp_path: Path) -> None:
-    client = TestClient(build_app(Dashboard(tmp_path, specs=SPECS)))
+    client = local_client(build_app(Dashboard(tmp_path, specs=SPECS)))
     response = client.get("/api/runs/live")
     assert response.status_code == 404
     assert "no runs yet" in response.json()["error"]
@@ -179,7 +181,7 @@ def test_score_reports_recall_and_precision_when_there_is_one(
         "    keywords: [cross-tenant, org, orders]\n",
         encoding="utf-8",
     )
-    client = TestClient(build_app(Dashboard(run_root, specs=SPECS, ledger_path=golden)))
+    client = local_client(build_app(Dashboard(run_root, specs=SPECS, ledger_path=golden)))
     body = client.get(f"/api/runs/{RUN}/score").json()
     assert body["of"] == 1
     assert "recall" in body and "precision" in body
@@ -227,9 +229,10 @@ def test_the_write_route_cannot_touch_a_policy(tmp_path: Path) -> None:
     config = tmp_path / "cfg"
     shutil.copytree(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config",
                     config)
+    write_scratch_target(config, tmp_path / "app")
     cfg = load_config(search=[config])
     before = list(cfg.agents["FIXER"].policy.write_paths)
-    client = TestClient(build_app(Dashboard(tmp_path, cfg=cfg, config_dirs=[config])))
+    client = local_client(build_app(Dashboard(tmp_path, cfg=cfg, config_dirs=[config])))
 
     for payload in (
         {"section": "agents", "agent": "FIXER", "values": {"policy": {"write_paths": ["/"]}}},
@@ -253,8 +256,9 @@ def test_a_tunable_field_round_trips(tmp_path: Path) -> None:
     config = tmp_path / "cfg"
     shutil.copytree(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config",
                     config)
+    write_scratch_target(config, tmp_path / "app")
     cfg = load_config(search=[config])
-    client = TestClient(build_app(Dashboard(tmp_path, cfg=cfg, config_dirs=[config])))
+    client = local_client(build_app(Dashboard(tmp_path, cfg=cfg, config_dirs=[config])))
 
     assert client.post("/api/config/override", json={
         "section": "agents", "agent": "FIXER", "values": {"model": "claude-opus-4-7"},
@@ -282,7 +286,8 @@ def test_a_value_that_would_not_load_is_refused_before_it_is_written(tmp_path: P
     config = tmp_path / "cfg"
     shutil.copytree(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config",
                     config)
-    client = TestClient(build_app(
+    write_scratch_target(config, tmp_path / "app")
+    client = local_client(build_app(
         Dashboard(tmp_path, cfg=load_config(search=[config]), config_dirs=[config])))
 
     response = client.post("/api/config/override", json={
@@ -297,7 +302,7 @@ def test_config_is_served_and_names_the_roster(run_root: Path) -> None:
     from qaas.config import load_config
 
     cfg = load_config(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config")
-    client = TestClient(build_app(Dashboard(run_root, specs=SPECS, cfg=cfg)))
+    client = local_client(build_app(Dashboard(run_root, specs=SPECS, cfg=cfg)))
     payload = client.get("/api/config").json()
     assert payload["loaded"] is True
     assert {a["name"] for a in payload["agents"]} >= {"MAPPER", "FIXER", "VERIFIER"}
@@ -310,7 +315,7 @@ def test_config_without_a_config_still_answers(run_root: Path) -> None:
     The agent grid already renders without specs. A 500 here would make the
     whole page unusable for the case the runs half was built to survive.
     """
-    client = TestClient(build_app(Dashboard(run_root)))
+    client = local_client(build_app(Dashboard(run_root)))
     response = client.get("/api/config")
     assert response.status_code == 200
     assert response.json()["loaded"] is False
@@ -330,7 +335,7 @@ def test_score_keeps_the_counts_as_counts(run_root: Path, tmp_path: Path) -> Non
         "    paths: [api/app/nowhere.py]\n    keywords: [unrelated]\n",
         encoding="utf-8",
     )
-    client = TestClient(build_app(Dashboard(run_root, specs=SPECS, ledger_path=golden)))
+    client = local_client(build_app(Dashboard(run_root, specs=SPECS, ledger_path=golden)))
     body = client.get(f"/api/runs/{RUN}/score").json()
     assert isinstance(body["false_positives"], int)
     assert isinstance(body["false_positive_ids"], list)
@@ -411,3 +416,68 @@ def test_the_theme_is_chosen_before_first_paint() -> None:
         "a hardcoded theme attribute would override the stored choice and "
         "prefers-color-scheme both"
     )
+
+
+# -- the two doors that were open by default --------------------------------
+
+
+def test_a_rebound_dns_name_cannot_read_the_ledger(run_root: Path) -> None:
+    """The server binds 127.0.0.1, which stops a network peer and does nothing
+    about the browser already running as this user.
+
+    A site on attacker-controlled DNS with a short TTL rebinds its own name to
+    127.0.0.1 and is then same-origin with this page: every GET -- the run
+    ledger, agent-authored prose, target source excerpts, ticket keys -- becomes
+    readable. Starlette answers on whatever `Host` it is given, so the check is
+    that the Host is a loopback literal, which `evil.example` never is however
+    it resolves.
+    """
+    from starlette.testclient import TestClient
+
+    attacker = TestClient(build_app(Dashboard(run_root, specs=SPECS)),
+                          base_url="http://evil.example")
+    assert attacker.get("/api/runs").status_code == 421
+    assert local_client(build_app(Dashboard(run_root, specs=SPECS))).get(
+        "/api/runs"
+    ).status_code == 200
+
+
+def test_a_cross_origin_page_cannot_rewrite_the_overrides(tmp_path: Path) -> None:
+    """`_set_override` reads `await request.json()`, which does not check
+    Content-Type.
+
+    So a cross-origin `fetch` with `text/plain` is a CORS-*simple* request: sent
+    with no preflight, and the write lands. The attacker cannot read the reply
+    and does not need to -- setting `min_confidence_to_file` to 0, or repointing
+    an agent's model, is the whole payload.
+    """
+    import shutil
+
+    from qaas.config import OVERRIDES_FILE, load_config
+    from support import write_scratch_target
+
+    config = tmp_path / "cfg"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "src" / "qaas" / "defaults" / "config",
+                    config)
+    write_scratch_target(config, tmp_path / "app")
+    cfg = load_config(search=[config])
+    client = local_client(build_app(Dashboard(tmp_path, cfg=cfg, config_dirs=[config])))
+
+    body = '{"section": "thresholds", "values": {"min_confidence_to_file": 0.0}}'
+    payload = {"section": "thresholds", "values": {"min_confidence_to_file": 0.0}}
+
+    # A simple request cannot set application/json, so it is refused on that.
+    assert client.post(
+        "/api/config/override", content=body, headers={"content-type": "text/plain"}
+    ).status_code == 415
+    # And an explicit cross-origin write is refused on the Origin.
+    assert client.post(
+        "/api/config/override", json=payload, headers={"origin": "http://evil.example"}
+    ).status_code == 403
+    assert client.post(
+        "/api/config/override", json=payload, headers={"sec-fetch-site": "cross-site"}
+    ).status_code == 403
+    assert not (config / OVERRIDES_FILE).exists(), "a refused write landed anyway"
+
+    # The page's own writes still work.
+    assert client.post("/api/config/override", json=payload).status_code == 200

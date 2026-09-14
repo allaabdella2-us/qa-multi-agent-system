@@ -61,7 +61,7 @@ noisy. Depth on a few well-evidenced findings is the point of the run.
 3. For the front end, read the entry chunk's import graph and the dependency
    manifest. A large dependency reachable from the entry point is measurable
    without a bundler run; say what pulls it in.
-4. Where an environment is available, **time the request** through `env_control`
+4. Where an environment is available, **time the request** with `env_control.http_request`
    rather than asserting it is slow. Call it several times, discard the first,
    and report the numbers you saw with the row count that produced them.
 5. Where the cost grows with the data, show that it grows: seed more rows, call

@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from support import CONFIG_SEARCH, PACKAGED_CONFIG
+from support import CONFIG_SEARCH, PACKAGED_CONFIG, PACKAGED_TARGETS
 
 from qaas.adapters.tracker import (
     JIRA_API_TOKEN_URL,
@@ -788,6 +788,10 @@ def jira_config(tmp_path) -> Path:
 
     dest = tmp_path / "config"
     shutil.copytree(PACKAGED_CONFIG, dest)
+    # Targets too: a config with agents and no targets is not a state a user is
+    # ever in, and the suite names one through QAAS_TARGET.
+    if PACKAGED_TARGETS.is_dir():
+        shutil.copytree(PACKAGED_TARGETS, dest / "targets", dirs_exist_ok=True)
     system = dest / "system.yaml"
     system.write_text(system.read_text().replace("tracker: local", "tracker: jira", 1))
     return dest

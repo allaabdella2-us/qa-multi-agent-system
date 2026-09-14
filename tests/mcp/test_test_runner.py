@@ -268,11 +268,61 @@ async def test_run_n_times_caps_the_run_count(tools):
 # -- affected_tests ---------------------------------------------------------
 
 
-async def test_affected_tests_prefers_name_correspondence(tools):
+async def test_affected_tests_is_derived_from_imports_not_filenames(tools):
+    """The graph answers first, and says so.
+
+    `test_calc.py` imports `pkg.calc`, so this is a derived answer at distance 1
+    rather than a filename guess. `heuristic` is the flag a caller reads to know
+    which it got -- "no tests are affected" and "I cannot see this language" are
+    different answers and the tool must not conflate them.
+    """
     result = await tools["affected_tests"]({"paths": ["pkg/calc.py"]})
-    affected = result["structuredContent"]["affected"]
-    assert affected[0]["test_file"] == "tests/test_calc.py", affected
-    assert result["structuredContent"]["heuristic"] is True
+    body = result["structuredContent"]
+    assert body["affected"][0]["test_file"] == "tests/test_calc.py", body["affected"]
+    assert body["affected"][0]["distance"] == 1
+    assert body["heuristic"] is False
+    assert body["method"] == "import-graph"
+    # A test that imports nothing of the sort must not be dragged in.
+    assert "tests/test_unrelated.py" not in [a["test_file"] for a in body["affected"]]
+
+
+async def test_affected_tests_falls_back_when_the_graph_cannot_answer(tools, project):
+    """A non-Python change, in a repository the graph can otherwise read.
+
+    The fallback is the point: the target can be any language, and returning "no
+    tests are affected" for a whole language would be worse than the heuristic
+    it replaced. The answer says which method produced it either way.
+    """
+    (project / "pkg" / "calc.go").write_text("package pkg\n")
+    result = await tools["affected_tests"]({"paths": ["pkg/calc.go"]})
+    body = result["structuredContent"]
+    assert body["heuristic"] is True
+    assert body["method"] == "filename-heuristic"
+
+
+async def test_a_test_two_hops_away_is_found_at_all(tools, project):
+    """The case the filename heuristic scores zero, which is why this exists.
+
+    `helpers.py` is imported by `calc.py`, which is imported by `test_calc.py`.
+    Nothing about the name `test_calc` resembles `helpers`, so
+    `regression-suite-selection`'s step 3 -- "a fix inside a shared helper breaks
+    its consumers, not itself" -- was delegated to a ranking that could not see
+    it.
+    """
+    (project / "pkg" / "helpers.py").write_text("def helper():\n    return 1\n")
+    calc = project / "pkg" / "calc.py"
+    calc.write_text("from pkg.helpers import helper\n" + calc.read_text())
+
+    result = await tools["affected_tests"]({"paths": ["pkg/helpers.py"]})
+    body = result["structuredContent"]
+    reached = {a["test_file"]: a["distance"] for a in body["affected"]}
+    assert reached.get("tests/test_calc.py") == 2, body["affected"]
+
+    # And the heuristic really cannot: it is the control for the claim above.
+    from qaas.mcp.test_runner import _collect_test_files, _score_tests
+
+    guessed = _score_tests(project, ["pkg/helpers.py"], _collect_test_files(project))
+    assert "tests/test_calc.py" not in [g["test_file"] for g in guessed]
 
 
 async def test_affected_tests_needs_paths(tools):
@@ -337,3 +387,50 @@ def test_json_report_parser_declines_a_broken_report(tmp_path):
     broken.write_text("{not json")
     assert _parse_json_report(broken) is None
     assert _parse_json_report(tmp_path / "absent.json") is None
+
+
+# -- what a target's own test suite runs with -------------------------------
+
+
+def test_the_targets_tests_never_see_this_users_credentials(monkeypatch):
+    """The child environment is an allowlist, not a copy with two keys removed.
+
+    It was `dict(os.environ, ...)` minus `PYTEST_ADDOPTS` and
+    `PYTEST_CURRENT_TEST`, so the target repository's suite -- someone else's
+    code, cloned from a pasted URL under `qaas run --repo` -- ran with this
+    user's `ANTHROPIC_API_KEY`, `JIRA_API_TOKEN` and `GITHUB_TOKEN` in scope. A
+    `conftest.py` that reads `os.environ` is the whole exploit, and running the
+    target's tests is this server's purpose rather than an edge case.
+    """
+    from qaas.mcp.test_runner import _child_env
+
+    for name, value in {
+        "ANTHROPIC_API_KEY": "sk-ant-secret",
+        "JIRA_API_TOKEN": "jira-secret",
+        "GITHUB_TOKEN": "gh-secret",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret",
+        "SOME_COMPANY_INTERNAL_URL": "https://internal",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    env = _child_env()
+    assert "secret" not in " ".join(env.values()).lower()
+    for leaked in ("ANTHROPIC_API_KEY", "JIRA_API_TOKEN", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY"):
+        assert leaked not in env, leaked
+    # An allowlist, so an unrecognised variable is dropped too -- the set of
+    # secrets a machine holds is open-ended and the set a suite needs is not.
+    assert "SOME_COMPANY_INTERNAL_URL" not in env
+
+
+def test_what_a_target_actually_needs_still_reaches_it(monkeypatch):
+    monkeypatch.setenv("QAAS_TARGET_DATABASE_URL", "postgres://localhost/test")
+    env = _child_env_for_test({"DATABASE_URL": "explicitly passed"})
+    assert env["QAAS_TARGET_DATABASE_URL"] == "postgres://localhost/test"
+    assert env["DATABASE_URL"] == "explicitly passed"
+    assert "PATH" in env and env["COLUMNS"] == "250"
+
+
+def _child_env_for_test(extra):
+    from qaas.mcp.test_runner import _child_env
+
+    return _child_env(extra)

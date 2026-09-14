@@ -196,9 +196,19 @@ def _keyword_overlap(text: str, keywords: Iterable[str]) -> float:
 # rather than the agent: API filed a cross-tenant read under `security`, and
 # BROWSER filed a missing label and a contrast failure under `ux`. Marking those
 # as misses would have hidden a perfect discovery run behind a 50% score.
+#
+# `websocket`/`api` is the same shape, found the same way. API-09 is a defect on
+# `WEBSOCKET /v1/orders/stream` recorded under domain `api` -- a defensible
+# reading, since the endpoint is served by the API and the defect is that it is
+# missing from the API's published contract. But SOCKET owns the realtime
+# surface and files under `websocket`, so with an exact-equality gate that agent
+# could only ever *miss* the one entry in its own domain and be charged a false
+# positive for finding it.
 _EQUIVALENT_DOMAINS: dict[str, set[str]] = {
     "ux": {"frontend"},
     "frontend": {"ux"},
+    "websocket": {"api"},
+    "api": {"websocket"},
 }
 
 
@@ -241,10 +251,29 @@ def similarity(env: DefectEnvelope, golden: GoldenDefect) -> float:
     weights = (0.45, 0.30, 0.35) if anchored else (0.0, 0.35, 0.65)
     w_location, w_paths, w_keywords = weights
 
+    keywords = _keyword_overlap(text, golden.keywords)
     score = w_location if (endpoint_match or route_match) else 0.0
     score += w_paths * _path_overlap(env.location.paths, golden.paths)
-    score += w_keywords * _keyword_overlap(text, golden.keywords)
-    return min(score, 1.0)
+    score += w_keywords * keywords
+    score = min(score, 1.0)
+
+    # An anchor is *where*, never *what*. With `weights = (0.45, 0.30, 0.35)`,
+    # naming the right endpoint and the right file scored 0.75 against a
+    # threshold of 0.5 with keyword overlap of exactly zero -- so a finding that
+    # said "this endpoint is slow" was credited with having found the
+    # cross-tenant leak that lives in the same handler. Recall counted it, the
+    # real defect went in `missed`, and the number the whole project is
+    # calibrated on moved in the wrong direction.
+    #
+    # `golden.keywords` is what an entry uses to say what the defect *is*, so
+    # requiring some overlap is requiring the report to be about the same thing.
+    # Applied only where there is something to overlap with: an entry that
+    # declares no keywords has nothing to say here and the anchor is all there
+    # is. An unanchored defect already weights keywords at 0.65 and needs no
+    # help.
+    if anchored and golden.keywords and keywords == 0.0:
+        return min(score, MATCH_THRESHOLD - 0.01)
+    return score
 
 
 def resembles_planted(env: DefectEnvelope, planted: PlantedNonDefect) -> float:
@@ -300,7 +329,19 @@ class Scorecard:
 
     @property
     def precision(self) -> float:
-        judged = len(self.matches) + len(self.false_positives)
+        """Accepted findings over findings judged — duplicates included.
+
+        Duplicates were kept out of the denominator as well as the numerator, so
+        a run that found three real defects and filed forty restatements of them
+        scored 100% precision. That is the exact ticket-spam this system is built
+        to avoid, and `qaas sweep --min-precision` is the gate meant to catch it,
+        so the one number CI reads could not see the failure mode it exists for.
+
+        A duplicate is not a false positive -- it is true -- but it is a finding
+        that should not have been emitted, and precision is the measure of what
+        an operator would have had to read.
+        """
+        judged = len(self.matches) + len(self.false_positives) + len(self.duplicates)
         return len(self.matches) / judged if judged else 0.0
 
     @property
@@ -359,7 +400,10 @@ class Scorecard:
             row(who.get(envelope_id, "unknown"))["planted_misreported"] += 1
 
         for entry in rows.values():
-            judged = entry["matched"] + entry["false_positive"]
+            # The same denominator `Scorecard.precision` uses, duplicates
+            # included: an agent that restates its own finding forty times has
+            # not earned 100%.
+            judged = entry["matched"] + entry["false_positive"] + entry["duplicate"]
             entry["precision"] = round(entry["matched"] / judged, 3) if judged else None
             deltas = entry.pop("severity_deltas")
             entry["severity_agreement"] = (
@@ -405,6 +449,26 @@ def score(
     built to avoid.
     """
     in_scope = [d for d in ledger.for_phase(phase) if domains is None or d.domain in domains]
+    # `--domain` narrowed only the golden side, so every finding outside the
+    # chosen domains stayed in `total_envelopes` and fell through to the
+    # false-positive loop with nothing left that could match it. Scoring a
+    # nightly run with `--domain api` therefore reported every frontend,
+    # database and security finding the run correctly made as noise, and
+    # precision collapsed for a reason that had nothing to do with the agents.
+    #
+    # Filtered by *compatibility* rather than equality, using the same rule the
+    # matcher uses: a finding filed under `security` or `ux` is a defensible
+    # reading of an `api` or `frontend` entry and must survive the same scoping
+    # that lets it match.
+    if domains is not None:
+        wanted = {
+            d for d in domains
+        } | {equivalent for d in domains for equivalent in _EQUIVALENT_DOMAINS.get(d, set())}
+        envelopes = [
+            e for e in envelopes
+            if e.domain.value in wanted
+            or (e.domain.value == "security" and any(g.security_relevant for g in in_scope))
+        ]
     # A defect marked `fixed_in` is still matched -- so a report of it is not
     # written off as a false positive -- but it leaves the recall denominator.
     # Counting a repaired defect as a miss on every future run is exactly the

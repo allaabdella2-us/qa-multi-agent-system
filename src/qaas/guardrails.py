@@ -62,7 +62,15 @@ READ_TOOLS = {"Read", "Grep", "Glob", "NotebookRead"} | set(ALWAYS_GRANTED)
 # worse than useless: MCP tools arrive deferred, so an agent that cannot call it
 # cannot reach the servers it was given, and burns its whole turn budget
 # discovering that. This system did exactly that once.
-HARNESS_TOOLS = {"ToolSearch", "TodoWrite", "Task", "Agent", "Skill", "SlashCommand"}
+#
+# Derived from `ALWAYS_GRANTED` rather than restated. The comment on that
+# constant claims `build_allowed_tools` and the guardrail "both read this
+# constant so the allowlist and the guardrail cannot drift apart" -- and they
+# did drift: `registry.build_allowed_tools` read `ALWAYS_GRANTED`, while
+# `_check_declared` read this set, which had an extra `SlashCommand` in it. So
+# the guardrail approved a tool the allowlist never granted. Harmless as it
+# happened, and precisely the mismatch the comment says cannot occur.
+HARNESS_TOOLS = set(ALWAYS_GRANTED)
 
 # Tools that write to the filesystem. Gated on policy.write_paths.
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
@@ -341,7 +349,7 @@ class Guardrail:
             return Decision(False, "write refused: no file path in the call")
         return self._check_path(str(raw))
 
-    def _check_path(self, raw: str) -> Decision:
+    def _check_path(self, raw: str, *, count_against_budget: bool = True) -> Decision:
         """The §8.1/§8.2 matrix, applied to one path an agent wants to write.
 
         Split out of `_check_write` so it is the single place the rules live:
@@ -381,12 +389,31 @@ class Guardrail:
                 "If you believe the test itself is wrong, that is an escalation.",
             )
 
+        # `count_against_budget=False` reads the matrix without spending
+        # anything. `_check_diff_budget` *mutates* `touched_files`, and
+        # `mcp/vcs.py:commit` validates every staging pathspec through here --
+        # so committing `api/app` and `web/src`, which is what FIXER's own
+        # `write_paths` are, charged two entries to a budget of five files
+        # before a single line had changed. A fixer that touched four files
+        # could not commit them.
         for allowed in self._allowed_roots:
             if resolved == allowed or resolved.is_relative_to(allowed):
-                return self._check_diff_budget(relative)
-        for pattern in self._allowed_globs:
-            if fnmatch.fnmatch(relative, pattern):
-                return self._check_diff_budget(relative)
+                return self._check_diff_budget(relative) if count_against_budget else Decision(True)
+        # Containment first, then the pattern. The root branch above proves
+        # containment with `is_relative_to`; this one only ever matched a
+        # string, and `relative` falls back to the *absolute* path when the
+        # target is outside the root -- so with a policy of `*_test.py`,
+        # `fnmatch("/etc/x_test.py", "*_test.py")` is True, because fnmatch's
+        # `*` crosses `/`. A glob write path escaped the checkout entirely. No
+        # shipped agent uses one today, which is exactly why it went unnoticed.
+        if resolved == self.root or resolved.is_relative_to(self.root):
+            for pattern in self._allowed_globs:
+                if fnmatch.fnmatch(relative, pattern):
+                    return (
+                        self._check_diff_budget(relative)
+                        if count_against_budget
+                        else Decision(True)
+                    )
         return Decision(
             False,
             f"write refused: {resolved} is outside {self.agent.name}'s sandbox "

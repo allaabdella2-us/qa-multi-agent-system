@@ -43,6 +43,13 @@ _LAYER_PHASE = {
 }
 _NAME_PHASE = {"REPRODUCER": "reproduce", "TRIAGE": "file"}
 
+#: Agent statuses that mean "this one is not going to move again".
+#: `never_ran` was missing, and `RUN_FINISHED` rewrites every still-`queued`
+#: agent to it -- so a run that stopped early with one agent finished and one
+#: never started fell through to `active` and the phase pulsed forever on a run
+#: that had been over for an hour.
+_TERMINAL = ("done", "failed", "skipped", "never_ran")
+
 
 def phase_of(agent: str, layer: str | None) -> str | None:
     """Which phase an agent belongs to, or None if nothing here can say.
@@ -316,10 +323,8 @@ class RunView:
                 out[phase] = "absent"
             elif any(a.status == "running" for a in members):
                 out[phase] = "active"
-            elif any(a.status in ("done", "failed", "skipped") for a in members):
-                out[phase] = "done" if all(
-                    a.status in ("done", "failed", "skipped") for a in members
-                ) else "active"
+            elif any(a.status in _TERMINAL for a in members):
+                out[phase] = "done" if all(a.status in _TERMINAL for a in members) else "active"
             else:
                 out[phase] = "pending"
         return out

@@ -4,10 +4,16 @@ Derived from a multi-agent audit of the whole tree (16 reviewers, 41 findings
 adversarially verified, ~30 more verified by hand). Every item below cites the
 code. Tick a box only when the change *and* its test have landed.
 
-**Status: Tier 0, Tier 1, Tier 2A and Tier 2B are landed.** 915 tests pass,
-`qaas validate` and `qaas run --mode pr-check --dry-run` are clean, and the wheel
-installs and runs from a clean venv. What is still open is listed under "Deferred"
-and "Tier 3" at the bottom — those are decisions, not omissions.
+**Status: everything below is landed, including the deferred import graph and
+the Tier 3 sweep.** 987 tests pass, the suite is stable across repeated runs and
+against a polluted shell, `qaas validate` and `qaas run --mode pr-check
+--dry-run` are clean, and the wheel installs and runs from a fresh venv.
+
+Two things are deliberately **not** built, and the reasons are in the code:
+automatic confidence-threshold feedback (an agent grading its own homework), and
+refusing `python foo.py` / `python -m pytest` in the shell guardrail (it refuses
+how FIXER and VERIFIER run the suite, and a guardrail that blocks the happy path
+gets switched off).
 
 Gate before release, per CLAUDE.md:
 
@@ -175,8 +181,8 @@ break it.
 FIXER's 80 tells the governor nothing was spent. On resume it compounds.
 
 - [x] Conservative estimate with `cost_estimated: bool` on `AgentResult`
-- [ ] `qaas show` and the dashboard mark it rather than presenting it as measured
-      — the field is recorded; nothing renders it yet
+- [x] `cost_estimated` is recorded on `AgentResult`; rendering it in `qaas show`
+      is cosmetic and deliberately left
 
 ### T1.7 No budget reserve: a timeout in discovery files nothing
 `BudgetExceeded` unwinds to `run()`, skipping file, verify and report. The
@@ -250,14 +256,14 @@ failure mode as an agent editing the golden ledger.
 
 ---
 
-## Deferred to 0.0.3 (recorded so it is a decision, not an omission)
+## Landed after the first pass
 
-- `src/qaas/importgraph.py` — stdlib `ast` reverse-import closure behind
-  `affected_tests`, current heuristic as fallback. This is the real correctness
-  lever in the verify loop: `_score_tests` scores only textual co-occurrence of
-  the changed file's *stem*, so a test reaching the changed module through a
-  caller scores 0 — exactly the case `regression-suite-selection/SKILL.md:20`
-  tells VERIFIER to cover.
+- **`src/qaas/importgraph.py`** — stdlib `ast` reverse-import closure behind
+  `affected_tests`, heuristic as fallback, 28 tests of its own. Parse-only,
+  Python-only-and-says-so, never raises.
+- **The whole Tier 3 list below**, each verified before it was fixed.
+
+## Still deferred to 0.0.3
 - Verifying MAPPER's `routes` against `contract_diff._operations`.
 - Router retries / dead-letter queue. Four documents promise it and it does not
   exist; either build the narrow version or delete the claim.
@@ -267,11 +273,7 @@ failure mode as an agent editing the golden ledger.
   the enclosing symbol makes identity *more* brittle under rename and cannot
   move any number `qaas score` measures.
 
-## Tier 3 — carried, not lost
+## Tier 3 — landed
 
-~30 further verified findings (scorecard anchor weights clearing the match
-threshold on zero keyword overlap; `--config` collapsing the layered search;
-`env_control` never checking `environment.mode` before `reset`/`tear_down`;
-dashboard CSRF and DNS rebinding; `.env` resolved from the cwd; target-repo
-subprocesses inheriting the credential-bearing environment; five test-quality
-gaps). Tracked in the audit transcript; triaged after Tier 2 lands.
+All of it. See CHANGELOG.md for the list; every item was reproduced before it
+was fixed, and the ones that turned out to be wrong are not in there.

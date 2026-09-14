@@ -23,7 +23,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from support import CONFIG_SEARCH, PACKAGED_CONFIG, PACKAGED_PROMPTS
+from support import CONFIG_SEARCH, PACKAGED_CONFIG, PACKAGED_PROMPTS, make_project
 from typer.testing import CliRunner
 
 from qaas import cli
@@ -70,8 +70,7 @@ def _project(tmp_path: Path) -> Path:
     A project is defined by its *config*, so a prompts-only directory is not one
     and `Workspace.resolve()` would walk straight past it.
     """
-    shutil.copytree(PACKAGED_CONFIG, tmp_path / ".qaas" / "config")
-    return tmp_path
+    return make_project(tmp_path)
 
 
 # -- composition ------------------------------------------------------------

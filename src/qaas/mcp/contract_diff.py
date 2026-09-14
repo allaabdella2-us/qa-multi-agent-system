@@ -141,14 +141,34 @@ def _login_path(ctx: ToolContext) -> str:
     return path if path.startswith("/") else f"/{path}"
 
 
-def _spec_origin() -> str:
+def _live_base(ctx: "ToolContext | None" = None) -> str:
+    """Where the running application under test is, resolved once.
+
+    `QAAS_TARGET_BASE_URL`, then the target profile's `environment.api_url`,
+    then the demo default. The profile step was missing everywhere, so the
+    allowlist, the `spec_b` default and the generated test's `default_base` all
+    fell through to `http://localhost:8000` -- a fact about the bundled demo
+    hardcoded into the module that is supposed to make this portable. Pointing
+    qaas at an application on any other port meant `diff_openapi` refused to
+    fetch its own target's spec.
+    """
+    override = os.environ.get("QAAS_TARGET_BASE_URL")
+    if override:
+        return override
+    environment = getattr(getattr(ctx, "config", None), "profile", None)
+    api_url = getattr(getattr(environment, "environment", None), "api_url", None) if environment else None
+    return api_url or DEFAULT_LIVE_SPEC_URL
+
+
+def _spec_origin(ctx: "ToolContext | None" = None) -> str:
     """The one origin a spec may be fetched from: the app under test."""
-    base = os.environ.get("QAAS_TARGET_BASE_URL") or DEFAULT_LIVE_SPEC_URL
-    parts = urllib.parse.urlsplit(base)
+    parts = urllib.parse.urlsplit(_live_base(ctx))
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def _read_spec(ref: str, target_root: Path) -> tuple[dict[str, Any] | None, str | None]:
+def _read_spec(
+    ref: str, target_root: Path, ctx: "ToolContext | None" = None
+) -> tuple[dict[str, Any] | None, str | None]:
     """Load a spec from the target's URL or a path inside the checkout.
 
     Both halves were open. A `spec` argument is agent-supplied, and it went
@@ -164,7 +184,7 @@ def _read_spec(ref: str, target_root: Path) -> tuple[dict[str, Any] | None, str 
     code and the running app, not the web") — this makes the two agree.
     """
     if _is_url(ref):
-        allowed = _spec_origin()
+        allowed = _spec_origin(ctx)
         parts = urllib.parse.urlsplit(ref)
         if f"{parts.scheme}://{parts.netloc}" != allowed:
             return None, (
@@ -777,14 +797,15 @@ def build_tools(ctx: ToolContext) -> list:
     )
     async def diff_openapi(args: dict[str, Any]) -> dict[str, Any]:
         ref_a = str(args.get("spec_a") or default_spec)
-        live_default = os.environ.get("QAAS_TARGET_BASE_URL")
-        live_default = f"{live_default.rstrip('/')}/openapi.json" if live_default else DEFAULT_LIVE_SPEC_URL
+        live_default = _live_base(ctx)
+        if not live_default.endswith(".json"):
+            live_default = f"{live_default.rstrip('/')}/openapi.json"
         ref_b = str(args.get("spec_b") or live_default)
 
-        doc_a, problem = _read_spec(ref_a, ctx.target_root)
+        doc_a, problem = _read_spec(ref_a, ctx.target_root, ctx)
         if problem:
             return err(f"Could not load spec_a: {problem}")
-        doc_b, problem = _read_spec(ref_b, ctx.target_root)
+        doc_b, problem = _read_spec(ref_b, ctx.target_root, ctx)
         if problem:
             hint = (
                 " The target app does not appear to be running. Start it with env_control.spin_up, "
@@ -937,7 +958,7 @@ def build_tools(ctx: ToolContext) -> list:
     )
     async def generate_contract_test(args: dict[str, Any]) -> dict[str, Any]:
         ref = str(args.get("spec") or default_spec)
-        doc, problem = _read_spec(ref, ctx.target_root)
+        doc, problem = _read_spec(ref, ctx.target_root, ctx)
         if problem:
             return err(f"Could not load the spec: {problem}")
         assert doc is not None
@@ -977,7 +998,9 @@ def build_tools(ctx: ToolContext) -> list:
             # docstring, so a stray triple quote would produce a file that will
             # not import. Neutralise it rather than reject the call.
             why=str(args.get("expectation") or "Asserts the published contract for this endpoint.").strip().replace('"""', "'''").replace("\\", "/"),
-            default_base=os.environ.get("QAAS_TARGET_BASE_URL", "http://localhost:8000").rstrip("/"),
+            # Same resolution as the allowlist and the `spec_b` default, so a
+            # generated test targets the application this run is pointed at.
+            default_base=_live_base(ctx).removesuffix("/openapi.json").rstrip("/"),
             login_path=_login_path(ctx),
             expected_status=expected,
             required_top=required_top,

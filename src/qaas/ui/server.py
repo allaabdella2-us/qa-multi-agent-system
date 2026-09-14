@@ -18,10 +18,13 @@ import queue
 import threading
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Mapping
 
 import anyio
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
@@ -73,6 +76,10 @@ def _err(message: str, status: int = 404) -> Response:
 
 #: Distinct from None, which the tail thread uses to mean "the run is over".
 _EMPTY = object()
+
+#: Put on a client's queue when it is dropped for being too slow, so its
+#: generator wakes, ends the response, and the browser reconnects.
+_CLOSED = {"event": "done", "data": {"dropped": True, "reason": "client fell behind"}}
 
 
 class RunWatcher:
@@ -189,8 +196,18 @@ class RunWatcher:
                 client.put_nowait(message)
             except asyncio.QueueFull:
                 # A tab that cannot keep up is dropped rather than allowed to
-                # back-pressure the tail thread into unbounded memory.
+                # back-pressure the tail thread into unbounded memory -- but it
+                # has to be *told*. Discarding it alone left the per-client
+                # generator parked on `await client.get()` with nothing that
+                # would ever put to that queue again: the SSE response never
+                # completed and never errored, so `EventSource` saw an open
+                # connection and never reconnected. A frozen tab that looks live
+                # is worse than a broken one, which at least reloads.
                 self.clients.discard(client)
+                try:
+                    client.put_nowait(_CLOSED)
+                except asyncio.QueueFull:
+                    pass
 
     def attach(self) -> asyncio.Queue:
         client: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -239,8 +256,26 @@ class Dashboard:
         # mistyped URL left a permanent empty run in `qaas runs` (store.py:126).
         return store if store.dir.exists() else None
 
+    def _evict_if_stale(self, run_id: str) -> None:
+        """Drop a finished watcher whose run has started moving again.
+
+        `RunWatcher.start` deliberately spawns no tail thread for a completed
+        run, so that watcher's view is frozen at the moment it was built --
+        correct, until `qaas run --run-id <existing>` resumes the run and appends
+        to the same ledger. Nothing ever removed it, so from then on the
+        dashboard served a dead snapshot of a live run, for the lifetime of the
+        process, and a reload did not help because the cache was hit first.
+        """
+        watcher = self.watchers.get(run_id)
+        if watcher is None or not watcher.done:
+            return
+        store = self.store(run_id)
+        if store is not None and state.is_live(store):
+            self.watchers.pop(run_id, None)
+
     def view(self, run_id: str) -> state.RunView | None:
         """The live view if one is being watched, else a fresh replay."""
+        self._evict_if_stale(run_id)
         watcher = self.watchers.get(run_id)
         if watcher is not None:
             return watcher.view
@@ -250,6 +285,7 @@ class Dashboard:
         return state.load(store, self.specs, min_confidence=self.min_confidence)
 
     def watcher(self, run_id: str) -> RunWatcher | None:
+        self._evict_if_stale(run_id)
         watcher = self.watchers.get(run_id)
         if watcher is not None:
             return watcher
@@ -266,13 +302,34 @@ class Dashboard:
 # -- routes ----------------------------------------------------------------
 
 
+def _int_param(raw: str | None, default: int, *, low: int = 0, high: int | None = None) -> int:
+    """A query-string integer, clamped, never an exception.
+
+    `int(request.query_params.get(...))` was unguarded in three places, so
+    `?limit=abc` raised `ValueError` out of the handler as a 500 with a
+    traceback -- while the branch immediately above it returned a tidy 400
+    naming the legal values for a bad `kind`. A negative `after` was worse than
+    untidy: it slices from the end of the list and then reports the resulting
+    cursors as positive offsets, so paging walked backwards through the ledger
+    and said it was going forwards.
+    """
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    value = max(low, value)
+    return min(value, high) if high is not None else value
+
+
 async def _index(request: Request) -> Response:
     return FileResponse(STATIC_DIR / "index.html")
 
 
 async def _runs(request: Request) -> Response:
     dash: Dashboard = request.app.state.dash
-    limit = int(request.query_params.get("limit", 50))
+    limit = _int_param(request.query_params.get("limit"), 50, low=1, high=1000)
     return _ok(state.list_runs_summary(dash.root, limit))
 
 
@@ -312,8 +369,8 @@ async def _events(request: Request) -> Response:
         # `tool_call`, and the decisions are what someone opened this to read.
         quiet=params.get("quiet", "1") not in ("0", "false"),
     )
-    after = int(params.get("after", 0))
-    limit = min(int(params.get("limit", 500)), 5000)
+    after = _int_param(params.get("after"), 0, low=0)
+    limit = _int_param(params.get("limit"), 500, low=1, high=5000)
     window = selected[after : after + limit]
     return _ok(
         {
@@ -526,6 +583,71 @@ def build_app(dash: Dashboard) -> Starlette:
         Route("/api/config/override", _set_override, methods=["POST"]),
         Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
     ]
-    app = Starlette(routes=routes)
+    app = Starlette(routes=routes, middleware=[Middleware(LocalOnly)])
     app.state.dash = dash
     return app
+
+
+#: Hosts this page may be reached as. A loopback literal, with or without a
+#: port. `localhost` is included because that is what a person types.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1", "0.0.0.0"})
+
+
+def _host_is_loopback(host: str) -> bool:
+    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return name.lower() in _LOOPBACK_HOSTS or host.lower() in _LOOPBACK_HOSTS
+
+
+class LocalOnly(BaseHTTPMiddleware):
+    """Two checks, both about a page that is not as private as it looks.
+
+    The server binds 127.0.0.1, which stops a *network* peer and does nothing
+    about the browser already running as this user. It holds the run ledger --
+    agent-authored prose, target source excerpts, ticket keys -- and a POST route
+    that rewrites `overrides.yaml`. Both were reachable from any page the user
+    happened to have open:
+
+      * **DNS rebinding.** A site on attacker-controlled DNS with a short TTL
+        rebinds its own name to 127.0.0.1 and becomes same-origin with this app,
+        at which point every GET is readable. Starlette answers on whatever
+        `Host` it is given, so the fix is to require a loopback literal --
+        `evil.example` never is one, however it resolves.
+      * **CSRF on the one write route.** `_set_override` reads
+        `await request.json()`, which does not check `Content-Type`; a
+        cross-origin `fetch` with `text/plain` is a CORS-*simple* request, so it
+        is sent without a preflight and the write lands. The attacker cannot
+        read the reply and does not need to -- setting `min_confidence_to_file`
+        to 0 or repointing an agent's model is the whole payload.
+
+    This does not make the dashboard a security boundary, and it is not meant
+    to. It closes the two doors that were open by default.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        host = request.headers.get("host", "")
+        if host and not _host_is_loopback(host):
+            return JSONResponse(
+                {"error": f"refusing a request for host '{host}'. This dashboard "
+                          "answers on loopback only."},
+                status_code=421,
+            )
+
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            if origin is not None and not _host_is_loopback(urlsplit(origin).netloc):
+                return JSONResponse(
+                    {"error": "cross-origin writes are refused."}, status_code=403
+                )
+            site = request.headers.get("sec-fetch-site")
+            if site is not None and site not in ("same-origin", "none"):
+                return JSONResponse(
+                    {"error": f"refusing a {site} write."}, status_code=403
+                )
+            content_type = (request.headers.get("content-type") or "").split(";")[0].strip()
+            if content_type != "application/json":
+                # A simple request cannot set this header, so requiring it costs
+                # an honest caller nothing and denies a cross-origin form post.
+                return JSONResponse(
+                    {"error": "writes must be sent as application/json."}, status_code=415
+                )
+        return await call_next(request)

@@ -49,11 +49,24 @@ class ToolContext:
         return self.store.touched_files(self.agent.name)
 
     def bump(self, key: str) -> int:
-        self.counters[key] = self.counters.get(key, 0) + 1
-        return self.counters[key]
+        counters = self._run_counters()
+        counters[key] = counters.get(key, 0) + 1
+        return counters[key]
 
     def count(self, key: str) -> int:
-        return self.counters.get(key, 0)
+        return self._run_counters().get(key, 0)
+
+    def _run_counters(self) -> dict[str, int]:
+        """The tally that spans the run, falling back to this context's own.
+
+        Delegated to the store the way `touched_files` already is: a context is
+        built per dispatch and a run outlives many of them, so a counter living
+        here bounded one invocation rather than one run. The local `counters`
+        dict stays as the fallback for a context built without a real store.
+        """
+        store = getattr(self, "store", None)
+        getter = getattr(store, "counters", None)
+        return getter(self.agent.name) if callable(getter) else self.counters
 
 
 def ok(text: str, **structured: Any) -> dict[str, Any]:

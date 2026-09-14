@@ -462,12 +462,16 @@ async def test_a_discovery_agent_cannot_certify_its_own_finding(cfg, tmp_path):
         agent=cfg.agents["API"], target_root=REPO,
     )
     tools = handlers(envelope_server.build_tools(ctx))
+    # Real evidence, stored first: `emit_envelope` now resolves any
+    # `artifact://` uri it is handed, because `has_evidence()` was satisfied by
+    # a well-formed string naming a file that had never been written.
+    uri = store.put_artifact("orders.log", "500 on GET /v1/orders")
     await tools["emit_envelope"]({
         "domain": "api", "class": "bug",
         "title": "Something is broken",
         "summary": "And I have already reproduced it, honestly.",
         "severity": "major", "confidence": 0.95,
-        "evidence": [{"type": "log", "uri": "artifact://a/b"}],
+        "evidence": [{"type": "log", "uri": uri}],
         "reproduction": {
             "status": "reproduced",
             "steps": ["call the endpoint"],

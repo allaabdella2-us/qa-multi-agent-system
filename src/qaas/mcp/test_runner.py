@@ -38,6 +38,7 @@ from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from qaas import importgraph
 from qaas.mcp.context import ToolContext, err, ok
 
 DEFAULT_TIMEOUT_S = 300
@@ -110,14 +111,45 @@ def _decode(raw: str | bytes | None) -> str:
     return raw if isinstance(raw, str) else raw.decode(errors="replace")
 
 
-def _run(argv: list[str], cwd: Path, timeout_s: int, env_extra: dict[str, str] | None = None) -> _Completed:
-    """Run argv under a hard timeout, returning partial output if it expires.
+#: Environment variables a child process legitimately needs. Everything else is
+#: dropped — see `_child_env`.
+_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP",
+        "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM",
+        # Python's own behaviour, and the virtualenv the target runs in.
+        "PYTHONPATH", "PYTHONHASHSEED", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED",
+        "VIRTUAL_ENV", "CONDA_PREFIX", "PYENV_ROOT",
+        # CI runners key a lot of behaviour off these.
+        "CI", "GITHUB_ACTIONS", "SYSTEMROOT", "WINDIR", "APPDATA", "LOCALAPPDATA",
+    }
+)
 
-    `subprocess.run` kills the child and hands the partial streams back on the
-    exception, which is the difference between "the suite hung, here is how far
-    it got" and an agent staring at nothing.
+#: Prefixes a target's own test suite is expected to read — its database URL,
+#: its feature flags, whatever `env_control` set for it.
+_ENV_ALLOWED_PREFIXES = ("QAAS_TARGET_", "PYTEST_DISABLE_")
+
+
+def _child_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment a target's own test suite runs in. An allowlist.
+
+    It was `dict(os.environ, ...)` with two pytest keys removed, so the target
+    repository's test suite — someone else's code, cloned from a URL seconds ago
+    under `qaas run --repo` — executed with this user's `ANTHROPIC_API_KEY`,
+    `JIRA_API_TOKEN`, `GITHUB_TOKEN` and every other credential `envfile.py`
+    exports in scope. A `conftest.py` reading `os.environ` is all it takes, and
+    running the target's tests is the *point* of this server, not an edge case.
+
+    An allowlist rather than a denylist because the set of secrets a machine
+    holds is open-ended and the set of variables a test suite needs is not.
+    Anything a target genuinely requires is named in the profile and arrives
+    through `env_extra` or the `QAAS_TARGET_` prefix.
     """
-    env = dict(os.environ, **(env_extra or {}))
+    env = {k: v for k, v in os.environ.items() if k in _ENV_ALLOWLIST}
+    env.update(
+        {k: v for k, v in os.environ.items() if k.startswith(_ENV_ALLOWED_PREFIXES)}
+    )
+    env.update(env_extra or {})
     # A wide terminal keeps pytest from wrapping nodeids across lines, which is
     # the one thing that would break the progress-line parser.
     env["COLUMNS"] = "250"
@@ -125,6 +157,17 @@ def _run(argv: list[str], cwd: Path, timeout_s: int, env_extra: dict[str, str] |
     # a test suite); its addopts must not leak into the child's run.
     env.pop("PYTEST_ADDOPTS", None)
     env.pop("PYTEST_CURRENT_TEST", None)
+    return env
+
+
+def _run(argv: list[str], cwd: Path, timeout_s: int, env_extra: dict[str, str] | None = None) -> _Completed:
+    """Run argv under a hard timeout, returning partial output if it expires.
+
+    `subprocess.run` kills the child and hands the partial streams back on the
+    exception, which is the difference between "the suite hung, here is how far
+    it got" and an agent staring at nothing.
+    """
+    env = _child_env(env_extra)
 
     started = time.monotonic()
     try:
@@ -614,18 +657,29 @@ def build_tools(ctx: ToolContext) -> list:
 
         counts = Counter(outcomes)
         majority, majority_count = counts.most_common(1)[0]
-        flake_rate = round((n - majority_count) / n, 4)
+        # `total`, not `n`. The loop above breaks early when the aggregate flake
+        # budget expires, and every statistic divided by the number of runs
+        # *requested* rather than the number that actually happened. Stopping at
+        # 3 of 20 with all three passing reported a 85% flake rate on a test
+        # that never once disagreed with itself -- and flake rate is what
+        # REPRODUCER's verdict turns on, so the number being wrong in the
+        # alarming direction is the bad half of the trade.
+        total = len(outcomes)
+        flake_rate = round((total - majority_count) / total, 4) if total else 0.0
         passed = counts.get("passed", 0)
 
         verdict = (
             f"stable ({majority})" if flake_rate == 0
             else f"FLAKY: {flake_rate:.0%} of runs disagreed with the majority ({majority})"
         )
+        shortfall = f" (of {n} requested)" if total != n else ""
         return ok(
-            f"{test_id} over {n} runs — {passed} passed, {n - passed} not passed. {verdict}.",
-            runs=n,
+            f"{test_id} over {total} runs{shortfall} — {passed} passed, "
+            f"{total - passed} not passed. {verdict}.",
+            runs=total,
+            requested=n,
             passed=passed,
-            failed=n - passed,
+            failed=total - passed,
             flake_rate=flake_rate,
             majority_outcome=majority,
             outcomes=outcomes,
@@ -655,23 +709,52 @@ def build_tools(ctx: ToolContext) -> list:
         if not isinstance(raw_paths, list) or not raw_paths:
             return err("paths must be a non-empty array of repo-relative paths.")
 
+        paths = [str(p) for p in raw_paths]
         candidates = await asyncio.to_thread(_collect_test_files, cwd)
         if not candidates:
             return err(f"No test files found under {cwd}.")
 
-        scored = await asyncio.to_thread(_score_tests, cwd, [str(p) for p in raw_paths], candidates)
+        # Derived first, guessed second. The graph answers the question the
+        # heuristic structurally cannot: a test that reaches the changed module
+        # through a caller. That is step 3 of `regression-suite-selection` --
+        # "a fix inside a shared helper breaks its consumers, not itself" -- and
+        # `_score_tests` scores it zero, because it compares filenames and the
+        # consumer's filename has nothing to do with the changed one.
+        derived = await asyncio.to_thread(_graph_tests, cwd, paths)
+        if derived:
+            return ok(
+                "Covering tests by import graph, nearest first: "
+                + ", ".join(item["test_file"] for item in derived[:10])
+                + ".\nDistance is import hops from the changed file: 0 is the file "
+                "itself, 1 imports it directly, 2 reaches it through one more "
+                "module. This is derived from the source, not guessed from "
+                "filenames — but it is an *import* graph, so a test that exercises "
+                "the code through a fixture, a plugin or an HTTP call does not "
+                "appear here. Run the full suite before concluding nothing broke.",
+                affected=derived[:25],
+                heuristic=False,
+                method="import-graph",
+            )
+
+        scored = await asyncio.to_thread(_score_tests, cwd, paths, candidates)
         if not scored:
             return ok(
                 "No test file looks related to those paths. That is itself worth reporting: "
                 "the change may be untested.",
                 affected=[],
                 heuristic=True,
+                method="filename-heuristic",
             )
         return ok(
             "Likely covering tests, best first: "
-            + ", ".join(item["test_file"] for item in scored[:10]),
+            + ", ".join(item["test_file"] for item in scored[:10])
+            + ".\nThis is the filename heuristic, not the import graph: either the "
+            "changed paths are not Python, or nothing in this repository imports "
+            "them. Treat the ranking as a place to start, and run the full suite "
+            "before concluding nothing broke.",
             affected=scored[:25],
             heuristic=True,
+            method="filename-heuristic",
             searched=len(candidates),
         )
 
@@ -782,6 +865,39 @@ def _collect_test_files(root: Path) -> list[Path]:
     return found
 
 
+def _graph_tests(root: Path, changed: list[str]) -> list[dict[str, Any]]:
+    """Covering tests from the import graph, or [] if it cannot answer.
+
+    Empty is the honest answer in three cases and the caller must fall back in
+    all of them: the target is not Python, the changed paths are not Python, or
+    nothing in the repository imports them. Distinguishing "no tests are
+    affected" from "I cannot see this language" matters enough that the tool
+    reports which method produced the ranking.
+
+    Never raises -- the fallback exists precisely so a ranking failure is never
+    a verification failure.
+    """
+    try:
+        graph = importgraph.build(root)
+        if not graph:
+            return []
+        rows = graph.affected_tests(changed)
+    except Exception:  # noqa: BLE001 — a ranking is never worth failing a phase for
+        return []
+    return [
+        {
+            "test_file": r["test_file"],
+            "distance": r["distance"],
+            "why": (
+                "the changed file itself" if r["distance"] == 0
+                else "imports it directly" if r["distance"] == 1
+                else f"reaches it through {r['distance'] - 1} more module(s)"
+            ),
+        }
+        for r in rows
+    ]
+
+
 def _score_tests(root: Path, changed: list[str], candidates: list[Path]) -> list[dict[str, Any]]:
     """Rank test files by three independent, cheap signals.
 
@@ -793,6 +909,15 @@ def _score_tests(root: Path, changed: list[str], candidates: list[Path]) -> list
     """
     scores: dict[Path, int] = {}
     reasons: dict[Path, list[str]] = {}
+    # Read each candidate once rather than once per changed path: the inner loop
+    # used to call `read_text` inside `for raw in changed`, so ten changed files
+    # against a thousand tests was ten thousand file reads for a ranking.
+    texts: dict[Path, str] = {}
+    for candidate in candidates:
+        try:
+            texts[candidate] = candidate.read_text(errors="ignore")
+        except OSError:
+            texts[candidate] = ""
 
     for raw in changed:
         source = Path(raw)
@@ -810,11 +935,9 @@ def _score_tests(root: Path, changed: list[str], candidates: list[Path]) -> list
                 why.append(f"filename mentions '{stem}'")
 
             if stem:
-                try:
-                    text = candidate.read_text(errors="ignore")
-                except OSError:
-                    text = ""
-                if re.search(rf"\b(import|from)\b[^\n]*\b{re.escape(stem)}\b", text):
+                if re.search(
+                    rf"\b(import|from)\b[^\n]*\b{re.escape(stem)}\b", texts[candidate]
+                ):
                     score += 40
                     why.append(f"imports '{stem}'")
 

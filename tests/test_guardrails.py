@@ -752,3 +752,60 @@ def test_the_stricter_reading_still_lets_ordinary_work_through(tmp_path, command
     """
     decision = _guard("FIXER", tmp_path).check("Bash", {"command": command})
     assert decision.allowed, f"{command}: {decision.reason}"
+
+
+def test_the_allowlist_and_the_guardrail_describe_the_same_harness_tools():
+    """`ALWAYS_GRANTED` says the two "cannot drift apart". They had.
+
+    `registry.build_allowed_tools` read `ALWAYS_GRANTED`; `_check_declared` read
+    `HARNESS_TOOLS`, which carried an extra `SlashCommand`. The guardrail would
+    have approved a tool the allowlist never granted -- harmless in that
+    direction, and exactly the mismatch the comment promises is impossible. The
+    dangerous direction is the same bug mirrored, and this pins both.
+    """
+    from qaas.guardrails import ALWAYS_GRANTED, HARNESS_TOOLS
+
+    assert set(HARNESS_TOOLS) == set(ALWAYS_GRANTED)
+
+
+@pytest.mark.parametrize("pattern", ["*_test.py", "*", "**/*.py"])
+@pytest.mark.parametrize("path", ["/etc/x_test.py", "../../x_test.py", "/tmp/evil.py"])
+def test_a_glob_write_path_does_not_escape_the_checkout(tmp_path, pattern, path):
+    """`write_paths` holds two kinds and they were checked differently.
+
+    A plain directory proves containment with `is_relative_to`; a glob only ever
+    matched a *string* -- and `_check_path` falls back to the absolute path when
+    the target is outside the root, so `fnmatch("/etc/x_test.py", "*_test.py")`
+    is True because fnmatch's `*` crosses `/`. A glob write path escaped the
+    checkout entirely. No shipped agent uses one, which is exactly why nothing
+    caught it.
+    """
+    guard = _guard("FIXER", tmp_path, write_paths=[pattern], forbidden_paths=[])
+    decision = guard.check("Write", {"file_path": path})
+    assert not decision.allowed, f"{pattern} allowed {path}"
+
+
+def test_a_glob_write_path_still_works_inside_the_checkout(tmp_path):
+    guard = _guard("FIXER", tmp_path, write_paths=["*_test.py"], forbidden_paths=[])
+    assert guard.check("Write", {"file_path": "orders_test.py"}).allowed
+
+
+async def test_a_long_argument_is_truncated_in_the_ledger(tmp_path):
+    """`_summarise` has two branches and only one was covered.
+
+    Content fields collapse to `<N chars>`; everything else truncates at 200.
+    The second branch is the one that matters for a `Bash` denial, where the
+    argument *is* the command -- an untruncated 5000-character command in an
+    append-only audit trail is a line nothing will ever render.
+    """
+    guard = _guard("VERIFIER", tmp_path)
+    # Through the hook, not `check`: `check` is pure policy evaluation, and the
+    # ledger write lives in `pre_tool_use` alongside the `tool_call` line.
+    await guard.pre_tool_use(
+        {"tool_name": "Bash", "tool_input": {"command": "rm " + "x" * 5000}}, "t1", None
+    )
+    denials = [e for e in guard.ctx.store.ledger("denial")]
+    assert denials, "the refusal was not recorded"
+    recorded = denials[-1].detail["args"]["command"]
+    assert len(recorded) == 201, len(recorded)
+    assert recorded.endswith("…")

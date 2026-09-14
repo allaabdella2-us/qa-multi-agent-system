@@ -227,9 +227,27 @@ def test_duplicate_agent_definition_is_rejected(tmp_path):
         load_config(tmp_path)
 
 
-def test_missing_system_config_is_an_error(tmp_path):
+def test_a_config_dir_that_does_not_exist_is_an_error(tmp_path):
+    """`--config` heads the layered search; it does not replace it.
+
+    So an *empty* directory legitimately falls through to the packaged layer --
+    that is how a user with one overridden agent and no `system.yaml` of their
+    own works. A directory that does not exist is a typo, and dropping it
+    silently ran the packaged defaults while reporting success.
+    """
+    with pytest.raises(FileNotFoundError, match="not a directory"):
+        load_config(tmp_path / "nope")
+
+
+def test_an_empty_config_dir_layers_onto_the_packaged_defaults(tmp_path):
+    cfg = load_config(tmp_path)
+    assert cfg.agents, "an empty layer should fall through, not come back empty"
+
+
+def test_a_search_of_one_directory_with_no_system_yaml_is_an_error(tmp_path):
+    """`search=` is the "this and nothing else" form, and keeps the old rule."""
     with pytest.raises(FileNotFoundError):
-        load_config(tmp_path)
+        load_config(search=[tmp_path])
 
 
 # -- backend overrides ------------------------------------------------------
@@ -260,12 +278,49 @@ def test_a_nonsense_override_is_rejected_loudly(monkeypatch):
         load_config(search=CONFIG_SEARCH)
 
 
-def test_a_mode_that_cannot_afford_its_agents_is_rejected():
-    """Still enforced -- but only when someone actually sets caps, since the
-    shipped config sets none."""
+def test_a_mode_that_cannot_afford_its_agents_is_visible(tmp_path):
+    """The shipped config sets no caps, so this asserted nothing at all.
+
+    Its only assertion sat inside `if caps and mode.max_budget_usd is not None`,
+    and `test_no_vendor_pricing_is_baked_into_the_shipped_config` pins every one
+    of those to None -- so neither condition could hold and the test passed by
+    never reaching an `assert`. Build a config that actually has the problem.
+    """
     cfg = load_config(search=CONFIG_SEARCH)
+    mode = cfg.run_modes["pr-check"]
+    agents = {
+        name: spec.model_copy(update={"max_budget_usd": 5.0})
+        for name, spec in cfg.agents.items()
+        if name in mode.agents
+    }
+    broke = cfg.model_copy(
+        update={
+            "agents": {**cfg.agents, **agents},
+            "run_modes": {**cfg.run_modes, "pr-check": mode.model_copy(update={"max_budget_usd": 1.0})},
+        }
+    )
+    underfunded = [
+        name for name, m in broke.run_modes.items()
+        if m.max_budget_usd is not None
+        and sum(
+            broke.agents[a].max_budget_usd or 0.0 for a in m.agents if a in broke.agents
+        ) > m.max_budget_usd
+    ]
+    assert "pr-check" in underfunded, (
+        "the arithmetic this test is about no longer detects an underfunded mode"
+    )
+
+
+def test_the_shipped_modes_are_affordable_where_caps_exist():
+    cfg = load_config(search=CONFIG_SEARCH)
+    checked = 0
     for name, mode in cfg.run_modes.items():
         caps = [cfg.agents[a].max_budget_usd for a in mode.agents
                 if a in cfg.agents and cfg.agents[a].max_budget_usd is not None]
         if caps and mode.max_budget_usd is not None:
+            checked += 1
             assert sum(caps) <= mode.max_budget_usd, f"mode '{name}' cannot finish"
+    # The shipped config deliberately sets no dollar caps, so `checked` is 0 --
+    # said out loud, because an assertion that never runs reads as one that
+    # passed.
+    assert checked == 0, "caps now exist; this test has become load-bearing"

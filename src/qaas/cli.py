@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from qaas import trace as trace_mod
-from qaas.paths import Workspace, package_root, packaged_prompts, project_root
+from qaas.paths import STATE_DIRNAME, Workspace, package_root, packaged_prompts, project_root
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config, target_files
 from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
 from qaas.ui.serve import DEFAULT_PORT
@@ -91,6 +92,21 @@ def _system_yaml(config_dir: Path | str | None) -> Path:
     return found or (ws.state_root / "config" / "system.yaml")
 
 
+def _load_config_or_exit(config_dir: Path | str | None, target: str | None):
+    """`load_config`, with a missing target reported rather than raised.
+
+    `load_config` raises a bare `FileNotFoundError` for a target it cannot
+    resolve, and `doctor`, `run` and `board` all call it *before* they reach
+    `_load_target` -- whose friendly `typer.BadParameter` was therefore
+    unreachable from any of them. A mistyped `--target` printed a traceback.
+    """
+    try:
+        return load_config(config_dir, target=target)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+
+
 def _writable_targets_dir(config_dir: Path | str | None) -> Path:
     """Where `qaas init` and `qaas run --repo` write a generated profile.
 
@@ -154,6 +170,25 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", text.lower()).strip("-")[:40] or "target"
 
 
+def _redact_url(url: str) -> str:
+    """A URL with any embedded credential removed.
+
+    `https://user:ghp_xxx@github.com/org/repo` is a perfectly ordinary thing to
+    paste, and this printed it to stdout and then wrote it verbatim into the
+    generated target profile -- a file the tool tells people to commit. The
+    credential still reaches `git clone`, which gets the original argv; it just
+    stops being echoed and stored.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.netloc or "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urllib.parse.urlunsplit(parts._replace(netloc=host))
+
+
 def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str | None]:
     """A repo argument -> (local directory, origin url or None), cloning a URL.
 
@@ -176,7 +211,7 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
         return root, repo
 
     root.parent.mkdir(parents=True, exist_ok=True)
-    console.print(f"cloning {repo} -> {root}")
+    console.print(f"cloning {_redact_url(repo)} -> {root}")
     try:
         result = subprocess.run(
             ["git", "clone", "--depth", "50", repo, str(root)],
@@ -192,9 +227,11 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
         raise typer.Exit(1) from None
     if result.returncode != 0:
         shutil.rmtree(root, ignore_errors=True)
-        console.print(f"[red]clone failed:[/red] {result.stderr.strip()[:400]}")
+        console.print(f"[red]clone failed:[/red] {_redact_url(result.stderr.strip()[:400])}")
         raise typer.Exit(1)
-    return root, repo
+    # The redacted form is what gets stored: `repo_url` ends up on the profile,
+    # which is a committed file.
+    return root, _redact_url(repo)
 
 
 def _default_branch(root: Path) -> str:
@@ -273,7 +310,20 @@ def _provision_target(
     existing = _target_files(config_dir).get(target_name)
     if existing is not None and not force:
         if reuse_existing:
-            return load_target(target_name, existing.parent), target_name, existing, [], False
+            stored = load_target(target_name, existing.parent)
+            # The name is the repository's *basename*, so two different
+            # checkouts called `api` collide -- and `--repo` reused the stored
+            # profile without ever comparing what it pointed at. The run then
+            # read one repository while every write-path sandbox, the test
+            # runner's cwd and the vcs sandbox were anchored on another.
+            if stored.root_path().resolve() != root.resolve():
+                console.print(
+                    f"[red]target '{target_name}' already points at {stored.root_path()}[/red], "
+                    f"not at {root}. Two repositories share a basename. Pass --name to "
+                    "give this one its own profile, or --force to repoint the existing one."
+                )
+                raise typer.Exit(1)
+            return stored, target_name, existing, [], False
         console.print(f"[red]{existing} already exists.[/red] Use --force to overwrite.")
         raise typer.Exit(1)
 
@@ -364,8 +414,15 @@ def init(
     # `.qaas/` now holds a user's committed config next to their disposable run
     # state, so the obvious `.gitignore` line for `.qaas/` would drop the
     # configuration too. Spell out which half is which.
-    gitignore = project_config.parent / ".gitignore"
-    if not gitignore.exists():
+    # Derived from the *state root*, not from wherever `--config` happened to
+    # point. `project_config.parent` is `.qaas` for the default path and, with
+    # `--config some/dir`, is `some/` -- so `qaas init --config` dropped a
+    # `.gitignore` containing `runs/`, `artifacts/` and `generated/` into a real
+    # source directory, which then ignored any directory of those names the
+    # project already had.
+    state_root = Workspace.resolve().state_root
+    gitignore = state_root / ".gitignore"
+    if state_root.name == STATE_DIRNAME and state_root.is_dir() and not gitignore.exists():
         gitignore.write_text(
             "# Run state: regenerated every run, never worth committing.\n"
             "runs/\ntickets/\ngenerated/\nsystem-map/\nmemory.db\nartifacts/\n"
@@ -433,7 +490,7 @@ def doctor(
     target: str = typer.Option(None, "--target", "-t", help="Check this profile instead of the active one."),
 ) -> None:
     """Check whether a target is ready to run against."""
-    cfg = load_config(config_dir, target=target)
+    cfg = _load_config_or_exit(config_dir, target)
     profile = _load_target(target, config_dir) if target else cfg.profile
     if profile is None:
         console.print("[red]no target profile loaded[/red]")
@@ -1004,7 +1061,9 @@ def _follow(store, *, agent: str | None, kinds, as_json: bool, quiet: bool = Fal
     wanted = set(kinds) if kinds else None
     name = agent.upper() if agent else None
     console.print(f"[dim]following {store.run_id} — ctrl-c to stop[/dim]")
-    hidden = trace_mod.QUIET_KINDS if quiet else frozenset()
+    # The same subtraction `trace.select` makes, so the streaming view and the
+    # replayed one cannot disagree about what `--quiet --kind tool_call` means.
+    hidden = (trace_mod.QUIET_KINDS - (wanted or frozenset())) if quiet else frozenset()
     seen = 0
     try:
         for entry in trace_mod.tail(store):
@@ -1231,8 +1290,13 @@ def _tickets_in_status(cfg, status: str, root: Path) -> set[str]:
     from qaas.adapters.tracker import TrackerError, build_tracker, repo_label
 
     label = repo_label(cfg.target)
-    tracker = build_tracker(str(cfg.tracker), root)
     try:
+        # Constructed *inside* the try. `build_tracker` validates its
+        # environment at construction and raises `TrackerConfigError`, which is a
+        # `TrackerError` -- so with Jira half-configured, the one line that was
+        # above this block turned a missing `JIRA_BASE_URL` into a traceback
+        # rather than the tidy "the board could not be read" below it.
+        tracker = build_tracker(str(cfg.tracker), root)
         # Scoped by label and matched on status *here*, rather than asking the
         # adapter to filter by status too. A status name is the project's own
         # vocabulary -- "Ready for Fix" is whatever casing someone typed when
@@ -1329,7 +1393,7 @@ def run(
             else f"[dim]reusing the existing profile at {path} (--force to regenerate)[/dim]"
         )
 
-    cfg = load_config(config_dir, target=target)
+    cfg = _load_config_or_exit(config_dir, target)
     if target:
         # The profile object we already hold, rather than a second lookup by
         # name: `_provision_target` may have written into the writable config
@@ -1355,11 +1419,25 @@ def run(
         console.print(f"[dim]target: {cfg.target} ({cfg.profile.environment.mode})[/dim]")
     if only:
         wanted = {a.upper() for a in only}
+        # Checked against the MODE, not the whole roster. Against the roster,
+        # `--only FIXER` on `pr-check` passed validation, filtered the mode's
+        # agent list down to nothing, ran zero agents and exited 0 -- which reads
+        # as "the run found nothing" rather than "you asked for an agent this
+        # mode does not have".
+        mode_cfg = cfg.run_modes[mode]
+        in_mode = {a.upper() for a in mode_cfg.agents}
         unknown = wanted - set(cfg.agents)
         if unknown:
             console.print(f"[red]unknown agents: {', '.join(sorted(unknown))}[/red]")
             raise typer.Exit(1)
-        mode_cfg = cfg.run_modes[mode]
+        elsewhere = wanted - in_mode
+        if elsewhere:
+            console.print(
+                f"[red]{', '.join(sorted(elsewhere))} "
+                f"{'is' if len(elsewhere) == 1 else 'are'} not in mode '{mode}'.[/red] "
+                f"It has: {', '.join(sorted(in_mode))}."
+            )
+            raise typer.Exit(1)
         cfg = cfg.model_copy(
             update={
                 "run_modes": {
@@ -1441,6 +1519,21 @@ def run(
             )
         elif kind == "stopped":
             console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
+
+    if run_id is not None:
+        # `--run-id` means *resume*, and `RunStore` creates by default -- so a
+        # typo silently started a brand new empty run under the mistyped id.
+        # Worse than a wasted run: the budget carry-forward reads the *existing*
+        # ledger to decide what has already been spent, so the resumed cap
+        # started at zero and the mode's budget applied twice.
+        resumed = RunStore(run_id, root, create=False)
+        if not resumed.ledger_path.exists():
+            known = list_runs(root)[:5]
+            console.print(
+                f"[red]no run '{run_id}' under {root}.[/red] "
+                + (f"Recent: {', '.join(known)}" if known else "There are no runs here.")
+            )
+            raise typer.Exit(1)
 
     router = Router(cfg, root=root, on_event=on_event, tickets=tickets)
     report = asyncio.run(router.run(mode, run_id=run_id))
@@ -1658,6 +1751,18 @@ def sweep(
     router = Router(cfg, root=root)
     report = asyncio.run(router.run(mode))
     console.print_json(data=report.summary())
+
+    # Run health first, and before the no-ledger return. This is the cron entry
+    # point, documented as the one that "fails loudly", and it consulted neither
+    # `report.failed` nor `report.stopped_early` -- unlike `run`, which exits 1
+    # for exactly those. So a sweep whose agents all crashed, or that blew its
+    # wall clock after filing nothing, printed a summary and exited 0. And when
+    # the target had no golden ledger it returned before any check at all, so the
+    # gate was silently off for every target but the demo.
+    if report.failed or report.stopped_early:
+        reason = report.stopped_early or f"agents failed: {', '.join(report.failed)}"
+        console.print(f"[red]the run did not complete cleanly[/red] — {reason}")
+        raise typer.Exit(1)
 
     ledger_path = _ledger_path(cfg)
     if ledger_path is None or not ledger_path.exists():
@@ -2026,7 +2131,7 @@ def board(
     carries. That is why it needs no administrator rights: creating a Jira
     *project* per repository does, creating a filter does not.
     """
-    cfg = load_config(config_dir, target=target)
+    cfg = _load_config_or_exit(config_dir, target)
     if target:
         cfg = cfg.model_copy(update={"target": target, "profile": _load_target(target, config_dir)})
 

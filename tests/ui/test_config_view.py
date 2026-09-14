@@ -14,11 +14,18 @@ from pathlib import Path
 
 import pytest
 
+from support import write_scratch_target
+
 from qaas.config import load_config
 from qaas.paths import Workspace
 from qaas.ui import config_view
 
 REPO = Path(__file__).resolve().parents[2]
+#: The packaged layer alone used to be enough here, because a target named by
+#: QAAS_TARGET and absent from the config path was silently ignored. It is fatal
+#: now, and a ConfigView over a config with no target is not the object this
+#: page renders anyway -- so the tests read the same layered search a real run
+#: does. `load_config(CONFIG)` puts CONFIG at the head of that search.
 CONFIG = REPO / "src" / "qaas" / "defaults" / "config"
 
 
@@ -106,6 +113,7 @@ def test_a_shadowed_agent_file_names_what_it_shadows(tmp_path, monkeypatch):
     (project / ".qaas" / "config" / "system.yaml").write_text(
         (CONFIG / "system.yaml").read_text(), encoding="utf-8"
     )
+    write_scratch_target(project / ".qaas" / "config", tmp_path / "app")
     monkeypatch.chdir(project)
     workspace = Workspace.resolve()
     view = config_view.ConfigView(load_config(CONFIG), workspace)

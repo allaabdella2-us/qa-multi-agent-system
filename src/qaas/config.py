@@ -350,15 +350,23 @@ def load_config(
 ) -> SystemConfig:
     """Read system.yaml plus every agents/*.yaml, layered across search paths.
 
-    Passing `config_dir` positionally means "this directory and nothing else",
-    which is exactly the old behaviour and what every test does. Passing
-    `search` layers several directories: `system.yaml` is taken whole from the
-    first that has one, while `agents/*.yaml` and `targets/*.yaml` are unioned
-    by filename with earlier directories shadowing later ones -- so a user can
-    override one agent without forking all eight and freezing on today's roster.
+    Passing `config_dir` positionally puts that directory at the **head of the
+    layered search**, which is what `paths.py` has always documented --
+    "1. explicit --config / QAAS_CONFIG_DIR, 2. project, 3. packaged" -- and
+    what `QAAS_CONFIG_DIR` already did. It used to mean "this directory and
+    nothing else", so the flag and the environment variable, documented as the
+    same precedence step, behaved differently: `--config .qaas/config` pointed
+    at a directory holding one overridden agent and hid the other fourteen, and
+    `--config <packaged>` could not see the project's own `targets/`.
 
-    With neither argument, the workspace resolver decides (an explicit
-    --config, then the project, then what shipped in the wheel).
+    Passing `search` gives the layer list verbatim, for callers that have
+    already resolved it (and for tests that want exactly one directory).
+    `system.yaml` is taken whole from the first layer that has one, while
+    `agents/*.yaml` and `targets/*.yaml` are unioned by filename with earlier
+    directories shadowing later ones -- so a user can override one agent without
+    forking the whole roster and freezing on today's version of it.
+
+    With neither argument, the workspace resolver decides.
 
     `target` beats everything -- system.yaml, QAAS_TARGET, the single-profile
     guess. It is what `qaas run --target X` and `qaas run --repo <url>` mean:
@@ -367,7 +375,22 @@ def load_config(
     before the override the operator had just typed was ever consulted.
     """
     if config_dir is not None:
-        dirs: list[Path] = [Path(config_dir)]
+        from qaas.paths import Workspace
+
+        workspace = Workspace.resolve(config=config_dir)
+        if workspace.missing_explicit_config:
+            # A directory that does not exist is a typo, not a layer to skip.
+            # `_existing` drops it silently, so `--config /wrogn/path` quietly
+            # discarded the highest-precedence layer and ran on the packaged
+            # defaults -- a different configuration than the one asked for,
+            # reported as success. An *empty* directory is a different thing and
+            # legitimately layers: that is how a user with one overridden agent
+            # and no `system.yaml` of their own is meant to work.
+            raise FileNotFoundError(
+                f"--config names {workspace.missing_explicit_config}, which is not a "
+                "directory. Nothing was read from it."
+            )
+        dirs = list(workspace.config_dirs)
     elif search is not None:
         dirs = [Path(d) for d in search]
     else:
@@ -470,13 +493,26 @@ def load_config(
     if not chosen and len(profiles) == 1:
         chosen = next(iter(profiles))
 
-    if chosen and profiles:
+    # `and profiles` used to guard this, so "named but absent stays fatal" held
+    # only when at least one profile existed *somewhere*. With none -- which is
+    # every fresh `pip install`, since the packaged `defaults/config/` ships no
+    # `targets/` at all -- a target named by `--target`, `QAAS_TARGET` or
+    # `system.yaml` was silently ignored and `target_root()` fell back to the
+    # working directory. The run then pointed every write-path sandbox, the test
+    # runner's cwd and the SDK subprocess at whatever directory the operator
+    # happened to be standing in, and said nothing.
+    if chosen:
         if chosen not in profiles:
             # Named but absent stays fatal: running the wrong application is
             # worse than not running. Listed from the merged view, so the
             # suggestion names every profile the user actually has.
+            available = (
+                f"Available: {', '.join(sorted(profiles))}. "
+                if profiles
+                else "No target profiles are visible on the config path at all. "
+            )
             raise FileNotFoundError(
-                f"no target profile '{chosen}'. Available: {', '.join(sorted(profiles))}. "
+                f"no target profile '{chosen}'. {available}"
                 "Create one with `qaas init <path-to-repo>`."
             )
         profile = load_target(chosen, profiles[chosen].parent)

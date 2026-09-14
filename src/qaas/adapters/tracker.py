@@ -948,6 +948,9 @@ class JiraTracker(TrackerAdapter):
             links.append(IssueLink(type=reverse.get((name, direction), "relates"), to=str(key)))
         return links
 
+    #: Jira's own per-page maximum for /search/jql.
+    _PAGE_SIZE = 100
+
     _FIELDS = "summary,status,labels,description,issuelinks,reporter,project,created,updated"
 
     # -- configuration checks ---------------------------------------------
@@ -1206,7 +1209,19 @@ class JiraTracker(TrackerAdapter):
                 resolved = response.geturl()
         except (urllib.error.URLError, TimeoutError, OSError):
             return None
-        return resolved if resolved and resolved != url else None
+        if not resolved or resolved == url:
+            return None
+        # And it must still be Jira. `board_url` follows
+        # `/secure/RapidBoard.jspa?rapidView=<id>` and returns whatever comes
+        # back, because a company-managed board's real path carries a `/c/`
+        # segment a hand-built URL missed. On an SSO-enforced site that redirect
+        # lands on the identity provider's login page instead -- so the "board
+        # URL" printed at the end of a run, and written into tickets, was a link
+        # to Okta with this Jira's return-path in the query string.
+        here, there = urllib.parse.urlsplit(self.base_url), urllib.parse.urlsplit(resolved)
+        if (there.scheme, there.netloc) != (here.scheme, here.netloc):
+            return None
+        return resolved
 
     def filter_url(self, filter_id: int) -> str:
         return f"{self.base_url}/issues/?filter={filter_id}"
@@ -1666,18 +1681,32 @@ class JiraTracker(TrackerAdapter):
             clauses.append(f"text ~ {self._jql_value(text.strip())}")
 
         jql = " AND ".join(clauses) + " ORDER BY created DESC"
-        # POST /search/jql, not GET /search: Atlassian deprecated the latter,
-        # which is exactly the trap §5.1 warns about.
-        data = self._request(
-            "POST", "/search/jql",
-            body={
+        # Jira caps a page at 100, and this used to clamp to that and stop --
+        # so `_tickets_in_status`, which asks for BOARD_SCAN_LIMIT=200 and
+        # filters status locally, silently got half the window it was promised.
+        # On a board with 120 cards the one that was dragged could fall off the
+        # end and `--from-board` would report finding nothing while the card sat
+        # visibly in the column. Paged with `nextPageToken` instead.
+        wanted = max(1, int(limit))
+        issues: list[Any] = []
+        token: str | None = None
+        while len(issues) < wanted:
+            body: dict[str, Any] = {
                 "jql": jql,
-                "maxResults": max(1, min(int(limit), 100)),
+                "maxResults": min(wanted - len(issues), self._PAGE_SIZE),
                 "fields": self._FIELDS.split(","),
-            },
-            retry_on_429=True,
-        )
-        return [self._issue_from_jira(entry) for entry in data.get("issues") or []]
+            }
+            if token:
+                body["nextPageToken"] = token
+            # POST /search/jql, not GET /search: Atlassian deprecated the latter,
+            # which is exactly the trap §5.1 warns about.
+            data = self._request("POST", "/search/jql", body=body, retry_on_429=True)
+            page = data.get("issues") or []
+            issues.extend(page)
+            token = data.get("nextPageToken")
+            if not token or not page:
+                break
+        return [self._issue_from_jira(entry) for entry in issues[:wanted]]
 
     @staticmethod
     def _jql_value(value: str) -> str:

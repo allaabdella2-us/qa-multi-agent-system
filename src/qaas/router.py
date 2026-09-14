@@ -225,9 +225,20 @@ class Budget:
                 + (" (the reserve is held back for filing and reporting)" if reserve else "")
             )
 
-    def allowance(self, spec: AgentSpec) -> float | None:
-        """What this agent may spend, or None when neither it nor the run caps it."""
-        caps = [c for c in (spec.max_budget_usd, self.remaining_usd) if c is not None]
+    def allowance(self, spec: AgentSpec, *, slots: int = 1) -> float | None:
+        """What this agent may spend, or None when neither it nor the run caps it.
+
+        `slots` divides the remainder across the dispatches actually in flight.
+        `spent` only moves in `_dispatch` *after* an agent returns, so `_gather`
+        started up to `max_concurrency` agents each told it could spend the
+        entire remaining budget -- three agents, one budget, handed out three
+        times. The run-level check still stops the run, but only after the
+        overspend has happened.
+        """
+        remaining = self.remaining_usd
+        if remaining is not None and slots > 1:
+            remaining = remaining / slots
+        caps = [c for c in (spec.max_budget_usd, remaining) if c is not None]
         return max(0.01, min(caps)) if caps else None
 
 
@@ -336,6 +347,19 @@ class Router:
             report.escalations.append(str(exc))
             store.log("escalation", reason=str(exc))
             self._emit("stopped", reason=str(exc))
+        except Exception as exc:  # noqa: BLE001 — see below
+            # `run()` caught only `BudgetExceeded`, so anything else -- a task
+            # builder raising `ValueError` because no profile is loaded, an
+            # OSError from a full disk -- propagated out of a run that had
+            # already written `run_started`. The ledger then held an opening line
+            # with no closing one, which `qaas runs`, `qaas show` and the
+            # dashboard all read as "still running", forever. A run that died
+            # has to say so.
+            note = f"{type(exc).__name__}: {exc}"
+            report.stopped_early = note
+            report.escalations.append(note)
+            store.log("escalation", reason=note)
+            self._emit("stopped", reason=note)
 
         self._record_outcomes(store, mode)
         store.log("run_finished", **report.summary())
@@ -896,6 +920,7 @@ class Router:
         if not jobs:
             return
         sem = asyncio.Semaphore(max(1, concurrency))
+        in_flight = min(max(1, concurrency), len(jobs))
         stopped: list[str] = []
 
         async def one(spec: AgentSpec, task: str) -> None:
@@ -907,15 +932,19 @@ class Router:
                 except BudgetExceeded as exc:
                     stopped.append(str(exc))
                     return
-                await self._dispatch(spec, store, budget, report, task, map_version)
+                await self._dispatch(
+                    spec, store, budget, report, task, map_version, slots=in_flight
+                )
 
         await asyncio.gather(*(one(spec, task) for spec, task in jobs))
         if stopped:
             raise BudgetExceeded(stopped[0])
 
-    async def _dispatch(self, spec, store, budget, report, task, map_version) -> RunOutcome:
+    async def _dispatch(
+        self, spec, store, budget, report, task, map_version, *, slots: int = 1
+    ) -> RunOutcome:
         ctx = self._context(store, spec, map_version)
-        allowance = budget.allowance(spec)
+        allowance = budget.allowance(spec, slots=slots)
 
         self._emit("agent_started", agent=spec.name, budget=allowance)
         # `max_wall_clock_s` was a gate checked *between* dispatches and nothing

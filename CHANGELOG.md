@@ -2,6 +2,135 @@
 
 ## 0.0.2
 
+### Test selection is derived now, not guessed
+
+`affected_tests` ranked tests by filename similarity, so a test reaching the
+changed module through a caller scored zero — which is exactly step 3 of
+`regression-suite-selection`, the step that catches a broken consumer of a shared
+helper. `importgraph.py` builds a reverse-reachable import closure with stdlib
+`ast`, parse-only, and the ranking reports the hop distance. It degrades to the
+old heuristic for non-Python targets and says which answer it gave.
+
+### Two doors on the dashboard were open by default
+
+The server binds 127.0.0.1, which stops a network peer and does nothing about
+the browser already running as this user. A site on attacker-controlled DNS
+rebinding to 127.0.0.1 became same-origin and could read the whole run ledger;
+and `_set_override` read `await request.json()` with no Content-Type check, so a
+cross-origin `text/plain` fetch — a CORS-simple request, sent with no preflight —
+rewrote `overrides.yaml`. Loopback Host required, JSON content type required,
+cross-origin writes refused.
+
+### A target's own test suite ran with your credentials
+
+`test_runner` built the child environment as `dict(os.environ, ...)` minus two
+pytest keys, so the target repository's suite — someone else's code, cloned from
+a pasted URL — ran with `ANTHROPIC_API_KEY`, `JIRA_API_TOKEN` and `GITHUB_TOKEN`
+in scope. A `conftest.py` reading `os.environ` was the whole exploit. It is an
+allowlist now.
+
+### env_control never checked whether it owned the environment
+
+`environment.mode` is the load-bearing field of the target system — `none` means
+static reads only, `external` means "exercise it but never reset it, someone else
+may be relying on it". `spin_up`, `seed`, `reset` and `tear_down` consulted only
+whether a compose file existed and whether `docker` was on PATH, so a compose
+file left lying in a repository was enough to destroy a shared staging
+environment the profile had declared off-limits.
+
+### API and AUDITOR could not meet their own evidence bar
+
+Three prompts make observation the standard — "a finding you have not observed is
+a hypothesis, not a defect" — and no agent held a tool that could issue an HTTP
+request. `WebFetch` is refused to every agent, correctly; nothing let them reach
+the running app either. `env_control.http_request` closes that, contained to the
+target's own origin: an agent passes a path, never a host.
+
+### Calibration was measuring the wrong things
+
+- **An anchor is *where*, not *what*.** The right endpoint plus the right file
+  scored 0.75 against a 0.5 threshold with zero keyword overlap, so "this
+  endpoint is slow" was credited with finding the cross-tenant leak in the same
+  handler. Recall counted it; the real defect went in `missed`.
+- **Duplicates were outside the precision denominator**, so a run that found
+  three defects and filed forty restatements scored 100% — the exact ticket spam
+  `qaas sweep --min-precision` exists to catch.
+- **`--domain` narrowed only the golden side**, so scoring with `--domain api`
+  charged every correct frontend and database finding as a false positive.
+- **UI-08 sat under `not_defects`** with no `why_correct` while its own text
+  called it a latent defect, so a correct report of it was scored as noise.
+- **API-09 is a WebSocket defect filed under `api`**, so SOCKET could only ever
+  miss it and be charged for finding it.
+
+### A named target that did not exist was silently ignored
+
+`if chosen and profiles:` meant "named but absent stays fatal" held only when
+some profile existed *somewhere* — and a fresh `pip install` has none, because
+the packaged config ships no `targets/`. So `--target`, `QAAS_TARGET` or
+`system.yaml` naming a profile that was not there fell back to the working
+directory, pointing every write-path sandbox, the test runner's cwd and the SDK
+subprocess at whatever directory the operator was standing in.
+
+`--config` now heads the layered search rather than replacing it, which is what
+`paths.py` has always documented and what `QAAS_CONFIG_DIR` already did. A
+`--config` naming a directory that does not exist is an error instead of a
+silently dropped layer.
+
+### Other fixes
+
+- `.env` is found from the project root, not the working directory, so running
+  from a subdirectory no longer loses every credential.
+- `parse_env` strips an unquoted trailing `# comment`, which was becoming part of
+  the value — `JIRA_PROJECT_KEY=KAN  # the board` was a corrupted project key.
+- `emit_envelope` resolves the `artifact://` uris it is handed. The evidence gate
+  accepted a well-formed string naming a file that had never been written.
+- `emit_envelope` strips server-owned fields and closes its schema; an agent
+  could supply `id` and overwrite another agent's envelope on disk.
+- `fingerprint()` folds `service`/`endpoint`/`ui_route` the way the similarity
+  scorer already did, so `GET /v1/orders` and `get /v1/orders/` stop being two
+  defects.
+- `defect_memory.record` and `mark_resolved` are gated by policy, like every
+  other write tool on the envelope server.
+- A glob `write_path` no longer escapes the checkout — `fnmatch`'s `*` crosses
+  `/`, so `*_test.py` matched `/etc/x_test.py`.
+- `HARNESS_TOOLS` is derived from `ALWAYS_GRANTED`; the comment claimed they
+  could not drift and they had.
+- FIXER's `must_call: [mcp__vcs__open_pr]` is dropped when the configured backend
+  has no remote. Under the committed `vcs: local` it was a contract no behaviour
+  could satisfy, so the Stop hook blocked on every fix.
+- `mcp__vcs__commit` no longer spends FIXER's §8.2 diff budget on its own
+  `write_paths`; `LocalGit.commit` tolerates a write path the repository does not
+  have, instead of staging nothing.
+- `board_url` rejects a redirect that leaves the Jira site — on an SSO-enforced
+  instance it was handing out the identity provider's login URL.
+- Jira `search` pages past the 100-row API cap instead of silently halving the
+  200-row window `--from-board` asks for.
+- `thresholds.max_tickets_per_run` is enforced by the tracker, not only by
+  TRIAGE's prompt.
+- `run_n_times` divides by the runs that completed, not the runs requested — an
+  early stop reported an 85% flake rate on a test that never disagreed with
+  itself.
+- `contract_diff` and `impersonate` resolve the target's base URL from the
+  profile instead of hardcoding `localhost:8000` and a service named `web`.
+- `store.ledger()` counts unreadable lines; `put_artifact` no longer silently
+  overwrites another finding's evidence; `SystemMapStore` no longer mkdirs from a
+  reader.
+- `trace --follow` survives a resumed run; `qaas show` dates a resumed run from
+  its latest session; `--kind` beats `--quiet`, as documented.
+- Per-agent caps span the run rather than one dispatch; concurrent dispatches
+  share the remaining budget instead of each being handed all of it; a non-budget
+  exception still writes `run_finished`.
+- `qaas sweep` exits non-zero when the run failed or stopped early, and checks
+  that before the no-ledger return.
+- `--only` is validated against the mode, not the whole roster; `--run-id` on a
+  run that does not exist is refused instead of silently starting a new one;
+  a credential embedded in a `--repo` URL is no longer echoed or stored;
+  `--repo` refuses to reuse a same-named profile pointing at a different
+  repository.
+- The test suite clears every `QAAS_*` override at import time, not in a session
+  fixture that ran after collection — `QAAS_TRACKER=jira` in a shell errored
+  fourteen tests before the fixture meant to prevent it could run.
+
 ### Every MCP tool error was delivered to agents as a success
 
 `err()` set `isError`, the MCP wire spelling. The SDK builds the result from

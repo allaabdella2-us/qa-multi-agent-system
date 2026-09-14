@@ -514,6 +514,18 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def record(args: dict[str, Any]) -> dict[str, Any]:
+        # Gated like every comparable write: `record_reproduction` is
+        # REPRODUCER's, `record_verdict` is VERIFIER's, `put_system_map` is
+        # MAPPER's. This one mutates the store that outlives the run and was open
+        # to any agent holding the server -- so a discovery agent could write
+        # "already tracked as PROJ-N" against its own finding and suppress it in
+        # every future run.
+        if not ctx.agent.policy.may_create_tickets:
+            return err(
+                f"{ctx.agent.name} may not record into the cross-run defect memory "
+                "(§8.1: TRIAGE files, and filing is what makes a defect worth "
+                "remembering). Emit your finding as an envelope."
+            )
         envelope = ctx.store.get_envelope(args["envelope_id"])
         if envelope is None:
             return err(f"No envelope '{args['envelope_id']}' in this run. Emit it first.")
@@ -656,6 +668,12 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def mark_resolved(args: dict[str, Any]) -> dict[str, Any]:
+        if not ctx.agent.policy.may_transition_tickets:
+            return err(
+                f"{ctx.agent.name} may not mark a defect resolved. A recurrence after "
+                "this is reported as a REGRESSION, so writing it wrongly suppresses "
+                "the highest-value signal this system has."
+            )
         fp = args["fingerprint"]
         ticket_key = args.get("ticket_key") or None
         now = _utcnow_iso()

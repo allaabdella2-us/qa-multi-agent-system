@@ -16,8 +16,8 @@ milestone checklist. Code comments cite that document by section (`§8.1`,
 first, and update the plan's milestone table when work lands. `ARCHITECTURE.md`
 walks the code as it now stands, `MANUAL.md` is the user-facing command
 reference, `docs/dashboard.md` covers `qaas dashboard`, `PROVIDERS_PLAN.md` is
-the staged plan for making the model a choice, and `tutorial/` a nine-chapter
-tour — a change that outdates this file usually outdates those too.
+the staged plan for making the model a choice — a change that outdates this
+file usually outdates those too.
 
 ## Commands
 
@@ -25,7 +25,7 @@ tour — a change that outdates this file usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (BROWSER) runs
 
-pytest                                   # 866 tests, no API calls, no network
+pytest                                   # 987 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
@@ -501,6 +501,27 @@ REVIEWER requiring the edit and the guardrail refusing it, before the contradict
 was visible. The general rule this taught, now in `adversarial-review`: **never
 request a change the author is not permitted to make** — route it as separate
 human work instead.
+
+### Where a real parse buys something
+
+`importgraph.py` is the one place in the system that parses rather than guesses,
+and it exists for one caller. `affected_tests` answers "what should VERIFIER run
+against this diff", and it answered by comparing *filenames*: a test that reaches
+the changed module through a caller scored zero — which is step 3 of
+`regression-suite-selection` ("a fix inside a shared helper breaks its consumers,
+not itself"), so the step the procedure calls essential was delegated to a
+ranking that could not see it. A reverse-reachable closure over the import graph
+sees it in two hops.
+
+Three properties, all load-bearing. **Parse-only** — `ast.parse` on text that is
+never imported, because the target is someone else's repository, cloned from a
+pasted URL, and running its module-level code inside the process holding this
+user's credentials is not a thing to do for a test ranking. **Python-only, and it
+says so** — a Go or TypeScript target yields an empty graph, `affected_tests`
+falls back to the heuristic, and the result names which answer it gave, because
+"no tests are affected" and "I cannot read this language" are different answers.
+**Never raises** — a ranking that crashes the verification phase is worse than
+one that is merely incomplete.
 
 Run `qaas score` after changing any prompt, threshold or model. It is the only
 way to know whether a change helped. `Scorecard.by_agent(envelopes)` splits every

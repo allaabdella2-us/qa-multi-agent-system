@@ -142,7 +142,7 @@ def set_values(
                 "the guardrails enforce, and they are edited in the config file."
             )
 
-    target = Path(write_to or config_dirs[0])
+    target = Path(write_to) if write_to else _override_layer(config_dirs)
     candidate = _merge(read(target), section, key, values)
     _validate(config_dirs, candidate)
 
@@ -152,9 +152,29 @@ def set_values(
     return candidate
 
 
+def _override_layer(config_dirs: list[Path]) -> Path:
+    """The layer `config._apply_overrides` will actually read back.
+
+    That loader takes the *nearest layer which already contains* an
+    `overrides.yaml` and stops there; this wrote unconditionally to
+    `config_dirs[0]`. When the live overrides file sat in a farther layer --
+    `<project>/config/overrides.yaml`, with a nearer `.qaas/config/` on the path
+    -- the page read an empty file, merged one field into it, wrote it to the
+    nearer directory, and reported success. Every override already in force was
+    silently discarded, and the page then shadowed the file it had discarded.
+
+    Falls back to the nearest writable layer when no overrides file exists yet,
+    which is what creating the first one should do.
+    """
+    for directory in config_dirs:
+        if (Path(directory) / OVERRIDES_FILE).is_file():
+            return Path(directory)
+    return Path(config_dirs[0])
+
+
 def reset(config_dirs: list[Path], *, write_to: Path | None = None) -> dict[str, Any]:
     """Delete every override. One `rm`, exposed as a button."""
-    target = Path(write_to or config_dirs[0])
+    target = Path(write_to) if write_to else _override_layer(config_dirs)
     path = target / OVERRIDES_FILE
     if path.is_file():
         path.unlink()

@@ -98,6 +98,7 @@ def test_run_repo_provisions_a_profile_and_dry_runs(runner, tmp_path, monkeypatc
     config.mkdir()
     (config / "system.yaml").write_text((Path(CONFIG) / "system.yaml").read_text())
     (config / "agents").symlink_to(Path(CONFIG) / "agents")
+    _scratch_target(config, tmp_path)
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(
@@ -123,6 +124,7 @@ def test_run_repo_is_idempotent_and_reuses_the_profile(runner, tmp_path, monkeyp
     config.mkdir()
     (config / "system.yaml").write_text((Path(CONFIG) / "system.yaml").read_text())
     (config / "agents").symlink_to(Path(CONFIG) / "agents")
+    _scratch_target(config, tmp_path)
     monkeypatch.chdir(tmp_path)
 
     argv = ["run", "--mode", "pr-check", "--config", str(config), "--repo", str(repo), "--dry-run"]
@@ -207,6 +209,30 @@ def test_a_nearer_layer_shadows_a_profile_of_the_same_name(tmp_path, monkeypatch
 # chosen is scheduled by ROUTER out of the ledger exactly as before -- the board
 # chooses the *work*, never the order it happens in.
 
+def _scratch_target(config: Path, root: Path, name: str = "corvid") -> Path:
+    """A minimal target profile inside a scratch config, pointing at a real path.
+
+    The suite names a target through `QAAS_TARGET`, and a named target absent
+    from the config path is fatal -- it used to be silently ignored, which left
+    `target_root()` pointing at whatever directory the process happened to be
+    standing in while the run reported success. So a scratch config needs a
+    profile, and it has to be a *scratch* one: symlinking the repository's own
+    `config/targets/` in was tried and `_writable_targets_dir` wrote a generated
+    profile straight back through the link into the real checkout.
+    """
+    targets = config / "targets"
+    targets.mkdir(parents=True, exist_ok=True)
+    (root / "app").mkdir(parents=True, exist_ok=True)
+    path = targets / f"{name}.yaml"
+    path.write_text(
+        f"name: {name}\nroot: {root}\ndescription: a scratch target\n"
+        "default_branch: main\nlayout:\n  backend: [app]\n"
+        "environment:\n  mode: none\nauth:\n  mode: none\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _board_project(tmp_path: Path, *, status: str, label: str = "repo-corvid"):
     """A run holding one ticketed envelope, and a local ticket in `status`."""
     from qaas.adapters.tracker import build_tracker
@@ -220,6 +246,7 @@ def _board_project(tmp_path: Path, *, status: str, label: str = "repo-corvid"):
     config.mkdir(parents=True)
     (config / "system.yaml").write_text((Path(CONFIG) / "system.yaml").read_text())
     (config / "agents").symlink_to(Path(CONFIG) / "agents")
+    _scratch_target(config, tmp_path)
 
     root = tmp_path / ".qaas"
     store = RunStore("run-board", root=root, create=True)

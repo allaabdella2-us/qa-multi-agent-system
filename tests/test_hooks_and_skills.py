@@ -240,3 +240,44 @@ def test_harness_plumbing_is_granted_but_grants_nothing(cfg):
     """ToolSearch and Skill are in every allowlist; neither is a capability."""
     assert ALWAYS_GRANTED >= {"ToolSearch", "Skill"}
     assert not ALWAYS_GRANTED & {"Write", "Edit", "Bash", "WebFetch"}
+
+
+def test_a_contract_the_backend_cannot_satisfy_is_dropped_not_enforced(make_ctx=None, tmp_path=None):
+    """FIXER's `must_call: [mcp__vcs__open_pr]` against the committed `vcs: local`.
+
+    `LocalGit` implements no remote, so `_remote_refusal` turns the call into an
+    `err()` -- and `on_post_tool` deliberately does not count an errored call,
+    because an errored `record_verdict` must not satisfy VERIFIER's contract.
+    Correct in general, and here it made FIXER's deliverable unsatisfiable by any
+    behaviour: the Stop hook blocked, burned a turn, blocked again, and logged
+    `contract_unmet` on every fix, for a tool the installation does not have.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from support import CONFIG_SEARCH
+
+    from qaas.config import load_config
+    from qaas.mcp.context import ToolContext
+    from qaas.registry import satisfiable_contract
+    from qaas.store import RunStore, SystemMapStore
+
+    cfg = load_config(search=CONFIG_SEARCH)
+    root = Path(tempfile.mkdtemp())
+    ctx = ToolContext(
+        store=RunStore.new(root=root), maps=SystemMapStore(root), config=cfg,
+        agent=cfg.agents["FIXER"], target_root=cfg.target_root(),
+    )
+
+    assert "mcp__vcs__open_pr" in cfg.agents["FIXER"].must_call, (
+        "the contract this test is about has moved"
+    )
+    required = satisfiable_contract(ctx)
+    assert "mcp__vcs__open_pr" not in required, required
+    # Everything the backend *can* do is still required.
+    assert "mcp__tracker__transition" in required
+    # And the drop is visible, not silent.
+    assert any(
+        "has no remote" in str(e.detail.get("reason", ""))
+        for e in ctx.store.ledger("skipped")
+    )

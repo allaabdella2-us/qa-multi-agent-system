@@ -667,7 +667,6 @@ summary of it — nothing is hidden from you.
 | [docs/dashboard.md](docs/dashboard.md) | the dashboard: both views, editing overrides, what it cannot do |
 | [docs/jira-setup.md](docs/jira-setup.md) | connecting a real Jira, end to end |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | the system in one document |
-| [tutorial/](tutorial/) | a nine-chapter tour of how it is built |
 | [qa-agent-system-architecture.md](qa-agent-system-architecture.md) | the original design this was built to |
 
 ---

@@ -36,12 +36,20 @@ ALL_CALLS: dict[str, dict] = {
     "set_flag": {"key": "checkout.new_review", "value": True},
     "get_flags": {},
     "set_clock": {"iso_timestamp": "2026-01-31T23:59:59Z"},
+    "http_request": {"method": "GET", "path": "/v1/orders"},
     "impersonate": {"role": "admin"},
     "status": {},
     "tear_down": {},
 }
 
 DOCKER_TOOLS = ("spin_up", "seed", "reset", "status", "tear_down")
+
+#: `http_request` bottoms out in a socket rather than in `docker compose`, so
+#: "no compose file" is not what stops it -- `environment.is_reachable` is. It
+#: is excluded from the compose-degradation sweep and covered on its own below,
+#: where the refusal is asserted *without* a connection being attempted: a
+#: suite that reaches the network is a suite that fails on a train.
+NON_COMPOSE_TOOLS = ("http_request",)
 OFFLINE_TOOLS = ("set_flag", "get_flags", "set_clock")
 
 
@@ -71,7 +79,7 @@ def test_the_server_exposes_the_tools_architecture_5_2_names(make_ctx):
     ctx = make_ctx("BROWSER")
     assert [t.name for t in build_tools(ctx)] == [
         "spin_up", "seed", "reset", "set_flag", "get_flags", "set_clock",
-        "impersonate", "status", "tear_down",
+        "http_request", "impersonate", "status", "tear_down",
     ]
     assert set(ALL_CALLS) == {t.name for t in build_tools(ctx)}  # no tool escapes the refusal tests
     assert build(ctx)["name"] == "env_control"  # the name surface.yaml allowlists
@@ -80,7 +88,9 @@ def test_the_server_exposes_the_tools_architecture_5_2_names(make_ctx):
 # -- degradation -----------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", sorted(ALL_CALLS))
+@pytest.mark.parametrize(
+    "name", sorted(set(ALL_CALLS) - set(NON_COMPOSE_TOOLS))
+)
 async def test_every_tool_refuses_cleanly_when_there_is_no_compose_file(make_ctx, tmp_path, name):
     """An empty repo root: no target-app, therefore no environment to control."""
     tools = handlers(build_tools(make_ctx("BROWSER", target_root=tmp_path)))
@@ -332,3 +342,83 @@ def test_a_published_host_port_is_read_in_every_spelling_compose_allows(entry, e
     from qaas.mcp.env_control import _host_port
 
     assert _host_port(entry) == expected
+
+
+# -- the lifecycle gate -----------------------------------------------------
+
+
+@pytest.mark.parametrize("tool_name", ["spin_up", "seed", "reset", "tear_down"])
+@pytest.mark.parametrize("mode", ["none", "external"])
+async def test_a_target_this_system_does_not_own_is_never_reset(make_ctx, mode, tool_name):
+    """`environment.mode` is the load-bearing field of the target system, and
+    this server had never read it.
+
+    `none` means static reads only; `external` means "exercise it, but someone
+    else may be relying on it and a reset has no undo". The server checked only
+    whether a compose file happened to exist and whether `docker` was on PATH --
+    so a compose file left lying in a repository was enough to destroy a shared
+    staging environment the profile had explicitly declared off-limits.
+    """
+    ctx = make_ctx("REPRODUCER")
+    profile = ctx.config.profile.model_copy(deep=True)
+    profile.environment.mode = mode
+    ctx.config = ctx.config.model_copy(update={"profile": profile})
+
+    result = await handlers(build_tools(ctx))[tool_name]({})
+    assert is_error(result), f"{tool_name} was allowed against a {mode} environment"
+    assert f"environment.mode: {mode}" in text_of(result)
+
+
+@pytest.mark.parametrize("tool_name", ["status", "get_flags"])
+async def test_reading_an_environment_is_never_gated_on_owning_it(make_ctx, tool_name):
+    """The gate is on the lifecycle, not on the server. An agent pointed at an
+    external environment must still be able to look at it."""
+    ctx = make_ctx("REPRODUCER")
+    profile = ctx.config.profile.model_copy(deep=True)
+    profile.environment.mode = "external"
+    ctx.config = ctx.config.model_copy(update={"profile": profile})
+
+    result = await handlers(build_tools(ctx))[tool_name]({})
+    assert "does not own the environment" not in text_of(result)
+
+
+# -- http_request -----------------------------------------------------------
+
+
+async def test_a_target_with_no_running_instance_is_not_dialled(make_ctx):
+    """Refused before any socket is opened.
+
+    Two things at once: `environment.mode: none` means there is nothing to call,
+    and a test suite that reaches the network is a suite that fails on a train.
+    """
+    ctx = make_ctx("API")
+    profile = ctx.config.profile.model_copy(deep=True)
+    profile.environment.mode = "none"
+    ctx.config = ctx.config.model_copy(update={"profile": profile})
+
+    result = await handlers(build_tools(ctx))["http_request"]({"method": "GET", "path": "/v1/orders"})
+    assert is_error(result)
+    assert "no running instance" in text_of(result)
+
+
+@pytest.mark.parametrize(
+    "path", ["http://evil.example/x", "https://evil.example/x", "//evil.example/x"]
+)
+async def test_an_agent_cannot_name_a_host(make_ctx, monkeypatch, path):
+    """A path, resolved against the one origin this run is pointed at.
+
+    `WebFetch` is refused to every agent on the grounds that findings come from
+    the code and the running app rather than the web. A tool that let an agent
+    name its own host would be `WebFetch` wearing a different label, and the
+    gate would mean nothing.
+    """
+    monkeypatch.setenv("QAAS_TARGET_BASE_URL", "http://localhost:9999")
+    ctx = make_ctx("API")
+    profile = ctx.config.profile.model_copy(deep=True)
+    profile.environment.mode = "external"
+    profile.environment.api_url = "http://localhost:9999"
+    ctx.config = ctx.config.model_copy(update={"profile": profile})
+
+    result = await handlers(build_tools(ctx))["http_request"]({"method": "GET", "path": path})
+    assert is_error(result)
+    assert "Pass a path" in text_of(result)

@@ -15,9 +15,18 @@ Route by **class**, never by severity. A trivial vulnerability still goes to the
 | Class | Destination | Why |
 |---|---|---|
 | `vulnerability`, or any envelope with `security_relevant: true` | **Restricted project only** | A public ticket describing an unpatched vulnerability is a disclosure. Irreversible. |
-| `ux-friction` | Product backlog | Not a bug. An engineer cannot action "this flow is confusing"; a product owner can. |
-| `tech-debt` | Debt backlog | Filing debt as a bug corrupts bug metrics and buries real defects. |
-| `bug`, `regression`, `perf-regression` | Engineering, by component | The default path. |
+| `ux-friction` | Default project, labelled `ux-friction` | Not a bug. An engineer cannot action "this flow is confusing"; a product owner can, and the label is what lets them find it. |
+| `tech-debt` | Default project, labelled `tech-debt` | Filing debt as a bug corrupts bug metrics and buries real defects. |
+| `bug`, `regression`, `perf-regression` | Default project, with a component | The default path. |
+
+Two destinations, not four. The tracker knows exactly two projects — the default
+one and the restricted one — so "Product backlog" and "Debt backlog" named boards
+this system cannot file into: `create_issue` takes a `project` key, and a key
+that does not exist is a rejected call, not a different queue. **Omit `project`
+for everything that is not security-relevant** and let the server route it; carry
+the class as a label so a product owner can filter on it. If your organisation
+really does keep separate projects, that is a `JIRA_*` configuration change and a
+human's decision, not something to infer from a class name.
 
 ## Security routing is absolute
 

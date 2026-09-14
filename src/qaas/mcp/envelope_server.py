@@ -106,6 +106,9 @@ EMIT_SCHEMA: dict[str, Any] = {
             ),
         },
     },
+    # Closed. Without this the SDK's validation accepted any extra key and
+    # forwarded it into the model.
+    "additionalProperties": False,
 }
 
 
@@ -132,7 +135,17 @@ def build_tools(ctx: ToolContext) -> list:
                 "not a filing problem: summarise what remains in your final message and stop."
             )
 
-        payload = {k: v for k, v in args.items() if k != "similar_to"}
+        # Server-owned fields are stripped rather than trusted. Every argument
+        # was forwarded into `model_validate`, and EMIT_SCHEMA declared no
+        # `additionalProperties: false`, so the SDK's jsonschema check accepted
+        # extras -- which meant an agent could supply `id` and overwrite another
+        # agent's envelope on disk (`put_envelope` writes `<id>.json`), or set
+        # `discovered_by` to a peer's name, or stamp its own `jira` key.
+        payload = {
+            k: v for k, v in args.items()
+            if k not in ("similar_to", "id", "run_id", "discovered_by", "discovered_at",
+                         "envelope_version", "dedupe", "jira")
+        }
         payload["run_id"] = ctx.store.run_id
         payload["discovered_by"] = ctx.agent.name
 
@@ -159,6 +172,26 @@ def build_tools(ctx: ToolContext) -> list:
                 f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()[:8]
             )
             return err(f"Envelope rejected. Fix these fields and call again: {problems}")
+
+        # `has_evidence()` is satisfied by a non-empty list whose entries have a
+        # known *scheme*, and nothing ever resolved one -- so `artifact://run/x`
+        # for a file that was never stored passed the gate that exists to stop a
+        # finding with no proof. Checked here rather than in the model because
+        # only the server knows which run's store to look in.
+        for item in envelope.evidence:
+            if not item.uri.startswith("artifact://"):
+                continue  # file:// and https:// are the caller's to vouch for
+            try:
+                resolved = ctx.store.resolve_artifact(item.uri)
+            except ValueError as exc:
+                return err(f"Evidence rejected: {exc}")
+            if not resolved.is_file():
+                return err(
+                    f"Evidence {item.uri} does not exist. Store it with put_artifact "
+                    "first and cite the uri that returns — an envelope whose proof "
+                    "cannot be opened is a finding with no evidence, and the gate "
+                    "exists to catch exactly that."
+                )
 
         fileable, reason = envelope.is_fileable(ctx.config.thresholds.min_confidence_to_file)
         ctx.store.put_envelope(envelope)
@@ -332,6 +365,12 @@ def build_tools(ctx: ToolContext) -> list:
         fileable, reason = updated.is_fileable(ctx.config.thresholds.min_confidence_to_file)
         ctx.store.log(
             "reproduction",
+            # The schema advertises `note` ("Why, if you could not reproduce
+            # it.") and the handler dropped it, so the single most useful
+            # sentence REPRODUCER writes -- its reason for a `not_reproducible`
+            # verdict -- was solicited and discarded. `record_verdict` already
+            # keeps `observed` this way.
+            note=str(args.get("note") or "")[:2000],
             agent="REPRODUCER",
             envelope_id=updated.id,
             status=args["status"],
