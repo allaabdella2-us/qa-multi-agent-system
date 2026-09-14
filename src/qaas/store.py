@@ -17,7 +17,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterator
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from qaas.envelope import DefectEnvelope
 
@@ -106,6 +106,11 @@ class AgentResult(BaseModel):
     agent: str
     subtype: str = "success"
     cost_usd: float = 0.0
+    #: True when `cost_usd` is a conservative estimate rather than a measured
+    #: figure -- an agent whose stream dropped before it reported one. Flagged so
+    #: `qaas show` and the dashboard can mark it instead of presenting an
+    #: invented number as measured.
+    cost_estimated: bool = False
     num_turns: int = 0
     duration_s: float = 0.0
     envelope_ids: list[str] = Field(default_factory=list)
@@ -137,6 +142,8 @@ class RunStore:
                 (self.dir / sub).mkdir(parents=True, exist_ok=True)
         #: agent -> files it has written this run. See `touched_files`.
         self._touched: dict[str, set[str]] = {}
+        #: Lines the last `ledger()` scan could not parse. See `ledger`.
+        self.unreadable_lines = 0
 
     @classmethod
     def new(cls, root: Path | str = DEFAULT_ROOT, prefix: str = "run") -> "RunStore":
@@ -160,15 +167,41 @@ class RunStore:
             fh.write(entry.model_dump_json() + "\n")
         return entry
 
-    def ledger(self, kind: LedgerKind | str | None = None) -> Iterator[LedgerEntry]:
+    def ledger(
+        self, kind: LedgerKind | str | None = None, *, strict: bool = False
+    ) -> Iterator[LedgerEntry]:
+        """Entries in order, tolerating a line that does not parse.
+
+        Tolerant by default because of when the intolerant version failed. A run
+        killed mid-`log` -- ^C, an OOM, a full disk -- leaves a truncated last
+        line, and `model_validate_json` raised out of *every* reader built on
+        this: `qaas show`, `qaas trace`, `trace.summarise` and all nine dashboard
+        routes. A crashed run is precisely when the audit trail is worth
+        something, and it was the one run whose ledger could not be opened.
+
+        A skipped line is not swallowed silently -- it lands in
+        `unreadable_lines`, so a reader that cares can say "this trail is short
+        by two lines" rather than quietly presenting a shortened history as a
+        complete one. `strict=True` is for a caller that would rather fail than
+        read a partial history. No new `LedgerKind` for this: a corrupt line is
+        a property of the file, not an event in the run.
+        """
         if not self.ledger_path.exists():
             return
+        skipped = 0
         for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            entry = LedgerEntry.model_validate_json(line)
+            try:
+                entry = LedgerEntry.model_validate_json(line)
+            except ValidationError:
+                if strict:
+                    raise
+                skipped += 1
+                continue
             if kind is None or entry.kind == kind:
                 yield entry
+        self.unreadable_lines = skipped
 
     # -- envelopes --------------------------------------------------------
 

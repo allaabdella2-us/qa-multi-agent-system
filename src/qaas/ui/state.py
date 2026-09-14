@@ -25,7 +25,9 @@ from qaas.envelope import DefectEnvelope, Severity
 from qaas.store import DEFAULT_ROOT, LedgerEntry, LedgerKind, RunStore, list_runs
 
 #: The router's phases, in the order `Router.run` calls them (`router.py:233-242`).
-PHASES: tuple[str, ...] = ("map", "discover", "reproduce", "file", "verify", "report")
+PHASES: tuple[str, ...] = (
+    "map", "discover", "synthesise", "reproduce", "file", "verify", "report",
+)
 
 #: An agent's `layer` maps onto a phase -- except `triage`, which holds *both*
 #: REPRODUCER and TRIAGE. Splitting that one by name is not a special case
@@ -35,6 +37,7 @@ PHASES: tuple[str, ...] = ("map", "discover", "reproduce", "file", "verify", "re
 _LAYER_PHASE = {
     "control": "map",
     "discovery": "discover",
+    "synthesis": "synthesise",
     "remediation": "verify",
     "reporting": "report",
 }

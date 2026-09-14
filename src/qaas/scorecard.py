@@ -322,6 +322,51 @@ class Scorecard:
     def cost_per_accepted(self) -> float | None:
         return self.cost_usd / len(self.matches) if self.matches else None
 
+    def by_agent(self, envelopes: list[DefectEnvelope]) -> dict[str, dict[str, Any]]:
+        """The same numbers, split by which agent reported each finding.
+
+        This was always one join away and never made: `Match.envelope_id` plus
+        `DefectEnvelope.discovered_by` is the whole of it. So the single most
+        actionable calibration fact the system can produce — that LOAD is at 40%
+        precision on performance while AUDITOR is at 95% on security — was
+        invisible, and CLAUDE.md's instruction to "run `qaas score` after
+        changing any prompt, threshold or model" could only ever be answered with
+        a run-wide average that moves too little to read.
+
+        A pure function over data it is handed, like the rest of this module.
+        `envelopes` comes in rather than being looked up, so the scorecard still
+        depends on nothing but the ledger and the findings.
+        """
+        who = {e.id: e.discovered_by for e in envelopes}
+        rows: dict[str, dict[str, Any]] = {}
+
+        def row(agent: str) -> dict[str, Any]:
+            return rows.setdefault(
+                agent,
+                {"matched": 0, "false_positive": 0, "duplicate": 0,
+                 "planted_misreported": 0, "severity_deltas": []},
+            )
+
+        for match in self.matches:
+            entry = row(who.get(match.envelope_id, "unknown"))
+            entry["matched"] += 1
+            entry["severity_deltas"].append(match.severity_delta)
+        for envelope_id in self.false_positives:
+            row(who.get(envelope_id, "unknown"))["false_positive"] += 1
+        for envelope_id in self.duplicates:
+            row(who.get(envelope_id, "unknown"))["duplicate"] += 1
+        for envelope_id, _planted in self.regressions_on_planted:
+            row(who.get(envelope_id, "unknown"))["planted_misreported"] += 1
+
+        for entry in rows.values():
+            judged = entry["matched"] + entry["false_positive"]
+            entry["precision"] = round(entry["matched"] / judged, 3) if judged else None
+            deltas = entry.pop("severity_deltas")
+            entry["severity_agreement"] = (
+                round(sum(1 for d in deltas if abs(d) <= 1) / len(deltas), 3) if deltas else None
+            )
+        return dict(sorted(rows.items()))
+
     def summary(self) -> dict[str, Any]:
         return {
             "found": len(self.matches),

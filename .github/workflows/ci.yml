@@ -48,5 +48,30 @@ jobs:
           if unzip -l dist/*.whl | grep -q "target-app/"; then
             echo "::error::the wheel contains target-app/"; exit 1
           fi
+      - name: The wheel must carry the data half of the system
+        # The check above is one-directional and was the only one, so a packaging
+        # change that dropped prompts/, defaults/ or the skills plugin would pass
+        # CI and ship a wheel that installs, validates, and has no agents. These
+        # are not extras: an agent IS a prompt plus a YAML, and a bare
+        # `<skill>/SKILL.md` tree without the manifest loads nothing, silently.
+        run: |
+          python - <<'EOF'
+          import glob, zipfile, sys
+          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          def count(pattern):
+              import fnmatch
+              return sum(1 for n in names if fnmatch.fnmatch(n, pattern))
+          checks = [
+              ("qaas/prompts/*.md", 17),
+              ("qaas/defaults/config/agents/*.yaml", 16),
+              ("qaas/plugin/skills/*/SKILL.md", 30),
+              ("qaas/defaults/config/system.yaml", 1),
+              ("qaas/plugin/.claude-plugin/plugin.json", 1),
+          ]
+          bad = [(p, count(p), n) for p, n in checks if count(p) < n]
+          for pattern, got, want in bad:
+              print(f"::error::wheel has {got} of {pattern}, expected at least {want}")
+          sys.exit(1 if bad else 0)
+          EOF
       - uses: actions/upload-artifact@v4
         with: { name: dist, path: dist/ }

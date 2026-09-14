@@ -78,3 +78,11 @@ security is AUDITOR's, and the map itself is MAPPER's. Two services sharing
 a table is yours when the defect is the boundary; it is DBA's when the defect
 is the constraint or the query. An unauthenticated endpoint you notice while
 tracing callers belongs to AUDITOR — report the orphaning, not the exploit.
+
+When a defect you can evidence *depends* on a fact outside your surface, say so:
+name the other surface in your summary, and put the file you read that fact in
+into `location.paths` alongside your own. Handing off the whole defect loses it,
+because the agent that owns the other half will judge its half on its own and
+call it minor too. SYNTHESIZER exists to put the two back together, and paths
+are the key it joins on — a note in prose is not one.
+

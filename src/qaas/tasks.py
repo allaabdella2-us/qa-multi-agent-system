@@ -249,7 +249,12 @@ def discovery(config: SystemConfig, mode: str, spec: "AgentSpec") -> str:
 Layout — {p.layout.described()}
 
 Your own instructions define what your domain is and what counts as evidence in
-it. Work within it and leave the other surfaces to the agents that own them.
+it. Work within it and leave the other surfaces to the agents that own them —
+that is about where you *search*, not about what you may say. If a defect you
+can evidence depends on a fact outside your surface, state that fact, say where
+you read it, and include that file in `location.paths`. A defect whose proof
+spans two surfaces arrives as two minor findings otherwise, and the half that
+would have made it a blocker is the half nobody filed.
 
 {reach}
 
@@ -257,6 +262,64 @@ Emit one envelope per distinct defect with `emit_envelope`. Finding nothing is a
 valid outcome; inventing something to report is not. Deduplicate against
 `search_similar` before you emit, so a defect this system already knows about
 comes back as an occurrence rather than a new finding.
+
+Mode: {mode}."""
+
+
+def synthesis(config: SystemConfig, mode: str, finding_count: int) -> str:
+    """The task for a synthesis agent.
+
+    Its subject is *this run's findings*, not the application — but unlike a
+    reporting agent it may open the code, because a conjunction has to be
+    confirmed in the two files before it is worth asserting. Naming no domain
+    here on purpose: the whole value is that it belongs to none of them.
+    """
+    p = _profile(config)
+    return f"""Join this run's findings, at `{_where(config)}` — your working directory.
+
+{finding_count} findings have been emitted by agents that could not see each
+other's work. Each was judged on its own surface. Your question is the one none
+of them could ask: **do two or more of these describe a single defect that is
+worse than the sum of its parts?**
+
+Start with `list_envelopes`. Read all of them before you judge any of them.
+
+What you are looking for is a conjunction — a defect whose proof needs a fact
+from one finding and a fact from another:
+
+- An access-control bypass that needs a missing check in one place and a missing
+  constraint in another. Either alone is a note; together they are a way in.
+- A data-loss or corruption path that needs a write in one component and the
+  absence of a guard in a different one.
+- A race or duplication that needs a client's retry behaviour and a server's
+  non-idempotency.
+- A severity that is wrong because the finding that justifies raising it was
+  filed by a different agent against a different surface.
+
+Two findings in the same file are usually two defects, not one. Sharing a path
+is a hint, not the answer.
+
+Then **confirm before you emit**. Open both files and read the code that each
+half claims. A conjunction you reasoned to but did not verify is weaker than
+either of the findings it is built from, and emitting it makes this run worse
+rather than better. If you cannot confirm it, say so and emit nothing.
+
+When you do emit, with `emit_envelope`:
+
+- Put every path both halves named into `location.paths`, so the composite is
+  anchored in both surfaces.
+- Put the ids of the findings you composed from into `dedupe.similar_to`.
+- State the severity of the *composite*, and say in the summary why it is higher
+  than either component — that reasoning is the finding.
+- Cite the evidence the components already carry. You do not need new evidence
+  for facts they established; you need it for the join.
+
+Do not go looking for new defects in a domain. Nine agents have already done
+that, better than you can from here, and a finding you make alone is one you
+have taken from the agent that owns that surface. Finding no conjunction is the
+common outcome and a completely valid one — say so plainly and stop.
+
+Layout — {p.layout.described()}
 
 Mode: {mode}."""
 
@@ -392,9 +455,33 @@ def fixer(
     ticket_key: str,
     envelope: DefectEnvelope | None,
     config: SystemConfig | None = None,
+    *,
+    feedback: str = "",
 ) -> str:
-    """The fix task. FIXER is Phase 3; the router's loop calls this once it exists."""
+    """The fix task. FIXER is Phase 3; the router's loop calls this once it exists.
+
+    `feedback` is what makes the second attempt different from the first.
+    VERIFIER's `observed` and REVIEWER's concerns were both captured as typed
+    ledger entries and then dropped on the floor, so a FIXER/REVIEWER round trip
+    re-ran the identical prompt. The router assembles the text; this only has to
+    give it somewhere to land, above the defect rather than below it — an agent
+    that reads "here is what you got wrong last time" first reads the rest
+    differently.
+    """
     where = f"the application at `{_where(config)}`" if config and config.profile else "the target application"
+    prior = (
+        f"""
+This is not the first attempt. A previous fix for {ticket_key} did not hold:
+
+{feedback}
+
+Read that before you read the defect. Repeating the last attempt costs a round
+trip and reaches the same verdict — if you believe the previous change was right
+and the objection is wrong, say so and escalate rather than submitting it again.
+"""
+        if feedback.strip()
+        else ""
+    )
     detail = ""
     if envelope:
         steps = "\n".join(f"    {i}. {s}" for i, s in enumerate(envelope.reproduction.steps, 1))
@@ -407,7 +494,7 @@ def fixer(
 {steps or "    (none recorded)"}
 """
     return f"""Fix ticket {ticket_key} in {where}.
-{detail}
+{prior}{detail}
 Read the affected code with the system map for context, then write the smallest
 change that makes the failing test pass. Add a regression test. Run the affected
 suite locally before you open anything.

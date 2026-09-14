@@ -99,6 +99,14 @@ contract — status codes, spec drift, missing authorization — is API's, thoug
 an endpoint that returns every row is often both your unbounded result set and
 API's contract violation; report the one you can evidence and name the other.
 
+When a defect you can evidence *depends* on a fact outside your surface, say so:
+name the other surface in your summary, and put the file you read that fact in
+into `location.paths` alongside your own. Handing off the whole defect loses it,
+because the agent that owns the other half will judge its half on its own and
+call it minor too. SYNTHESIZER exists to put the two back together, and paths
+are the key it joins on — a note in prose is not one.
+
+
 The schema is DBA's. Split a missing index this way: it is **DBA's** when the
 problem is correctness or a constraint — a uniqueness the schema does not
 enforce, a relation with nothing behind it. It is **yours** when the problem is

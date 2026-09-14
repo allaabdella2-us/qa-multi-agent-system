@@ -22,7 +22,7 @@ from qaas.target import TargetProfile, load_target
 # selection accuracy falls off past roughly 5-7. Enforced, not just documented.
 MAX_MCP_SERVERS_PER_AGENT = 6
 
-Layer = Literal["control", "discovery", "triage", "remediation", "reporting"]
+Layer = Literal["control", "discovery", "synthesis", "triage", "remediation", "reporting"]
 
 
 class Policy(BaseModel):
@@ -176,6 +176,16 @@ class RunMode(BaseModel):
     max_wall_clock_s: int = 3600
     max_concurrency: int = 3
     files_tickets: bool = True
+
+    #: How much of the clock the finding phases may NOT have, so that filing and
+    #: reporting still can. `BudgetExceeded` unwinds all the way to `run()`, so a
+    #: run that ran out of time during discovery or reproduce skipped file,
+    #: verify and report entirely -- the envelopes sat on disk, no ticket existed,
+    #: no report existed, and whoever scheduled it saw a run that cost money and
+    #: produced nothing they could act on. `pr-check` is the likely victim at 900
+    #: seconds. The reserve converts work already paid for into tickets instead of
+    #: discarding it; the run still stops early and still escalates.
+    reserve_fraction: float = 0.15
 
 
 class SystemConfig(BaseModel):

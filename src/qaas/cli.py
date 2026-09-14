@@ -1500,14 +1500,18 @@ def score(
         run_id = ids[0]
 
     store = RunStore(run_id, root, create=False)
+    envelopes = store.envelopes()
     card = score_run(
-        store.envelopes(),
+        envelopes,
         GoldenLedger.load(ledger_path),
         phase=phase,
         domains=set(domains) if domains else None,
         cost_usd=store.total_cost_usd(),
     )
     s = card.summary()
+    per_agent = card.by_agent(envelopes)
+    _persist_score(root, run_id, s, per_agent)
+    _remember_false_positives(root, cfg_target(config_dir), run_id, card, envelopes)
 
     console.print(f"[bold]{run_id}[/bold]")
     table = Table(header_style="bold")
@@ -1521,6 +1525,26 @@ def score(
     table.add_row("severity agreement", f"{s['severity_agreement']:.0%}")
     console.print(table)
 
+    if per_agent:
+        console.print("\n[bold]by agent[/bold]  [dim]which agent to tune, not just whether to[/dim]")
+        agents = Table(header_style="bold")
+        agents.add_column("agent")
+        agents.add_column("found", justify="right")
+        agents.add_column("false pos", justify="right")
+        agents.add_column("dupes", justify="right")
+        agents.add_column("precision", justify="right")
+        agents.add_column("sev agree", justify="right")
+        for name, r in per_agent.items():
+            agents.add_row(
+                name,
+                str(r["matched"]),
+                str(r["false_positive"]),
+                str(r["duplicate"]),
+                "—" if r["precision"] is None else f"{r['precision']:.0%}",
+                "—" if r["severity_agreement"] is None else f"{r['severity_agreement']:.0%}",
+            )
+        console.print(agents)
+
     if card.matches:
         console.print("\n[bold]found[/bold]")
         for m in card.matches:
@@ -1532,6 +1556,82 @@ def score(
         console.print("\n[red]reported deliberately-correct behaviour as a defect[/red]")
         for env_id, planted in card.regressions_on_planted:
             console.print(f"  {planted}  [dim]({env_id})[/dim]")
+
+
+def cfg_target(config_dir: Path | None) -> str:
+    """The active target's name, for partitioning memory. Never fatal."""
+    try:
+        return str(load_config(config_dir).target or "")
+    except Exception:  # noqa: BLE001 — scoring must not fail on a config problem
+        return ""
+
+
+def _remember_false_positives(
+    root: Path, target: str, run_id: str, card, envelopes: list
+) -> None:
+    """Write "this report was wrong" where the next run will read it.
+
+    The golden ledger's `not_defects` section plants correct-but-suspicious code
+    precisely so precision is measured rather than assumed, and
+    `regressions_on_planted` is the list of times an agent fell for it. That list
+    was printed and discarded, so the same agent fell for the same code next week
+    and the operator's only remedy was to edit a prompt by hand and hope.
+
+    Written from here and nowhere else, and that is what makes it safe to act on:
+    `qaas score` runs in a process with no agent in it, invoked by a person or by
+    cron, measured against a ledger that is in nobody's `write_paths`. An agent
+    that could write this could mark its own mistakes correct.
+
+    Never raises. A memory that cannot be written is a worse next run.
+    """
+    if not card.regressions_on_planted:
+        return
+    from qaas.mcp import defect_memory
+
+    by_id = {e.id: e for e in envelopes}
+    for envelope_id, planted_id in card.regressions_on_planted:
+        envelope = by_id.get(envelope_id)
+        if envelope is None:
+            continue
+        try:
+            defect_memory.record_outcome(
+                root,
+                fingerprint=envelope.fingerprint(),
+                run_id=run_id,
+                outcome="false_positive",
+                target=target,
+                agent=envelope.discovered_by,
+                detail=f"matched {planted_id}, which the golden ledger plants as correct",
+            )
+        except Exception:  # noqa: BLE001 — a lost lesson, not a failed scoring
+            pass
+
+
+def _persist_score(root: Path, run_id: str, summary: dict, per_agent: dict) -> None:
+    """Keep the scorecard. It used to be computed and thrown away.
+
+    All three call sites printed it or gated on it and none of them wrote it, so
+    the one honest number the system produces about itself existed for as long as
+    a terminal scrollback. "Run `qaas score` after changing any prompt, threshold
+    or model" is only answerable against the previous score, and there was none.
+
+    Written here rather than by the router on purpose: scoring happens in a
+    process with no agent in it, invoked by a person or by cron, against a golden
+    ledger no agent may write. That is what makes the number un-inflatable — the
+    same reason `target-app/defects.yaml` is in nobody's `write_paths`.
+
+    Never raises: an unwritable score directory is a lost record, not a failed
+    scoring.
+    """
+    try:
+        out = Path(root) / "scores"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{run_id}.json").write_text(
+            json.dumps({"run_id": run_id, "summary": summary, "by_agent": per_agent}, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 @app.command()

@@ -57,3 +57,11 @@ The HTTP surface is API's, the UI is BROWSER's, and dependency advisories are
 AUDITOR's. A cross-tenant read is yours when the defect is in the query, and
 API's when the defect is in the missing authorization check. If both are true,
 report the one you can evidence.
+
+When a defect you can evidence *depends* on a fact outside your surface, say so:
+name the other surface in your summary, and put the file you read that fact in
+into `location.paths` alongside your own. Handing off the whole defect loses it,
+because the agent that owns the other half will judge its half on its own and
+call it minor too. SYNTHESIZER exists to put the two back together, and paths
+are the key it joins on — a note in prose is not one.
+

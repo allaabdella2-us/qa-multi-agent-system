@@ -26,7 +26,13 @@ PHASE_2 = {"DBA", "AUDITOR", "ARCHITECT", "SOCKET", "GUIDE", "LOAD"}
 #: NAME, so a reporting agent would otherwise validate, assemble, appear in
 #: `--dry-run` and never run.
 PHASE_4 = {"REPORTER"}
-ROSTER = PHASE_1 | PHASE_3 | PHASE_2 | PHASE_4
+#: The synthesis layer. SYNTHESIZER's input is the other agents' output rather
+#: than the application, so it needed the second piece of Python the roster has
+#: ever needed: a `_phase_synthesise` between discover and reproduce. Like
+#: `_phase_report` it dispatches by LAYER, so a second synthesis agent is a
+#: prompt and a YAML again.
+PHASE_5 = {"SYNTHESIZER"}
+ROSTER = PHASE_1 | PHASE_3 | PHASE_2 | PHASE_4 | PHASE_5
 
 
 @pytest.fixture(scope="module")

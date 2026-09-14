@@ -93,6 +93,10 @@ include = [
     "src/", "config/", "target-app/", "tests/",
     "README.md", "LICENSE", "ARCHITECTURE.md", "CLAUDE.md", "BUILD_PLAN.md",
     "CHANGELOG.md",
+    # README and CLAUDE.md both link these, and the sdist shipped neither -- so
+    # the one distribution that carries the docs carried dangling links to them.
+    "MANUAL.md", "PROVIDERS_PLAN.md", "qa-agent-system-architecture.md",
+    "docs/*.md",
     "pyproject.toml",
 ]
 

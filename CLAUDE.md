@@ -90,13 +90,32 @@ or you will be looking at the demo app's runs.
 ### Phase pipeline (`router.py`)
 
 ```
-map    -> discover        -> reproduce  -> file   -> verify   -> report
-MAPPER    API/BROWSER/…      REPRODUCER    TRIAGE    VERIFIER    REPORTER
+map    -> discover     -> synthesise  -> reproduce  -> file   -> verify   -> report
+MAPPER    API/BROWSER/…  SYNTHESIZER     REPRODUCER    TRIAGE    VERIFIER    REPORTER
 ```
 
 Discovery agents run concurrently up to the mode's cap; REPRODUCER runs **once per
 finding** in a fresh context (so cost scales with findings, not agents); VERIFIER
 loops with bounded reopens and escalates rather than cycling.
+
+`synthesise` exists because independence has a cost. Each discovery agent is its
+own process with its own context, which is what makes each of them good — and a
+defect whose proof spans two surfaces therefore arrives as two findings, each
+correctly judged minor by an agent that could only see its half. Nothing joined
+them: `fingerprint()` leads with `domain`, so the two halves are *guaranteed* to
+hash differently, and the prompts said "leave the other surfaces to the agents
+that own them". SYNTHESIZER reads every envelope and asks the one question no
+discovery agent can. It sits **before** reproduce so a composite earns a failing
+test and a ticket like any other finding — REPORTER already sees everything and
+can already emit, and is useless for this precisely because it runs *after* file
+and verify, so anything it emits is written, scored and never filed.
+
+It dispatches **by layer**, like discovery and reporting, so a second synthesis
+agent is a prompt and a YAML. It skips below two findings and says so: a
+frontier-model context dispatched to join one finding is a bill for nothing.
+It has no `must_call` deliberately — most runs contain no conjunction, and an
+agent required to emit will assemble one that arrives wearing a severity higher
+than either of its parts.
 
 Because that cost scales with findings, `_phase_reproduce` gates on
 `thresholds.reproduce_min_severity` (default `major`) before it fans out. A run
@@ -112,7 +131,35 @@ working, not an error.
 `verify` is a loop, not a step. `_verify_loop` dispatches VERIFIER; on `NOT_FIXED`
 it calls `_remediate` (FIXER -> REVIEWER, bounded by
 `max_mender_arbiter_round_trips`) and re-runs VERIFIER, bounded by
-`max_proof_reopens`. Two facts there are bug-derived. VERIFIER must re-verify **the
+`max_proof_reopens`.
+
+**A loop that carries nothing forward is a retry.** `record_review` refuses
+REQUEST_CHANGES without `concerns`, on the stated grounds that FIXER gets them
+verbatim — and nothing carried them, so round two dispatched FIXER with a
+byte-identical prompt and `max_mender_arbiter_round_trips: 2` bought a second
+attempt at the same coin flip. `_entry_since` returns the whole `LedgerEntry`
+and `tasks.fixer(..., feedback=...)` renders it. Prose assembled in Python out
+of typed ledger data: no new tool, no new `LedgerKind`, and nothing a model has
+to be trusted to pass on.
+
+**Both helpers are scoped to the dispatch that should have produced them.**
+`_entry_since(store, kind, ticket, mark)` mirrors `_branch_written_since`.
+Unscoped, they took the last entry for the ticket from anywhere in the ledger —
+so a VERIFIER that finished without calling `record_verdict` silently inherited
+the previous verdict. That is not only a crash path: the Stop hook deliberately
+lets an agent through after one block, so a silent VERIFIER is ordinary. On a
+resumed run, where `_phase_verify` re-selects every ticketed envelope, it means
+a VERIFIED nobody verified.
+
+**FIXER's `write_paths` include `qa/repro`** — REPRODUCER's sandbox, holding the
+failing test — so §10's symptom-fix guard depended entirely on
+`policy.protected_paths`, which no agent YAML sets and nothing else populated.
+`Guardrail._protected_path` always returned False. `_with_protected_test`
+deep-copies the spec per invocation and names that ticket's test; per-invocation
+because which test is protected depends on which ticket is being fixed, and
+deep-copied because the roster is shared across the whole run.
+
+Two more facts there are bug-derived. VERIFIER must re-verify **the
 branch FIXER wrote**, read back out of the ledger by `_branch_written_since`
 and scoped to entries since a mark — the envelope names the *repro* branch,
 which by construction carries a failing test and no fix, and sending VERIFIER back
@@ -201,6 +248,43 @@ refused**, naming `Write`/`Edit` in the reason. Guessing is the one option that
 is not available. `_branch_from_command` only inspects git commands — without
 that it read `python -c` as `switch -c` and refused it as a bad branch name.
 
+**That rule was stated and not implemented.** `_writes_of` keyed its mutation
+test on `parts[0]` and fell through to `([], None)` — "writes nothing" — for
+everything it did not recognise, which is the exact opposite of the rule and made
+every mutator reachable by putting one word in front of it. Reproduced against
+the shipped roster: read-only VERIFIER could run `env sed -i`, `timeout 5 sed
+-i`, `xargs sed -i`, `find -exec sed -i`, `curl | sh`, `echo $(rm f)` and plain
+`rm f` against paths FIXER itself is forbidden. The corpus is now a parametrized
+test; add to it rather than reasoning about whether a new spelling is covered.
+
+Four shapes, all bug-derived:
+
+- **One quote-aware pass.** `_tokenise` is `shlex` with `punctuation_chars`; the
+  old regex split could not see quoting, so it cut `echo 'hello; world' && ls`
+  into nonsense and cut `echo x >| f` at the `|` of `>|`, leaving a dangling `>`
+  whose target was never checked.
+- **Wrappers are peeled** (`env`, `timeout`, `nice`, `nohup`, …) before argv0 is
+  read. **Indirection is refused** (`xargs`, `eval`, `find -exec`, command
+  substitution, a pipe into a shell) — there is no destination to resolve.
+- **Deletion and revert are writes.** `rm`, `git rm`, `git checkout -- P`,
+  `git restore P`, and `mv`'s *source*. Removing a file changes it more
+  completely than editing it does.
+- **Pattern matching is case-folded on both sides.** Every shipped pattern is
+  lowercase, `fnmatch` on POSIX is case-sensitive, and macOS is not — so
+  `api/app/Auth.py` named the file `*auth*` exists to protect and matched
+  nothing.
+
+One residual limit, stated because it is a decision and not an oversight:
+`python foo.py` and `python -m pytest` are arbitrary code and are **allowed**.
+Refusing them was tried and it refuses how FIXER and VERIFIER run the suite; a
+guardrail that blocks the system's own happy path is one that gets switched off.
+`Write`/`Edit` and `write_paths` remain the boundary for what a script leaves
+behind.
+
+`git push` gets `_reject_refspec`'s rule at this door too: its argument is a
+*refspec*, so `git push origin fix/x:main` names no branch any pattern check can
+see. `mcp/vcs.py` learned that already; the shell door had not.
+
 `ALWAYS_GRANTED` (ToolSearch, Skill, TodoWrite, Task, Agent) is read by both
 `build_allowed_tools` and the guardrail — a mismatch there silently disables
 every skill. Denying `ToolSearch` breaks MCP access entirely, since MCP tools
@@ -236,7 +320,17 @@ not file; vcs refuses a branch outside the agent's patterns). Playwright is the
 one stdio subprocess, declared in `registry.STDIO_SERVERS`.
 
 Tool results use `ok()`/`err()` from `mcp/context.py`: errors are **returned, not
-raised**, so the agent reads the reason and corrects itself.
+raised**, so the agent reads the reason and corrects itself. `err()` sets
+**both** `isError` and `is_error`, and that is the bug rather than
+belt-and-braces: the MCP wire format spells it `isError`, the SDK reads the
+handler's dict with `result.get("is_error", False)`, and this returned only the
+first. So every refusal from all seven servers — a guardrail denial, "you may
+not file", "not reproducible" — was delivered to the model as a **successful**
+tool result, and the self-correction contract had never once run.
+
+`structuredContent` from `ok()` is dropped by the same path, which is why
+`registry._structured` never fired; the held-envelope nudge is carried in the
+tool text instead.
 
 A project can declare more servers in `system.yaml` under `mcp_servers:`.
 Declaring one grants nothing — an agent receives it only by naming it in its own
@@ -409,7 +503,52 @@ request a change the author is not permitted to make** — route it as separate
 human work instead.
 
 Run `qaas score` after changing any prompt, threshold or model. It is the only
-way to know whether a change helped.
+way to know whether a change helped. `Scorecard.by_agent(envelopes)` splits every
+number by `discovered_by`, which was always one join away and never made — a
+run-wide average moves too little to read, while "LOAD is at 40% precision on
+performance, AUDITOR at 95% on security" says which agent to tune. Each scoring
+is persisted to `.qaas/scores/<run_id>.json`, because the score used to be
+computed at three call sites, printed, and thrown away — and "did this change
+help" is only answerable against the previous one.
+
+### What survives a run
+
+`defects` says a defect was **seen before**. The `outcomes` table says what
+became of it — `verified | not_fixed | regressed | review_rejected | held |
+not_reproducible` — and `search_similar` renders it back beside the match. Before
+it, held findings, REQUEST_CHANGES and NOT_FIXED were typed ledger lines the
+router read back *within* a run and nothing read afterwards, so the system had a
+memory and no lessons.
+
+**Every write is Python's, from outside an agent's turn.** `router._record_outcomes`
+runs once before `run_finished`; `cli._persist_score` runs in a process with no
+agent in it. An agent that can write its own outcome can record itself as correct
+and raise its own apparent precision without finding anything — the same shape as
+an agent that can retire a golden-ledger entry, and it has to be designed out
+rather than trusted away. Agents read this through `search_similar` and have no
+way to write it.
+
+**Automatic confidence-threshold feedback is deliberately not built.**
+`confidence` is a number the discovering agent writes into its own envelope, so
+any rule of the form "agent X has been reliable, lower X's gate" is an agent
+grading itself. Measure it, print it, and require a human to write
+`overrides.yaml`.
+
+**The regression loop was unreachable in every shipped roster.** The REGRESSION
+branch in `defect_memory.record` fires only on `resolved_at`; its only writer was
+the `mark_resolved` *tool*; and VERIFIER — the one agent that closes a ticket —
+has no `defect_memory` server. So the most valuable thing a system with a memory
+can say could never be said. The fix is not to grant VERIFIER the server: it is
+for the router to write the fact it already has in hand.
+
+**Memory is partitioned by target.** It was one `memory.db` per state root with
+an unfiltered `SELECT * FROM defects`, and `qaas run --repo` puts every clone
+under that one root — so one project's memory answered another's, and a
+close-enough match from an unrelated codebase came back as "already tracked as
+PROJ-N, do not file again". A suppression, persisted, repeating every run. The
+column migrates in place (`_MIGRATIONS`, applied from `PRAGMA table_info`) and
+`''` means "recorded before this column existed" and stays visible, because the
+memory deliberately outlives a release.
 
 ### Where qaas's own resources come from
 

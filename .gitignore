@@ -6,7 +6,7 @@ __pycache__/
 node_modules/
 .DS_Store
 .env
-
+all_you_need_to_run_qaas_harness.md
 # Run debris — agents write these while exploring; they are not source.
 .playwright-mcp/
 /*.png

@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from qaas.envelope import DefectEnvelope, Reproduction
 from qaas.mcp.context import ToolContext, err, ok
+from qaas.registry import HELD_MARKER
 
 EMIT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -94,7 +95,16 @@ EMIT_SCHEMA: dict[str, Any] = {
             "properties": {"component": {"type": "string"}, "team": {"type": "string"}},
         },
         "suggested_fix_area": {"type": "string"},
-        "similar_to": {"type": "array", "items": {"type": "string"}, "description": "Known ticket keys this resembles."},
+        "similar_to": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Ticket keys this resembles, and/or envelope ids from this run that "
+                "this finding was composed from. The second use is SYNTHESIZER's: it "
+                "is how a composite points at the halves it joined, and how TRIAGE "
+                "tells a composite from a duplicate."
+            ),
+        },
     },
 }
 
@@ -154,7 +164,9 @@ def build_tools(ctx: ToolContext) -> list:
         ctx.store.put_envelope(envelope)
         n = ctx.bump("envelopes")
 
-        note = "" if fileable else f" Held from filing: {reason}. It still counts toward your cap."
+        # The marker `registry._was_held` falls back to. Keep the two in step:
+        # the structured `fileable` flag does not always survive the SDK.
+        note = "" if fileable else f" {HELD_MARKER} {reason}. It still counts toward your cap."
         return ok(
             f"Recorded {envelope.severity.value} {envelope.domain.value} finding "
             f"'{envelope.title}' ({n}/{cap}).{note}",

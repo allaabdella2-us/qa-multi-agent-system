@@ -314,8 +314,7 @@ def build_hooks(
         # someone says so now. Discovering at the end that none of your findings
         # counted is too late to attach the missing evidence.
         if tool and tool.endswith("__emit_envelope"):
-            structured = _structured(response)
-            if structured and structured.get("fileable") is False:
+            if _was_held(response):
                 record.held_envelopes += 1
                 return {
                     "systemMessage": (
@@ -365,6 +364,12 @@ def build_hooks(
     }
 
 
+#: The phrase `emit_envelope` uses when a finding is recorded but not fileable.
+#: Matched as a fallback, and the fallback is the load-bearing half: see
+#: `_was_held`.
+HELD_MARKER = "Held from filing:"
+
+
 def _structured(response: Any) -> dict[str, Any] | None:
     """The structuredContent block of an MCP tool result, whatever wraps it."""
     if isinstance(response, dict):
@@ -372,6 +377,40 @@ def _structured(response: Any) -> dict[str, Any] | None:
         if isinstance(inner, dict):
             return inner
     return None
+
+
+def _was_held(response: Any) -> bool:
+    """Whether the envelope just emitted was recorded but held from filing.
+
+    Two readings, because `structuredContent` is not reliably there. `ok()`
+    attaches the flag under that key, but the SDK's `run_tool` forwards only
+    `content` and `isError` when it serialises a handler's dict -- so depending
+    on where in the pipeline this hook sees the result, the structured block may
+    already be gone, and the nudge with it. Losing it is not cosmetic: the whole
+    point is to tell an agent *now*, while it still has turns to attach the
+    evidence, rather than at the end when it is too late.
+
+    So: prefer the typed flag where it survives, and fall back to the text, which
+    always does.
+    """
+    structured = _structured(response)
+    if structured is not None and "fileable" in structured:
+        return structured.get("fileable") is False
+    return HELD_MARKER in _text_of(response)
+
+
+def _text_of(response: Any) -> str:
+    """The text blocks of an MCP tool result, joined. Never raises."""
+    if isinstance(response, str):
+        return response
+    if not isinstance(response, dict):
+        return ""
+    blocks = response.get("content")
+    if not isinstance(blocks, list):
+        return ""
+    return " ".join(
+        str(b.get("text", "")) for b in blocks if isinstance(b, dict)
+    )
 
 
 def _field(payload: Any, name: str) -> Any:

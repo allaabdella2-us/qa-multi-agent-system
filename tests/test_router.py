@@ -615,7 +615,12 @@ async def test_every_shipped_agent_is_actually_dispatchable(cfg, tmp_path, fake_
     """
     calls, behaviour = fake_agents
     behaviour["MAPPER"] = {"publish_map": True}
-    behaviour["API"] = {"emit": 1}
+    # Two findings, not one: SYNTHESIZER's whole job is the join, and a phase
+    # that dispatched a frontier-model context to join a single finding would be
+    # a bill for nothing. It skips below two and says so in the ledger, which is
+    # the sanctioned shape (`_phase_reproduce` skips the same way) -- but it does
+    # mean this test has to supply something joinable to prove dispatch.
+    behaviour["API"] = {"emit": 2}
 
     await make_conductor(cfg, tmp_path).run("full-loop")
     dispatched = {name for name, _ in calls}
@@ -709,3 +714,173 @@ async def test_the_fan_out_escalation_leads_the_list(cfg, tmp_path, fake_agents)
     assert report.escalations, "a capped fan-out must be reported"
     assert "REPRODUCER fan-out capped" in report.escalations[0]
     assert str(cfg.thresholds.max_findings_per_agent_run) in report.escalations[0]
+
+
+# -- the loop is a loop -----------------------------------------------------
+
+
+def test_a_silent_verifier_does_not_inherit_the_previous_verdict(cfg, tmp_path):
+    """`_latest_verdict` scanned the whole ledger and took the last entry.
+
+    A VERIFIER that ends without calling `record_verdict` is a normal path, not
+    only a crash: the Stop hook deliberately lets an agent through after one
+    block. Unscoped, that agent silently inherited whatever verdict was recorded
+    last -- and on a resumed run, where `_phase_verify` re-selects every envelope
+    carrying a ticket, that is a VERIFIED nobody verified.
+    """
+    store = RunStore.new(root=tmp_path)
+    store.log("verdict", agent="VERIFIER", ticket_key="CORVID-1", verdict="VERIFIED")
+    mark = len(list(store.ledger("verdict")))
+
+    # This dispatch records nothing.
+    assert Router._entry_since(store, "verdict", "CORVID-1", mark) is None
+
+    store.log("verdict", agent="VERIFIER", ticket_key="CORVID-1", verdict="NOT_FIXED")
+    entry = Router._entry_since(store, "verdict", "CORVID-1", mark)
+    assert entry is not None and entry.detail["verdict"] == "NOT_FIXED"
+
+
+async def test_a_second_fix_attempt_is_told_what_the_first_got_wrong(cfg, tmp_path, fake_agents):
+    """`_remediate` was a retry, not a loop.
+
+    `record_review` refuses REQUEST_CHANGES without `concerns` on the stated
+    grounds that "FIXER gets them verbatim" -- and then nothing carried them, so
+    round two dispatched FIXER with a byte-identical prompt. Two round trips
+    bought a second attempt at the same coin flip and a second bill.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 1}
+
+    def file_the_ticket(ctx, spec):
+        envelope = ctx.store.envelopes()[0]
+        ctx.store.put_envelope(
+            envelope.model_copy(update={"jira": envelope.jira.model_copy(
+                update={"key": "CORVID-1"})})
+        )
+
+    behaviour["TRIAGE"] = {"hook": file_the_ticket}
+    behaviour["VERIFIER"] = {"hook": lambda ctx, spec: ctx.store.log(
+        "verdict", agent="VERIFIER", ticket_key="CORVID-1", verdict="NOT_FIXED",
+        observed="the original test still fails at line 12",
+    )}
+    behaviour["REVIEWER"] = {"review": "REQUEST_CHANGES"}
+
+    await make_conductor(cfg, tmp_path).run("full-loop")
+
+    fixer_tasks = [task for name, task in calls if name == "FIXER"]
+    assert len(fixer_tasks) >= 2, "the round trip did not happen"
+    assert fixer_tasks[0] != fixer_tasks[1], (
+        "round two got a byte-identical prompt; the round trip bought nothing"
+    )
+    assert "the original test still fails at line 12" in fixer_tasks[0]
+    assert "REVIEWER" in fixer_tasks[1]
+
+
+def test_fixer_may_not_rewrite_the_test_that_defines_success(cfg):
+    """§10's symptom-fix guard had nothing behind it.
+
+    `protected_paths` is set by no agent YAML and was set by nothing else, so
+    `_protected_path` always returned False -- while `fixer.yaml` grants write
+    access to `qa/repro`, which is where the failing test lives.
+    """
+    from qaas.router import _with_protected_test
+
+    envelope = DefectEnvelope(
+        run_id="r", discovered_by="API", domain=Domain.API, **{"class": "bug"},
+        title="t", summary="s", severity=Severity.MAJOR, confidence=0.9,
+        evidence=[{"type": "log", "uri": "artifact://a/b"}],
+        reproduction={"status": "reproduced",
+                      "failing_test": "qa/repro/test_orders.py::test_tenant_leak"},
+    )
+    guarded = _with_protected_test(cfg.agents["FIXER"], envelope)
+    assert "qa/repro/test_orders.py" in guarded.policy.protected_paths
+    # The shared roster must not be mutated: a later ticket would inherit this one.
+    assert not cfg.agents["FIXER"].policy.protected_paths
+
+
+async def test_a_resumed_run_does_not_file_the_same_finding_twice(cfg, tmp_path, fake_agents):
+    """`--from-board` resumes by design, and `_phase_file` re-selected everything.
+
+    `create_issue` never looked at `jira.key` either, so the only thing between a
+    resume and a duplicate storm was TRIAGE remembering to call `search_similar`.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 1, "hook": lambda ctx, spec: None}
+
+    router = make_conductor(cfg, tmp_path)
+    report = await router.run("pr-check")
+
+    store = RunStore(report.run_id, tmp_path, create=False)
+    envelope = store.envelopes()[0]
+    store.put_envelope(
+        envelope.model_copy(update={"jira": envelope.jira.model_copy(update={"key": "CORVID-9"})})
+    )
+
+    # Nothing new on the resume, so the only fileable finding is the one that is
+    # already filed. TRIAGE must not be dispatched at all.
+    calls.clear()
+    behaviour["API"] = {}
+    await make_conductor(cfg, tmp_path).run("pr-check", run_id=report.run_id)
+
+    assert "TRIAGE" not in {name for name, _ in calls}, (
+        "TRIAGE was dispatched over a finding that already carries a ticket"
+    )
+    skips = [
+        e for e in store.ledger("skipped")
+        if "already carry a ticket" in str(e.detail.get("reason", ""))
+    ]
+    assert skips, "the skip was silent; it has to say what it held back"
+    assert skips[-1].detail["tickets"] == ["CORVID-9"]
+
+
+async def test_a_verified_fix_makes_the_next_sighting_a_regression(cfg, tmp_path, fake_agents):
+    """End to end, the loop that was unreachable in every shipped roster.
+
+    REGRESSION fires only on `resolved_at`; its only writer was the
+    `mark_resolved` *tool*; and VERIFIER, the one agent that closes a ticket, has
+    no `defect_memory` server. So the single most valuable thing a system with a
+    memory can say -- "this was fixed and it came back" -- could not be said in
+    any configuration qaas ships with. The router writes it now, which is also
+    what keeps an agent from being able to mark its own work resolved.
+    """
+    from qaas.mcp import defect_memory
+
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 1}
+
+    def file_the_ticket(ctx, spec):
+        envelope = ctx.store.envelopes()[0]
+        ctx.store.put_envelope(
+            envelope.model_copy(
+                update={"jira": envelope.jira.model_copy(update={"key": "CORVID-1"})}
+            )
+        )
+
+    behaviour["TRIAGE"] = {"hook": file_the_ticket}
+    behaviour["VERIFIER"] = {"hook": lambda ctx, spec: ctx.store.log(
+        "verdict", agent="VERIFIER", ticket_key="CORVID-1", verdict="VERIFIED",
+    )}
+
+    report = await make_conductor(cfg, tmp_path).run("full-loop")
+
+    store = RunStore(report.run_id, tmp_path, create=False)
+    fingerprint = store.envelopes()[0].fingerprint()
+
+    conn = defect_memory.connect(tmp_path)
+    try:
+        row = conn.execute(
+            "SELECT resolved_at FROM defects WHERE fingerprint = ?", (fingerprint,)
+        ).fetchone()
+    finally:
+        conn.close()
+    # `record` only runs if TRIAGE called it; what the router must have written
+    # either way is the outcome, and the resolution where the defect is known.
+    outcomes = {o["outcome"] for o in defect_memory.outcomes_for(tmp_path, fingerprint)}
+    assert "verified" in outcomes, (
+        "the run verified a fix and recorded nothing a later run can read"
+    )
+    if row is not None:
+        assert row["resolved_at"], "resolved_at is what makes a recurrence a regression"

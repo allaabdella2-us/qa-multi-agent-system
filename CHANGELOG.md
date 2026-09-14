@@ -2,6 +2,137 @@
 
 ## 0.0.2
 
+### Every MCP tool error was delivered to agents as a success
+
+`err()` set `isError`, the MCP wire spelling. The SDK builds the result from
+`result.get("is_error", False)` and drops anything else. So every refusal from
+all seven in-process servers — a guardrail denial, "you may not file that",
+"that is not reproducible" — arrived at the model marked **successful**, and the
+"errors are returned, not raised, so the agent reads the reason and corrects
+itself" contract had never once run. `err()` now sets both.
+
+### The shell was a way round the write matrix again
+
+`_writes_of` keyed its mutation test on `argv[0]` and treated anything it did not
+recognise as writing nothing — the exact opposite of the rule the module states
+about itself. Reproduced against the shipped roster: read-only VERIFIER could run
+`env sed -i`, `timeout 5 sed -i`, `xargs sed -i`, `find -exec sed -i`, `curl | sh`,
+`echo $(rm f)`, `sed --in-place`, `cp -t`, `echo x >| f` and plain `rm f` against
+paths FIXER itself is forbidden.
+
+Now: one quote-aware `shlex` pass instead of a regex split that could not see
+quoting; wrappers peeled before `argv[0]` is read; indirection (`xargs`, `eval`,
+`find -exec`, command substitution, a pipe into a shell) refused rather than
+guessed at; deletion and revert treated as writes (`rm`, `git rm`, `git checkout
+-- P`, `git restore P`, `mv`'s source); `git push` refspecs refused at this door
+as they already were in `mcp/vcs.py`. The bypass corpus ships as a parametrized
+test.
+
+Pattern matching is case-folded on both sides. Every shipped pattern is
+lowercase, `fnmatch` on POSIX is case-sensitive, and macOS is not — so
+`api/app/Auth.py` named the file `*auth*` exists to protect and matched nothing.
+
+`python foo.py` and `python -m pytest` stay allowed, deliberately: refusing them
+refuses how FIXER and VERIFIER run the suite.
+
+### FIXER could rewrite the test that defines success
+
+`policy.protected_paths` was set by no agent YAML and by nothing else, so
+`Guardrail._protected_path` always returned False and §10's symptom-fix guard was
+a sentence in a prompt. Meanwhile `fixer.yaml` grants `qa/repro` — REPRODUCER's
+sandbox, where the failing test lives. The router now names that ticket's test on
+a per-invocation copy of the spec.
+
+### SYNTHESIZER: the defect no single agent could see
+
+A new `synthesis` layer between discover and reproduce. Each discovery agent is
+its own process with its own context, which is what makes each of them good — and
+a defect whose proof spans two surfaces therefore arrived as two findings, each
+correctly judged minor by an agent that could only see its half. Nothing joined
+them, `fingerprint()` leads with `domain` so the halves were guaranteed to hash
+differently, and four prompts told agents to report the half they could evidence
+and drop the other.
+
+SYNTHESIZER reads every envelope and asks whether two of them describe one defect
+worse than either. It confirms the join by opening both files before asserting
+it, and it emits before reproduce, so a composite earns a failing test and a
+ticket like any other finding. In `nightly` and `full-loop`; not in `pr-check`.
+No `must_call`: most runs contain no conjunction, and an agent required to emit
+will assemble one wearing a severity higher than either of its parts.
+
+The four prompts now ask for the cross-surface fact and the file it was read in,
+so the halves share a join key instead of a note in prose.
+
+### Runs now learn from each other
+
+A new `outcomes` table records what became of each finding — `verified`,
+`not_fixed`, `regressed`, `review_rejected`, `held`, `not_reproducible` — and
+`search_similar` renders it beside the match. All of this was already known
+*inside* a run and lost at the end of it.
+
+Every write is Python's, from outside an agent's turn: `router._record_outcomes`
+before `run_finished`, `cli._persist_score` in a process with no agent in it. An
+agent that can write its own outcome can raise its own apparent precision without
+finding anything. Automatic confidence-threshold feedback is deliberately **not**
+built for the same reason — measure it, print it, let a human write
+`overrides.yaml`.
+
+**The regression loop was unreachable in every shipped roster.** REGRESSION fires
+only on `resolved_at`, whose only writer was the `mark_resolved` tool — and
+VERIFIER, the one agent that closes a ticket, has no `defect_memory` server. The
+router writes it now.
+
+`memory.db` is partitioned by target. It was one file per state root with an
+unfiltered `SELECT * FROM defects`, and `qaas run --repo` puts every clone under
+that root — so a close-enough match from an unrelated codebase came back as
+"already tracked as PROJ-N, do not file again". Existing databases migrate in
+place and keep their rows visible.
+
+`qaas score` now reports precision, false positives and severity agreement **per
+agent**, and persists each scoring to `.qaas/scores/<run_id>.json`.
+
+### The fix loop carried no feedback
+
+`record_review` refuses REQUEST_CHANGES without `concerns`, on the grounds that
+FIXER gets them verbatim — and nothing carried them, so round two dispatched
+FIXER with a byte-identical prompt. `max_mender_arbiter_round_trips: 2` bought a
+second attempt at the same coin flip.
+
+`_latest_verdict` and `_latest_review` are also scoped to the dispatch that
+should have produced them, the way `_branch_written_since` already was.
+Unscoped, a VERIFIER that finished without recording a verdict — an ordinary
+path, since the Stop hook lets an agent through after one block — silently
+inherited the previous one. On a resumed run that is a VERIFIED nobody verified.
+
+### Other loop and robustness fixes
+
+- **A hung agent could outlive the run's own clock.** `Budget.check()` only ran
+  *between* dispatches, so `max_wall_clock_s` bounded the gaps and nothing else.
+  Each dispatch is now bounded by the run's remaining time.
+- **A run that ran out of time filed nothing.** `BudgetExceeded` unwound past
+  file, verify and report, leaving envelopes on disk and no ticket. `RunMode.
+  reserve_fraction` (default 0.15) holds back enough clock to turn work already
+  paid for into tickets.
+- **A resumed run re-filed every ticket.** `_phase_file` now skips findings that
+  already carry a `jira.key`, and says how many.
+- **A crashed agent's spend was recorded as $0**, so the governor was told
+  nothing had been spent. A conservative estimate is recorded instead, flagged
+  `cost_estimated` so it is never presented as measured.
+- **Envelopes were credited to whichever agent finished after them.** The
+  per-agent diff now filters on `discovered_by`.
+- **REPRODUCER ran two-wide over one working tree.** Separate contexts, but the
+  same `target_root`, the same branches and the same compose stack. Now serial.
+- **One malformed ledger line made a whole run unreadable.** `store.ledger()`
+  skips and counts unparseable lines; a killed run is exactly when the audit
+  trail matters.
+- **Three dispatch paths had no `budget.check()`** despite the docstring saying
+  every one did.
+- The held-envelope nudge reads the tool text as well as `structuredContent`,
+  which does not reliably survive the SDK — so it fires while the agent still
+  has turns to attach the evidence.
+- `.env.example` claimed security findings fall back to `JIRA_PROJECT_KEY`. They
+  are refused instead; filing one publicly has no undo.
+
 ### Reproduction now has a severity floor
 
 `thresholds.reproduce_min_severity` (default `major`) decides which findings are
