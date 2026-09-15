@@ -1,7 +1,7 @@
 # The dashboard
 
 `qaas dashboard` is a localhost page with two halves. The **runs** view answers
-*what happened* — fifteen agents, what each spent, what it found and what it was
+*what happened* — sixteen agents, what each spent, what it found and what it was
 refused. The **configuration** view answers *what would happen* — the roster,
 the prompts in force, the servers, the models, the rails and the governors.
 
@@ -65,7 +65,7 @@ verify → report` as agents of each layer start and finish.
 icon and colour, its settled count and its spend. Bands wrap: a discovery layer
 of eight keeps a row to itself while triage, remediation and reporting share
 one. A card shows the agent's cost, findings and refusals; a running card also
-shows **the tool it is calling right now**, which is what makes fifteen
+shows **the tool it is calling right now**, which is what makes sixteen
 concurrent agents read as a team rather than a log.
 
 Two cases the CLI does not surface:

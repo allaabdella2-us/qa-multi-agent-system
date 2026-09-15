@@ -204,7 +204,7 @@ def test_a_nearer_layer_shadows_a_profile_of_the_same_name(tmp_path, monkeypatch
 # The one place the board drives the system rather than recording it. A person
 # drags a card into a chosen status and the next run works on exactly those
 # tickets. It is a pull, not a subscription: put it on a timer and "drag a card
-# and an agent picks it up" is literally true, without fifteen agents polling a
+# and an agent picks it up" is literally true, without sixteen agents polling a
 # rate-limited API for the rest of the run. Everything after the tickets are
 # chosen is scheduled by ROUTER out of the ledger exactly as before -- the board
 # chooses the *work*, never the order it happens in.

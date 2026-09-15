@@ -14,7 +14,7 @@
 ---
 
 **What you are installing.** qaas is not a program that calls an API. It is a
-harness around Claude Code itself. Fifteen real Claude Code sessions, each with
+harness around Claude Code itself. Sixteen real Claude Code sessions, each with
 its own context, its own tool allowlist and its own budget, run in a phase order
 by a Python state machine that can refuse any tool call any of them makes.
 
@@ -215,7 +215,7 @@ know whether the change helped rather than just changed something.
 | `pr-check` | MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, REPRODUCER, TRIAGE | on a pull request |
 | `nightly` | those eight plus SOCKET, GUIDE, LOAD, REPORTER | the scheduled sweep |
 | `fix-cycle` | VERIFIER, FIXER, REVIEWER | take a filed ticket and fix it |
-| `full-loop` | all fifteen | discover → file → fix → verify → report |
+| `full-loop` | all sixteen | discover → file → fix → verify → report |
 
 Every mode is bounded by a **wall clock** and each agent by **`max_turns`** —
 both model-agnostic, so they mean the same thing against a local model as against
@@ -304,7 +304,7 @@ any point and stops only the view, never the run.
 
 #### …or in a browser
 
-`qaas trace --follow` is one scrolling column. Fifteen agents do not run in one
+`qaas trace --follow` is one scrolling column. Sixteen agents do not run in one
 column: `qaas dashboard` shows them side by side.
 
 ```bash
@@ -538,7 +538,7 @@ Notes worth having:
   ticket keys, because the fix cycle needs the finding's evidence and failing
   test, and those live with the run that produced them.
 - **It is a pull, not a subscription.** The board chooses the *work*; ROUTER
-  still schedules everything after that out of the ledger. Fifteen agents do not
+  still schedules everything after that out of the ledger. Sixteen agents do not
   poll a rate-limited API for the length of a run.
 - **The local tracker only knows the house statuses** (`open`, `in_progress`,
   `in_review`, `resolved`, `closed`, `wont_fix`, `duplicate`). Custom column

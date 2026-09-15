@@ -1,0 +1,202 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>qaas roster</title>
+<style>
+  :root {
+    --ink: #0f172a; --muted: #64748b; --line: #e2e8f0; --page: #f1f5f9;
+    --map: #2563eb; --disc: #059669; --syn: #7c3aed; --tri: #8b5cf6;
+    --rem: #ea580c; --ver: #0d9488; --rep: #db2777;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page);
+         font: 16px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Inter, sans-serif;
+         color: var(--ink); }
+  .sheet { width: 1720px; padding: 34px; background: var(--page); }
+
+  header { background: #0f172a; color: #fff; border-radius: 16px;
+           padding: 26px 34px; display: flex; align-items: center; gap: 30px; }
+  .dots { display: grid; grid-template-columns: repeat(3, 15px); gap: 6px; }
+  .dots i { width: 15px; height: 15px; border-radius: 4px; display: block; }
+  h1 { margin: 0; font-size: 34px; letter-spacing: .01em; font-weight: 800; }
+  .sub { color: #cbd5e1; font-size: 15px; margin-top: 3px; }
+  .sub b { color: #e2e8f0; font-weight: 600; }
+  .tag { color: #94a3b8; font-size: 13.5px; margin-top: 2px; }
+  .lede { margin-left: auto; max-width: 560px; color: #e2e8f0;
+          font-size: 17px; line-height: 1.5; border-left: 1px solid #334155;
+          padding-left: 30px; }
+
+  .band { display: grid; grid-template-columns: 300px 1fr; gap: 20px;
+          margin-top: 14px; align-items: stretch; }
+  .label { border-radius: 14px; padding: 15px 18px 17px; position: relative; }
+  .label .n { position: absolute; top: 14px; right: 18px;
+              font-size: 13px; font-weight: 700; }
+  .label .ic { width: 38px; height: 38px; border-radius: 10px; display: grid;
+               place-items: center; color: #fff; font-size: 19px; margin-bottom: 10px; }
+  .label h2 { margin: 0; font-size: 22px; font-weight: 800; }
+  .label p { margin: 2px 0 0; font-size: 14px; color: var(--muted); }
+
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+           border-left: 4px solid; padding-left: 22px; align-content: center; }
+  .cards.one { grid-template-columns: 1fr; align-content: center; }
+  .card { align-self: center; background: #fff; border: 1px solid var(--line); border-radius: 11px;
+          padding: 13px 17px; display: flex; align-items: center; gap: 15px; }
+  .card .ic { width: 30px; height: 30px; border-radius: 8px; display: grid;
+              place-items: center; font-size: 15px; flex: none; }
+  .card b { font-size: 17px; width: 132px; flex: none; }
+  .card span { color: #475569; font-size: 15px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 5px;
+          font-size: 13px; font-weight: 700; margin-right: 5px; }
+  .new { margin-left: 8px; background: #ede9fe; color: #6d28d9;
+         font-size: 11.5px; font-weight: 800; padding: 2px 7px;
+         border-radius: 999px; letter-spacing: .04em; }
+
+  footer { margin-top: 20px; display: flex; gap: 26px; align-items: center;
+           color: var(--muted); font-size: 14px; }
+  footer .k { display: flex; align-items: center; gap: 8px; }
+  footer .k i { width: 11px; height: 11px; border-radius: 50%; }
+  footer .right { margin-left: auto; font-family: ui-monospace, monospace;
+                  font-size: 13px; color: #94a3b8; }
+</style>
+<div class="sheet">
+  <header>
+    <div class="dots">
+      <i style="background:#2563eb"></i><i style="background:#059669"></i><i style="background:#7c3aed"></i>
+      <i style="background:#f59e0b"></i><i style="background:#0d9488"></i><i style="background:#db2777"></i>
+    </div>
+    <div>
+      <h1>QAAS</h1>
+      <div class="sub"><b>Autonomous Quality Assurance</b></div>
+      <div class="tag">Agentic QA Harness</div>
+    </div>
+    <div class="lede">
+      Sixteen agents that map a system, find what's wrong, join the findings that
+      are halves of one defect, prove it, fix it, and confirm the fix.
+    </div>
+  </header>
+
+  <!-- MAP -->
+  <div class="band">
+    <div class="label" style="background:#eff6ff">
+      <span class="n" style="color:var(--map)">1 agent</span>
+      <div class="ic" style="background:var(--map)">▣</div>
+      <h2>Map</h2><p>Understand the system</p>
+    </div>
+    <div class="cards one" style="border-color:var(--map)">
+      <div class="card"><div class="ic" style="background:#dbeafe;color:var(--map)">▣</div>
+        <b>Mapper</b><span>Services, routes, schema, ownership → system map</span></div>
+    </div>
+  </div>
+
+  <!-- DISCOVERY -->
+  <div class="band">
+    <div class="label" style="background:#ecfdf5">
+      <span class="n" style="color:var(--disc)">8 agents</span>
+      <div class="ic" style="background:var(--disc)">◎</div>
+      <h2>Discovery</h2><p>Find what's wrong</p>
+    </div>
+    <div class="cards" style="border-color:var(--disc)">
+      <div class="card"><div class="ic" style="background:#d1fae5;color:var(--disc)">⌂</div>
+        <b>Architect</b><span>Circular deps, layering, dead code</span></div>
+      <div class="card"><div class="ic" style="background:#d1fae5;color:var(--disc)">⚯</div>
+        <b>API</b><span>Contract drift, authz, error shapes</span></div>
+      <div class="card"><div class="ic" style="background:#d1fae5;color:var(--disc)">▷</div>
+        <b>Browser</b><span>Real UI journeys</span></div>
+      <div class="card"><div class="ic" style="background:#d1fae5;color:var(--disc)">▤</div>
+        <b>DBA</b><span>Constraints the DB doesn't enforce</span></div>
+      <div class="card"><div class="ic" style="background:#d1fae5;color:var(--disc)">⛉</div>
+        <b>Auditor</b><span>Authz, secrets, vulnerable deps</span></div>
+      <div class="card"><div class="ic" style="background:#d1fae5;color:var(--disc)">((•))</div>
+        <b>Socket</b><span>WS auth, reconnect, backpressure</span></div>
+      <div class="card"><div class="ic" style="background:#d1fae5;color:var(--disc)">✦</div>
+        <b>Guide</b><span>Can a person <b style="font-weight:700">find</b> the feature</span></div>
+      <div class="card"><div class="ic" style="background:#d1fae5;color:var(--disc)">◔</div>
+        <b>Load</b><span>N+1, hot paths, bundle size</span></div>
+    </div>
+  </div>
+
+  <!-- SYNTHESIS -->
+  <div class="band">
+    <div class="label" style="background:#f5f3ff">
+      <span class="n" style="color:var(--syn)">1 agent</span>
+      <div class="ic" style="background:var(--syn)">⋈</div>
+      <h2>Synthesise</h2><p>Join what one agent can't see</p>
+    </div>
+    <div class="cards one" style="border-color:var(--syn)">
+      <div class="card"><div class="ic" style="background:#ede9fe;color:var(--syn)">⋈</div>
+        <b>Synthesizer</b><span>Two minor findings that are one blocker</span></div>
+    </div>
+  </div>
+
+  <!-- TRIAGE -->
+  <div class="band">
+    <div class="label" style="background:#f5f3ff">
+      <span class="n" style="color:var(--tri)">2 agents</span>
+      <div class="ic" style="background:var(--tri)">⇄</div>
+      <h2>Triage</h2><p>Prove and prioritise</p>
+    </div>
+    <div class="cards" style="border-color:var(--tri)">
+      <div class="card"><div class="ic" style="background:#ede9fe;color:var(--tri)">↻</div>
+        <b>Reproducer</b><span>Reproduce, minimise, failing test</span></div>
+      <div class="card"><div class="ic" style="background:#ede9fe;color:var(--tri)">☰</div>
+        <b>Triage</b><span>Dedupe, score, file — <b style="font-weight:700">tracker writer</b></span></div>
+    </div>
+  </div>
+
+  <!-- REMEDIATION -->
+  <div class="band">
+    <div class="label" style="background:#fff7ed">
+      <span class="n" style="color:var(--rem)">2 agents</span>
+      <div class="ic" style="background:var(--rem)">✂</div>
+      <h2>Remediation</h2><p>Fix and review</p>
+    </div>
+    <div class="cards" style="border-color:var(--rem)">
+      <div class="card"><div class="ic" style="background:#ffedd5;color:var(--rem)">✎</div>
+        <b>Fixer</b><span>Minimal fix, on a branch</span></div>
+      <div class="card"><div class="ic" style="background:#ffedd5;color:var(--rem)">⚖</div>
+        <b>Reviewer</b><span>
+          <span class="pill" style="background:#ffedd5;color:#c2410c">APPROVE</span>
+          <span class="pill" style="background:#ffedd5;color:#c2410c">REQUEST_CHANGES</span>
+          <span class="pill" style="background:#ffedd5;color:#c2410c">ESCALATE</span></span></div>
+    </div>
+  </div>
+
+  <!-- VERIFY -->
+  <div class="band">
+    <div class="label" style="background:#f0fdfa">
+      <span class="n" style="color:var(--ver)">1 agent</span>
+      <div class="ic" style="background:var(--ver)">✓</div>
+      <h2>Verify</h2><p>Confirm the fix</p>
+    </div>
+    <div class="cards one" style="border-color:var(--ver)">
+      <div class="card"><div class="ic" style="background:#ccfbf1;color:var(--ver)">✓</div>
+        <b>Verifier</b><span>Re-run test →
+          <span class="pill" style="background:#ccfbf1;color:#0f766e">VERIFIED</span>
+          <span class="pill" style="background:#ccfbf1;color:#0f766e">NOT_FIXED</span>
+          <span class="pill" style="background:#ccfbf1;color:#0f766e">REGRESSED</span></span></div>
+    </div>
+  </div>
+
+  <!-- REPORTING -->
+  <div class="band">
+    <div class="label" style="background:#fdf2f8">
+      <span class="n" style="color:var(--rep)">1 agent</span>
+      <div class="ic" style="background:var(--rep)">▥</div>
+      <h2>Reporting</h2><p>Share the results</p>
+    </div>
+    <div class="cards one" style="border-color:var(--rep)">
+      <div class="card"><div class="ic" style="background:#fce7f3;color:var(--rep)">▥</div>
+        <b>Reporter</b><span>Found, recurred, unreachable</span></div>
+    </div>
+  </div>
+
+  <footer>
+    <span class="k"><i style="background:var(--map)"></i>Map</span>
+    <span class="k"><i style="background:var(--disc)"></i>Discovery</span>
+    <span class="k"><i style="background:var(--syn)"></i>Synthesis</span>
+    <span class="k"><i style="background:var(--tri)"></i>Triage</span>
+    <span class="k"><i style="background:var(--rem)"></i>Remediation</span>
+    <span class="k"><i style="background:var(--ver)"></i>Verify</span>
+    <span class="k"><i style="background:var(--rep)"></i>Reporting</span>
+    <span class="right">ROUTER is Python, not an agent &nbsp;·&nbsp; ARCHITECTURE.md</span>
+  </footer>
+</div>

@@ -24,9 +24,9 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 > The tickets moving is not a picture of the system working. It *is* the system working.
 >
-> I've open-sourced qaas: a harness that runs fifteen governed Claude Code sessions over your repo, to run the entire QA lifecycle on their own.
+> I've open-sourced qaas: a harness that runs sixteen governed Claude Code sessions over your repo, to run the entire QA lifecycle on their own.
 >
-> Fifteen agents. One maps your application. Eight go looking for defects: API, browser, database, security, architecture, load. One reproduces each finding into a failing test. One files it. One fixes it, one reviews the fix, one verifies it, and the ticket moves To Do → In Progress → Done on the Jira board your team already reads.
+> Sixteen agents. One maps your application. Eight go looking for defects: API, browser, database, security, architecture, load. One joins the findings that are halves of a single defect. One reproduces each finding into a failing test. One files it. One fixes it, one reviews the fix, one verifies it, and the ticket moves To Do → In Progress → Done on the Jira board your team already reads.
 >
 > They never message each other. The board is the work queue. The orchestrator is ordinary Python, because a model cannot enforce a budget it is itself spending.
 >
@@ -49,13 +49,13 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 > PyPI: https://pypi.org/project/qaas-python/
 > Code and architecture: https://github.com/allaabdella2-us/qa-multi-agent-system
-> 866 tests run offline with no API key, so you can read how the guardrails work before spending anything.
+> 989 tests run offline with no API key, so you can read how the guardrails work before spending anything.
 
 ### Variant B — the builder's post (engineering audience)
 
 > The design decision that shaped everything in qaas: the orchestrator is code, not a prompt. A model cannot enforce a budget it is itself spending.
 >
-> qaas is an open-source harness around Claude Code itself. Not a program that calls an API: fifteen real Claude Code sessions, each with its own context, tool allowlist and budget, run through map → discover → reproduce → file → fix → review → verify → report. The router that orders them, caps their concurrency, governs the budget and can refuse any tool call any of them makes is a Python state machine. That is also why 866 tests run offline, free, with no API key.
+> qaas is an open-source harness around Claude Code itself. Not a program that calls an API: sixteen real Claude Code sessions, each with its own context, tool allowlist and budget, run through map → discover → synthesise → reproduce → file → fix → review → verify → report. The router that orders them, caps their concurrency, governs the budget and can refuse any tool call any of them makes is a Python state machine. That is also why 989 tests run offline, free, with no API key.
 >
 > Three things are enforced in code rather than requested in a prompt:
 >
@@ -77,7 +77,7 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 ### Variant C — short (repost or comment thread)
 
-> Open-sourced qaas: fifteen governed Claude Code sessions that find defects in a running application, reproduce each one into a failing test, file it, fix it, verify the fix, and move the ticket to Done on your Jira board. The orchestrator is Python, not a prompt. No merge method exists. 866 tests run without an API key.
+> Open-sourced qaas: sixteen governed Claude Code sessions that find defects in a running application, reproduce each one into a failing test, file it, fix it, verify the fix, and move the ticket to Done on your Jira board. The orchestrator is Python, not a prompt. No merge method exists. 989 tests run without an API key.
 >
 > Real numbers: 14 of 15 reproductions became failing tests; a real React site yielded 17 findings for about $20.
 >
@@ -109,18 +109,18 @@ The alternatives are worse:
 - **"Platform"** overclaims scale and hosting. It is a CLI on one machine.
 - **"AI QA team"** is anthropomorphic and invites the "it's just prompts" reply.
 - **"QA copilot"** is wrong in kind. A copilot sits beside a person; this runs unattended for thirty minutes.
-- **"Tool"** underclaims. A tool does one thing; this holds fifteen things.
+- **"Tool"** underclaims. A tool does one thing; this holds sixteen things.
 
 **What it is a harness *around*, precisely — use this sentence.**
 
 > qaas is not a program that calls an API. It is a harness around Claude Code
-> itself. Fifteen real Claude Code sessions, each with its own context, its own
+> itself. Sixteen real Claude Code sessions, each with its own context, its own
 > tool allowlist, its own budget, run in a phase order by a Python state machine
 > that can refuse any tool call any of them makes.
 
 And the short form, for a headline or a bio:
 
-> **A harness that runs fifteen governed Claude Code sessions over your repo.**
+> **A harness that runs sixteen governed Claude Code sessions over your repo.**
 
 Both beat "built on the Claude Agent SDK", which sounds like an imported
 package. The SDK resolves `shutil.which("claude")` and spawns that binary once
@@ -151,7 +151,7 @@ the right-hand ledger column in the crop: the `TRIAGE ESCALATION` line reading
 "security finding needs JIRA_SECURITY_PROJECT_KEY; filed to the open project
 instead" is the governance story in one line.
 
-**2. `docs/roster.png` — the fifteen by phase.** Answers "what are the agents"
+**2. `docs/roster.png` — the sixteen by phase.** Answers "what are the agents"
 without a paragraph, and matches the post's one-line tour of the roster.
 
 **3. A Jira board with qaas tickets on it — you need to take this one.** Nothing
@@ -224,7 +224,7 @@ and a class of changes (auth, payments, secrets, migrations, infrastructure,
 CI) stops at a human however small it looks. A denial returns a reason and is
 logged; the agent reads it and works around it.
 
-**Why fifteen agents instead of one?**
+**Why sixteen agents instead of one?**
 Each agent is its own context, its own tool allowlist and its own cost number.
 One agent with every tool cannot be told "you may read but never write", and a
 single context cannot hold a whole application. The number is not the point;
@@ -345,7 +345,7 @@ implementation, and the plan for it is written down in `PROVIDERS_PLAN.md`.
 
 **"It's just prompts."**
 The prompts are the least of it. The router, the guardrails, the evidence gate
-and the ledger are Python, and 866 tests exercise them without a model in the
+and the ledger are Python, and 989 tests exercise them without a model in the
 loop. Ask which part of a competitor's system still works with the API key
 removed.
 
@@ -365,7 +365,7 @@ Today, yes. The contact surface with the SDK is about forty lines, the seam is
 designed, and the plan for OpenAI, OpenRouter and Ollama is in the repository.
 It is the first item on the roadmap because it is the fair criticism.
 
-**"Fifteen agents is over-engineered."**
+**"Sixteen agents is over-engineered."**
 Each agent is a context boundary, a tool allowlist and a cost number. A single
 agent cannot be given "read but never write" for one phase and "write to
 `fix/*` only" for another. The count follows from the boundaries, not the
@@ -447,7 +447,7 @@ qaas prompts eject API                 # make a prompt yours
 
 | claim | source |
 |---|---|
-| 15 agents, ROUTER is Python, six phases | `README.md`, `CLAUDE.md` |
+| 16 agents, ROUTER is Python, seven phases | `README.md`, `CLAUDE.md` |
 | 866 offline tests, no API key | README badge; 866 passing locally on 2026-09-12 |
 | 16 seeded defects + 4 planted non-defects | `target-app/defects.yaml` |
 | 28 ledger event kinds | `store.LedgerKind` |

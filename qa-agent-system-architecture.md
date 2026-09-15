@@ -3,13 +3,25 @@
 **Architecture, agent roster, skills, and integrations**
 Version 0.1 — draft for review
 
+> **This is the design as it was written, and the numbers below are that
+> design's.** They are left alone on purpose: code comments cite this document by
+> section, and a spec silently rewritten to match the implementation stops being
+> a thing the implementation can be checked against.
+>
+> What the implementation has since done differently: the roster is **16 agents,
+> not 15** — SYNTHESIZER was added in a `synthesis` layer between discovery and
+> reproduction, because a defect whose proof spans two surfaces arrives as two
+> findings and nothing joined them. The pipeline is therefore **seven phases**,
+> not six. `ARCHITECTURE.md` describes the system as built; `CLAUDE.md` records
+> why it diverged.
+
 ---
 
 ## 1. Summary
 
 | | |
 |---|---|
-| **Full system** | 15 agents across 4 layers |
+| **Full system** | 15 agents across 4 layers *(as designed; 16 as built — see the note above)* |
 | **MVP (weeks 1–6)** | 6 agents |
 | **Off-the-shelf MCP servers** | 11 |
 | **MCP servers you must build** | 5 |

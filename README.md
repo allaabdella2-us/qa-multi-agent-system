@@ -34,6 +34,13 @@ map    -> discover     -> synthesise  -> reproduce  -> file   -> verify   -> rep
 MAPPER    API/BROWSER/…  SYNTHESIZER     REPRODUCER    TRIAGE    VERIFIER    REPORTER
 ```
 
+<p align="center">
+  <img src="docs/roster.png" alt="The sixteen agents by phase" width="880">
+</p>
+
+<details>
+<summary><b>The sixteen, in text</b></summary>
+
 | agent | phase | what it is for |
 |---|---|---|
 | **MAPPER** | Map | Services, routes, schema and ownership → the shared system map |
@@ -53,8 +60,10 @@ MAPPER    API/BROWSER/…  SYNTHESIZER     REPRODUCER    TRIAGE    VERIFIER    R
 | **VERIFIER** | Verify loop | Re-run the original test → VERIFIED / NOT_FIXED / REGRESSED |
 | **REPORTER** | Report | What was found, what recurred, what nothing reached |
 
-ROUTER is not in that table and is not an agent: it is the Python state machine
-that dispatches the rest.
+</details>
+
+ROUTER is in neither the picture nor the table, and is not an agent: it is the
+Python state machine that dispatches the rest.
 
 ## Install
 

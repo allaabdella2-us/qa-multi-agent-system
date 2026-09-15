@@ -15,7 +15,7 @@ reviews the fixes, and verifies the fix actually worked.
 It is not a chatbot with tools bolted on, and it is **not a program that calls an
 API**. It is a harness around Claude Code itself: the SDK resolves
 `shutil.which("claude")` and spawns that binary once per agent invocation, so a
-run is fifteen real Claude Code sessions — each with its own context, its own
+run is sixteen real Claude Code sessions — each with its own context, its own
 tool allowlist and its own budget — run in a phase order by a Python state
 machine that can refuse any tool call any of them makes. It invokes agents the
 way a build system invokes compilers: on a schedule, within a budget, with hard
@@ -124,25 +124,28 @@ $ qaas run --mode full-loop
     cli.py  ── loads config/system.yaml + config/agents/*.yaml + the target profile
         │
         ▼
- router.py  ── runs five phases in order, in-process
+ router.py  ── runs seven phases in order, in-process
         │
-        ├── PHASE 1  map        MAPPER                    → system-map.json (versioned, pinned)
-        ├── PHASE 2  discover   API, BROWSER, …           → DefectEnvelopes   [concurrent]
-        ├── PHASE 3  reproduce  REPRODUCER                → failing test per finding
-        ├── PHASE 4  file       TRIAGE                    → tickets
-        └── PHASE 5  verify     VERIFIER ⇄ FIXER ⇄ REVIEWER   [bounded loop]
+        ├── PHASE 1  map         MAPPER                    → system-map.json (versioned, pinned)
+        ├── PHASE 2  discover    API, BROWSER, …           → DefectEnvelopes   [concurrent]
+        ├── PHASE 3  synthesise  SYNTHESIZER               → findings no single agent could make
+        ├── PHASE 4  reproduce   REPRODUCER                → failing test per finding
+        ├── PHASE 5  file        TRIAGE                    → tickets
+        ├── PHASE 6  verify      VERIFIER ⇄ FIXER ⇄ REVIEWER   [bounded loop]
+        └── PHASE 7  report      REPORTER                  → what the run learned
 ```
 
 Each phase is a method on `Router`: `_phase_map`, `_phase_discover`,
-`_phase_reproduce`, `_phase_file`, `_phase_verify`.
+`_phase_synthesise`, `_phase_reproduce`, `_phase_file`, `_phase_verify`,
+`_phase_report`.
 
 Which agents run is **config, not code** — `run_modes` in `config/system.yaml`:
 
 ```yaml
-pr-check:   [MAPPER, API, BROWSER, REPRODUCER, TRIAGE]        $16
-nightly:    [MAPPER, API, BROWSER, REPRODUCER, TRIAGE]        $40
-fix-cycle:  [VERIFIER, FIXER, REVIEWER]                              $20
-full-loop:  all eight                                             $60
+pr-check:   [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, REPRODUCER, TRIAGE]
+nightly:    those eight + SOCKET, GUIDE, LOAD, SYNTHESIZER, REPORTER
+fix-cycle:  [VERIFIER, FIXER, REVIEWER]
+full-loop:  all sixteen
 ```
 
 Note the shape: **REPRODUCER runs once per finding at or above
@@ -336,7 +339,7 @@ that mentions one repo's layout or one app's seeded users works exactly once.
 | VERIFIER | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
 | REPORTER | reporting | what the run found, what recurred, and what it could not reach |
 
-ROUTER is the sixteenth. It is the Python state machine in `router.py`
+ROUTER is the seventeenth. It is the Python state machine in `router.py`
 rather than an agent, because a model cannot enforce a budget it is spending.
 
 ---
@@ -468,7 +471,7 @@ Four tiers, cheapest first:
 1. `qaas validate` then `qaas run --mode pr-check --dry-run` — see the machine
    describe itself, for free
 2. `envelope.py` — the contract everything else moves
-3. `router.py::run` — the five phases
+3. `router.py::run` — the seven phases
 4. `config/agents/api.yaml` + `prompts/API.md` — what an agent *is*
 5. `guardrails.py::check` — the one function both enforcement points call
 6. `.qaas/runs/<id>/ledger.jsonl` from a real run — what actually happened
@@ -502,7 +505,7 @@ shadows the packaged file entirely — which is right for forking an agent and
 wrong for changing one line, because the fork freezes that agent's policy and
 prompt on the day it was copied.
 
-**It adds no ledger kind and no router change.** The six phases are never
+**It adds no ledger kind and no router change.** The seven phases are never
 written to the ledger — there is no `phase_started` — so the dashboard *derives*
 the phase from the `layer` of the agents that have started (`control → map`,
 `discovery → discover`, and so on; the `triage` layer splits by name, because the
@@ -539,7 +542,7 @@ Honesty about what is *not* proven, so nobody inherits a false impression:
   app whose bugs the system was told about. A good score there shows the loop
   works end to end and does not spray false positives; it does not show it will
   find the hard bug in a codebase nobody planted anything in.
-- **One real repository, not a population.** All fifteen agents have now run
+- **One real repository, not a population.** All sixteen agents have now run
   against a real application outside this project, and the loop closed there:
   seventeen findings, ten filed, one fixed on a branch, reviewed, re-verified and
   moved to Done. That is one data point. Precision on unfamiliar code is still
