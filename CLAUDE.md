@@ -26,7 +26,7 @@ that outdates this file usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (BROWSER, GUIDE) runs
 
-pytest                                   # 987 tests, no API calls, no network
+pytest                                   # 989 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject

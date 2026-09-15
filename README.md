@@ -34,9 +34,27 @@ map    -> discover     -> synthesise  -> reproduce  -> file   -> verify   -> rep
 MAPPER    API/BROWSER/…  SYNTHESIZER     REPRODUCER    TRIAGE    VERIFIER    REPORTER
 ```
 
-<p align="center">
-  <img src="docs/roster.png" alt="The agent roster" width="820">
-</p>
+| agent | phase | what it is for |
+|---|---|---|
+| **MAPPER** | Map | Services, routes, schema and ownership → the shared system map |
+| **ARCHITECT** | Discovery | Dependency cycles, layering violations, dead code |
+| **API** | Discovery | Contract drift, missing authorization, error-shape inconsistency |
+| **BROWSER** | Discovery | Real UI journeys, driven in a browser |
+| **DBA** | Discovery | Constraints the application assumes and the database does not enforce |
+| **AUDITOR** | Discovery | Authorization, committed secrets, vulnerable dependencies |
+| **SOCKET** | Discovery | WebSocket auth, reconnect, backpressure |
+| **GUIDE** | Discovery | Whether a person can actually find the feature |
+| **LOAD** | Discovery | N+1 queries, hot paths, unbounded results |
+| **SYNTHESIZER** | Synthesise | The defect that is two findings until someone joins them |
+| **REPRODUCER** | Reproduce | Minimise it, write the failing test, measure the flake |
+| **TRIAGE** | File | Dedupe, score, file — the only agent that writes to a tracker |
+| **FIXER** | Verify loop | The smallest fix, on its own branch |
+| **REVIEWER** | Verify loop | Adversarial review: root cause or symptom? |
+| **VERIFIER** | Verify loop | Re-run the original test → VERIFIED / NOT_FIXED / REGRESSED |
+| **REPORTER** | Report | What was found, what recurred, what nothing reached |
+
+ROUTER is not in that table and is not an agent: it is the Python state machine
+that dispatches the rest.
 
 ## Install
 
@@ -189,6 +207,42 @@ Credentials are never written into a profile; it names environment variables.
 `qaas init` will guess most of this from your repository and tell you what it
 guessed.
 
+## Filing into Jira
+
+```bash
+export JIRA_BASE_URL=https://you.atlassian.net
+export JIRA_EMAIL=you@example.com
+export JIRA_API_TOKEN=...                # an API token, not a password
+export JIRA_PROJECT_KEY=QA
+
+QAAS_TRACKER=jira qaas tracker-check     # creates nothing
+QAAS_TRACKER=jira qaas run --mode nightly
+```
+
+`tracker-check` validates the credentials, confirms the project and issue type
+exist, maps your workflow statuses and prints the exact JSON it *would* POST.
+Run it before you spend anything.
+
+Four exports in every shell gets old — put them in `.qaas/.env`, which is already
+gitignored, and every command reads it. Anything you export wins over the file,
+so a stale `.env` can never redirect a run.
+
+Two things happen without being asked. Tickets carry a `qaas-fp-<fingerprint>`
+label, so next week's run recognises an already-filed defect and increments its
+occurrence count instead of filing again. And a **security-relevant finding is
+refused** unless `JIRA_SECURITY_PROJECT_KEY` names a restricted project — filing
+a vulnerability where the whole company can read it is a disclosure with no undo,
+so it escalates to a human instead.
+
+Each repository also gets its own view: every ticket carries `repo-<target>`, and
+`qaas board` finds or creates a saved filter over exactly that label. Not a
+project per repository — creating one needs admin rights a bot account rarely
+has. [docs/jira-setup.md](docs/jira-setup.md) has the details, including why a
+board is not always possible.
+
+The committed default is `local`, which writes tickets as JSON under
+`.qaas/tickets/` so you can read what *would* be filed.
+
 ## Customising it
 
 An agent is a prompt file plus a YAML file. Adding one needs no Python.
@@ -220,6 +274,35 @@ person edits.
 | [docs/launch.md](docs/launch.md) | running it for the first time |
 | [CHANGELOG.md](CHANGELOG.md) | what changed |
 
+## Roadmap, and where help is wanted
+
+`qaas` runs on the Claude Agent SDK today. Making the model a *choice* rather
+than an assumption is the next step, and it is where contributions would help
+most. The envelope, the guardrails, the ledger and the phase machine are already
+provider-agnostic; the coupling is `ClaudeAgentOptions`, the hook events and
+`query()`.
+
+- **A provider interface** in `runner.py`, so it talks to *a* provider rather
+  than to one.
+- **A second implementation behind it.** The interesting work is not the API
+  call — it is mapping tool definitions, streamed tool calls and a stop condition
+  onto the same `PreToolUse`/`PostToolUse`/`Stop` contract the guardrails and the
+  output contract depend on.
+- **Local models for the agents that do not need a frontier one.** Cost per run
+  is the reason discovery fans out as carefully as it does; running MAPPER
+  locally changes that arithmetic.
+- **A scored per-agent model matrix.** `model:` is already per-agent config, so
+  once several providers exist the honest question is a comparison with
+  `qaas score` as the referee rather than a preference.
+
+[PROVIDERS_PLAN.md](PROVIDERS_PLAN.md) is the staged version of that.
+
+This is a solo project and the list is bigger than one person. Issues and PRs
+welcome — especially a provider implementation, a new agent (a prompt plus a YAML
+file, no Python), or simply running `qaas` against your own repository and
+reporting what it got wrong. The last one is the most useful and the least
+glamorous.
+
 ## Contributing
 
 ```bash
@@ -227,7 +310,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest -q                              # 987 tests, offline, free, no API key
+pytest -q                              # 989 tests, offline, free, no API key
 qaas validate                          # config, prompts and allowlists cohere
 qaas run --mode pr-check --dry-run     # every agent's options assemble
 ```

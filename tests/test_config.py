@@ -1,5 +1,8 @@
 """M0 verification: the config is a real contract, and the §5.3 cap is enforced."""
 
+import os
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -324,3 +327,56 @@ def test_the_shipped_modes_are_affordable_where_caps_exist():
     # said out loud, because an assertion that never runs reads as one that
     # passed.
     assert checked == 0, "caps now exist; this test has become load-bearing"
+
+# -- the documentation is part of the surface -------------------------------
+
+
+def test_the_readme_roster_matches_the_shipped_one():
+    """The README listed fifteen agents while the roster held sixteen.
+
+    It had drifted twice by the time anyone noticed, and the second time the
+    missing agent was SYNTHESIZER -- whose absence had been the headline finding
+    of an audit the week before. A rendered picture of data that lives in YAML
+    goes stale every time the data moves and says nothing when it does, which is
+    why the README carries a table and this test carries the guarantee.
+    """
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    cfg = load_config(search=CONFIG_SEARCH)
+
+    documented = set(re.findall(r"^\| \*\*([A-Z][A-Z_]+)\*\* \|", readme, re.M))
+    shipped = set(cfg.agents)
+
+    assert documented == shipped, (
+        f"README roster is out of step. Missing: {sorted(shipped - documented)}. "
+        f"Listed but not shipped: {sorted(documented - shipped)}."
+    )
+
+
+def test_the_docs_agree_with_the_suite_about_its_own_size():
+    """`pytest -q` prints a number and two files quote it.
+
+    Both said 866 when it was 987 -- close enough to look maintained and wrong
+    enough to mislead. Asserted as a floor rather than an equality, so adding a
+    test does not fail the build; it fails only once the claim has fallen behind
+    by enough to matter.
+    """
+    import subprocess
+
+    collected = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+        cwd=REPO, capture_output=True, text=True, env={**os.environ, "QAAS_ENV_FILE": ""},
+    ).stdout
+    match = re.search(r"(\d+)/\d+ tests collected", collected)
+    if match is None:  # pragma: no cover - collection shape changed
+        pytest.skip("could not read the collected count from pytest")
+    actual = int(match.group(1))
+
+    for name in ("README.md", "CLAUDE.md"):
+        claimed = re.search(r"([\d,]+) tests", (REPO / name).read_text(encoding="utf-8"))
+        assert claimed, f"{name} no longer states a test count"
+        stated = int(claimed.group(1).replace(",", ""))
+        assert stated <= actual, f"{name} claims {stated} tests; only {actual} exist"
+        assert stated >= actual * 0.9, (
+            f"{name} claims {stated} tests and there are {actual} -- the claim has "
+            "fallen behind by more than 10%"
+        )
