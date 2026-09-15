@@ -552,3 +552,63 @@ def test_a_pr_title_that_looks_like_a_flag_is_passed_as_a_value(fake_gh, clone):
     (argv,) = fake_gh.calls_to("pr", "create")
     assert flag_value(argv, "--title") == "--repo=evil/repo"
     assert "--repo=evil/repo" not in [a for a in argv if not a.startswith("--title=")]
+
+
+# -- the target must own the repository it branches -------------------------
+
+
+def test_a_target_inside_a_larger_checkout_cannot_be_branched(tmp_path):
+    """The bug that rewrote a developer's working tree mid-run.
+
+    `git` does not stop at a directory boundary. Every path check in this system
+    is anchored on `target_root` and all of them hold; git ignores every one of
+    them and operates on the enclosing repository. The bundled demo lives at
+    `target-app/` inside the qaas checkout with no `.git` of its own, so one
+    nightly run created eighteen `qa/repro/*` branches in the qaas repository and
+    left it checked out on one of them, based off `main`.
+
+    989 tests passed throughout, because every other test here drives `LocalGit`
+    against a temporary directory that *is* its own repository — the one case
+    that works.
+    """
+    import subprocess
+
+    from qaas.adapters.vcs import LocalGit, VcsError
+
+    outer = tmp_path / "monorepo"
+    inner = outer / "services" / "api"
+    inner.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+
+    git = LocalGit(inner)
+    # Reading is fine wherever it happens.
+    git._git("status", "--porcelain")
+    # Changing anything is not.
+    with pytest.raises(VcsError, match="not its own"):
+        git._git("branch", "qa/repro/x")
+    with pytest.raises(VcsError, match="not its own"):
+        git.create_branch("qa/repro/x")
+
+
+def test_a_target_that_is_its_own_repository_works_normally(tmp_path):
+    import subprocess
+
+    from qaas.adapters.vcs import LocalGit
+
+    repo = tmp_path / "own"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "a.txt").write_text("x")
+
+    git = LocalGit(repo)
+    git.create_branch("qa/repro/x")
+    assert git.current_branch() == "qa/repro/x"
+
+
+def test_a_target_with_no_git_at_all_says_so(tmp_path):
+    from qaas.adapters.vcs import LocalGit, VcsError
+
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    with pytest.raises(VcsError, match="not a git repository"):
+        LocalGit(plain).create_branch("qa/repro/x")

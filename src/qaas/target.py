@@ -227,6 +227,8 @@ class TargetProfile(BaseModel):
             spec = root / self.layout.spec
             if not spec.exists():
                 problems.append(f"API spec not found: {spec}")
+
+        problems.extend(_git_root_problems(root))
         return problems
 
     def capabilities(self) -> dict[str, bool]:
@@ -260,6 +262,43 @@ def load_target(name: str, targets_dir: Path | str = "config/targets") -> Target
 # directory is the bug that hid `<project>/config/targets/` the moment anything
 # wrote into `.qaas/config/targets/`; profiles layer across every config
 # directory, and `config.target_files(dirs)` is the one place that knows it.
+
+
+def _git_root_problems(root: Path) -> list[str]:
+    """Whether this target owns the repository REPRODUCER and FIXER would branch.
+
+    Reported by `qaas doctor` so it costs nothing, because the alternative is
+    finding out mid-run. `git` does not stop at a directory boundary: point a
+    target at a subdirectory of a larger checkout and every branch, commit and
+    checkout lands on the *enclosing* repository. That is not a theory -- the
+    bundled demo at `target-app/` has no `.git` of its own, and one nightly run
+    created eighteen `qa/repro/*` branches in the qaas repository and left its
+    working tree checked out on one of them.
+
+    `adapters/vcs.LocalGit` refuses the same case at the point of use; this is
+    the earlier, cheaper warning. A target with no git at all is *not* a problem
+    here: plenty of useful runs never branch anything, and only the agents that
+    do should care.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=root, capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []  # not a repository at all; nothing to branch, nothing to harm
+    toplevel = Path(proc.stdout.strip()).resolve()
+    if toplevel == root.resolve():
+        return []
+    return [
+        f"{root} is inside the git repository at {toplevel}, not its own. Agents that "
+        f"branch or commit would operate on {toplevel.name} instead — run "
+        f"`git init {root}` or point the profile at its own checkout."
+    ]
 
 
 def agent_usable(agent_name: str, caps: dict[str, bool]) -> bool:
