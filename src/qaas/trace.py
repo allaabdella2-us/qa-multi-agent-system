@@ -100,6 +100,11 @@ def tail(
     if not from_start and store.ledger_path.exists():
         offset = store.ledger_path.stat().st_size
     pending = ""
+    #: Runs started minus runs finished, over what this reader has actually
+    #: seen. With `from_start=False` the earlier session's `run_started` is
+    #: behind the seek, so this stays at 0 and the next `run_finished` still
+    #: ends the follow -- which is right, because that is the run ending.
+    open_runs = 0
 
     while True:
         if store.ledger_path.exists():
@@ -121,8 +126,18 @@ def tail(
                     # view over one unknown entry would not.
                     continue
                 yield entry
-                if stop_on_finish and entry.kind == LedgerKind.RUN_FINISHED:
-                    return
+                # Counted, not latched. A resumed run legitimately contains
+                # `run_started … run_finished … run_started …`, and returning on
+                # the *first* `run_finished` meant `qaas trace --follow` quit
+                # while the resumed run was still writing -- and, with
+                # `from_start=True` as the default, quit almost immediately
+                # because the old line was already in the file.
+                if entry.kind == LedgerKind.RUN_STARTED:
+                    open_runs += 1
+                elif entry.kind == LedgerKind.RUN_FINISHED:
+                    open_runs -= 1
+                    if stop_on_finish and open_runs <= 0:
+                        return
         if deadline is not None and time.monotonic() >= deadline:
             return
         time.sleep(poll)
@@ -162,7 +177,12 @@ def select(
     """Filter in memory. Agent match is case-insensitive; agent names are shouted."""
     wanted = set(kinds) if kinds else None
     name = agent.upper() if agent else None
-    hidden = QUIET_KINDS if quiet else frozenset()
+    # "Never dropped when asked for by `--kind`" is what QUIET_KINDS documents,
+    # and `select` applied the quiet filter unconditionally before the `wanted`
+    # test -- so `qaas trace --quiet --kind tool_call` returned nothing at all,
+    # the one combination where the flags mean something specific together.
+    # Subtracting makes an explicit request win, as documented.
+    hidden = (QUIET_KINDS - (wanted or frozenset())) if quiet else frozenset()
     return [
         e for e in entries
         if e.kind not in hidden
@@ -313,6 +333,13 @@ def summarise(store: RunStore, entries: Sequence[LedgerEntry] | None = None) -> 
         summary.counts[str(entry.kind)] = summary.counts.get(str(entry.kind), 0) + 1
         detail = entry.detail
         if entry.kind == LedgerKind.RUN_STARTED:
+            # The last session wins, matching how `mode`, `agents` and
+            # `target_sha` are already handled just below. `started` was set once
+            # from `entries[0]` and never updated, so `qaas show` reported a run
+            # resumed the next morning as having taken fourteen hours.
+            summary.started = entry.at
+            summary.completed = False
+            summary.stopped_early = None
             summary.mode = detail.get("mode")
             summary.budget_usd = detail.get("budget_usd")
             summary.agents = list(detail.get("agents") or [])

@@ -62,7 +62,15 @@ READ_TOOLS = {"Read", "Grep", "Glob", "NotebookRead"} | set(ALWAYS_GRANTED)
 # worse than useless: MCP tools arrive deferred, so an agent that cannot call it
 # cannot reach the servers it was given, and burns its whole turn budget
 # discovering that. This system did exactly that once.
-HARNESS_TOOLS = {"ToolSearch", "TodoWrite", "Task", "Agent", "Skill", "SlashCommand"}
+#
+# Derived from `ALWAYS_GRANTED` rather than restated. The comment on that
+# constant claims `build_allowed_tools` and the guardrail "both read this
+# constant so the allowlist and the guardrail cannot drift apart" -- and they
+# did drift: `registry.build_allowed_tools` read `ALWAYS_GRANTED`, while
+# `_check_declared` read this set, which had an extra `SlashCommand` in it. So
+# the guardrail approved a tool the allowlist never granted. Harmless as it
+# happened, and precisely the mismatch the comment says cannot occur.
+HARNESS_TOOLS = set(ALWAYS_GRANTED)
 
 # Tools that write to the filesystem. Gated on policy.write_paths.
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
@@ -91,12 +99,20 @@ FORBIDDEN_BASH = [
 ]
 
 # Bash that mutates git state. Gated on the agent having branch patterns at all.
-GIT_WRITE = re.compile(r"\bgit\s+(commit|push|branch|checkout\s+-b|switch\s+-c|tag|apply|am|rebase)\b")
+# `checkout`, `restore`, `clean`, `stash` and `rm` join the list because they
+# change the working tree even when they move no branch -- `git checkout --
+# api/app/auth.py` reverts a file a read-only agent may not touch, and neither
+# this nor `_writes_of` had heard of it.
+GIT_WRITE = re.compile(
+    r"\bgit\s+(commit|push|branch|checkout|restore|clean|stash|rm|switch|tag|apply|am|rebase)\b"
+)
 
 # Shell constructs that rewrite a file in place. `>` is not a word character, so
 # this deliberately does not use \b anchors — an earlier version did and silently
 # matched nothing.
-_MUTATES_FILE = re.compile(r"(>>?|\btee\b|\bsed\s+-i|\btruncate\b|\bdd\b)")
+_MUTATES_FILE = re.compile(
+    r"(>>?|\btee\b|\bsed\s+(-i|--in-place)|\btruncate\b|\bdd\b|\brm\b|\bmv\b|\bgit\s+(rm|checkout|restore)\b)"
+)
 
 # -- what a shell command writes --------------------------------------------
 #
@@ -122,19 +138,44 @@ _MUTATES_FILE = re.compile(r"(>>?|\btee\b|\bsed\s+-i|\btruncate\b|\bdd\b)")
 _WRITES_ALL_ARGS = frozenset({"tee", "touch", "truncate"})
 #: A command whose last argument is the destination.
 _WRITES_LAST_ARG = frozenset({"cp", "mv", "install", "ln", "rsync"})
+#: A command whose every non-flag argument is destroyed. Deletion is a write --
+#: the §8.1 matrix is about what an agent may *change*, and removing a file
+#: changes it more completely than editing it does. `rm` without `-r`/`-f` sat
+#: outside FORBIDDEN_BASH and outside `_writes_of`, so `rm api/app/auth.py`
+#: cleared every gate that `Write api/app/auth.py` fails.
+_DELETES_ALL_ARGS = frozenset({"rm", "unlink", "shred"})
 #: Interpreters that write wherever an inline script tells them to.
 _SCRIPT_RUNNERS = frozenset({"python", "python3", "perl", "ruby", "node", "bash", "sh", "zsh", "php"})
 _INLINE_SCRIPT_FLAGS = frozenset({"-c", "-e"})
-#: Flags that take a value, so the value is not mistaken for a path.
-_FLAG_TAKES_VALUE = frozenset({"-s", "-m", "-o", "-t", "--suffix", "--size", "--mode"})
+#: Wrappers that run another command. `parts[0]` is the wrapper, so the mutation
+#: test has to be applied to what it wraps -- `env sed -i`, `timeout 5 sed -i`
+#: and `nice sed -i` all reached protected paths while `sed -i` alone did not.
+_WRAPPERS = frozenset({"env", "timeout", "nice", "nohup", "command", "stdbuf", "setsid", "ionice"})
+#: Commands that run *something else, chosen at runtime*. There is no argument
+#: list to resolve, so these are refused outright rather than guessed at.
+_INDIRECT = frozenset({"xargs", "eval", "exec", "source", "."})
+#: Flags that take a value, so the value is not mistaken for a path. `-t` is
+#: NOT here: for the `cp`/`mv`/`install` family it names the *destination*, and
+#: dropping it as a flag value sent `cp -t api/app /tmp/evil.py` through
+#: unchecked. It is handled explicitly in `_writes_of` instead.
+_FLAG_TAKES_VALUE = frozenset({"-s", "-m", "-o", "--suffix", "--size", "--mode"})
+#: Spellings of "rewrite this file in place", long and short.
+_TARGET_DIR_FLAGS = ("-t", "--target-directory")
 
 #: Redirect targets that are not files anyone can be harmed through.
 _DEV_SINKS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"})
 
-# `> out`, `>>out`, `2> err` — but not `2>&1`, whose `&1` is a file descriptor.
-_REDIRECT_RE = re.compile(r">>?\s*(?!&)([^\s;|&<>]+)")
-# Where one command ends and the next begins.
-_SEGMENT_RE = re.compile(r"\|\||&&|[;|\n&]")
+# `> out`, `>>out`, `2> err`, `>| out` — but not `2>&1`, whose `&1` is a file
+# descriptor. `>|` is bash's noclobber override and is a perfectly ordinary
+# write; without the `\|?` the target of `echo x >| f` was never captured.
+_REDIRECT_RE = re.compile(r">>?\|?\s*(?!&)([^\s;|&<>]+)")
+#: Command substitution. Whatever is inside runs, and this module cannot see
+#: through it -- `echo $(rm api/app/auth.py)` deleted a file while presenting as
+#: an `echo`. Its presence alone makes a segment undeterminable.
+_SUBSTITUTION_RE = re.compile(r"\$\(|`|\$\{[^}]*[|;&]")
+#: Shell operators that end one command and begin the next, as `shlex` with
+#: `punctuation_chars=True` tokenises them.
+_OPERATORS = frozenset({";", "&", "|", "&&", "||", "\n", "|&"})
 
 
 @dataclass
@@ -308,7 +349,7 @@ class Guardrail:
             return Decision(False, "write refused: no file path in the call")
         return self._check_path(str(raw))
 
-    def _check_path(self, raw: str) -> Decision:
+    def _check_path(self, raw: str, *, count_against_budget: bool = True) -> Decision:
         """The §8.1/§8.2 matrix, applied to one path an agent wants to write.
 
         Split out of `_check_write` so it is the single place the rules live:
@@ -348,12 +389,31 @@ class Guardrail:
                 "If you believe the test itself is wrong, that is an escalation.",
             )
 
+        # `count_against_budget=False` reads the matrix without spending
+        # anything. `_check_diff_budget` *mutates* `touched_files`, and
+        # `mcp/vcs.py:commit` validates every staging pathspec through here --
+        # so committing `api/app` and `web/src`, which is what FIXER's own
+        # `write_paths` are, charged two entries to a budget of five files
+        # before a single line had changed. A fixer that touched four files
+        # could not commit them.
         for allowed in self._allowed_roots:
             if resolved == allowed or resolved.is_relative_to(allowed):
-                return self._check_diff_budget(relative)
-        for pattern in self._allowed_globs:
-            if fnmatch.fnmatch(relative, pattern):
-                return self._check_diff_budget(relative)
+                return self._check_diff_budget(relative) if count_against_budget else Decision(True)
+        # Containment first, then the pattern. The root branch above proves
+        # containment with `is_relative_to`; this one only ever matched a
+        # string, and `relative` falls back to the *absolute* path when the
+        # target is outside the root -- so with a policy of `*_test.py`,
+        # `fnmatch("/etc/x_test.py", "*_test.py")` is True, because fnmatch's
+        # `*` crosses `/`. A glob write path escaped the checkout entirely. No
+        # shipped agent uses one today, which is exactly why it went unnoticed.
+        if resolved == self.root or resolved.is_relative_to(self.root):
+            for pattern in self._allowed_globs:
+                if fnmatch.fnmatch(relative, pattern):
+                    return (
+                        self._check_diff_budget(relative)
+                        if count_against_budget
+                        else Decision(True)
+                    )
         return Decision(
             False,
             f"write refused: {resolved} is outside {self.agent.name}'s sandbox "
@@ -361,15 +421,28 @@ class Guardrail:
         )
 
     def _forbidden_class(self, relative: str) -> str | None:
-        """Which §8.2 class this path falls into, if any."""
+        """Which §8.2 class this path falls into, if any.
+
+        Case-folded on both sides. Every pattern in the shipped policies is
+        lowercase (`*auth*`, `*migration*`, `*secret*`) and `fnmatch` on POSIX
+        is case-sensitive -- while macOS, where most of this is developed and
+        much of it is run, is not. So `api/app/Auth.py` named the same file as
+        `api/app/auth.py` and matched none of the patterns guarding it. Folding
+        here and not in the YAML because a cased variant per pattern is a list
+        that will be incomplete again the next time someone adds a class.
+        """
+        lowered = relative.lower()
+        name = Path(relative).name.lower()
         for pattern in self.policy.forbidden_paths:
-            if fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(Path(relative).name, pattern):
+            low = pattern.lower()
+            if fnmatch.fnmatch(lowered, low) or fnmatch.fnmatch(name, low):
                 return _describe_forbidden(pattern)
         return None
 
     def _protected_path(self, relative: str) -> bool:
+        lowered = relative.lower()
         return any(
-            fnmatch.fnmatch(relative, p) or relative.endswith(p)
+            fnmatch.fnmatch(lowered, p.lower()) or lowered.endswith(p.lower())
             for p in self.policy.protected_paths
         )
 
@@ -427,14 +500,47 @@ class Guardrail:
 
         if self.policy.protected_paths:
             for protected in self.policy.protected_paths:
-                if protected in command and _MUTATES_FILE.search(command):
+                if protected.lower() in command.lower() and _MUTATES_FILE.search(command):
                     return Decision(
                         False,
                         f"'{protected}' is protected: it defines what a fix must achieve "
                         "and may not be edited (§10, symptom fixes).",
                     )
 
+        refspec = self._refspec_refusal(command)
+        if refspec:
+            return refspec
+
         return self._check_bash_writes(command)
+
+    def _refspec_refusal(self, command: str) -> Decision | None:
+        """`git push` parses its argument as a *refspec*, not as a branch name.
+
+        `mcp/vcs.py` already learned this -- `_reject_refspec` is there because
+        `git push origin qa/repro/x:main` published onto main past every
+        branch-pattern and protected-name check. The shell door never learned
+        it: `FORBIDDEN_BASH` matches only `--force`/`-f` and the literal words
+        `main`/`master`, and `_branch_from_command` reads a name only after
+        `-b`, `-c`, `branch` or `switch`, so a refspec returns None and the
+        branch-pattern gate below is skipped entirely. Same rule, third door.
+        """
+        segments = _shell_segments(command)
+        for parts in segments:
+            peeled = _peel_wrappers(parts)
+            if not peeled or Path(peeled[0]).name != "git":
+                continue
+            if "push" not in peeled[1:3]:
+                continue
+            for token in _non_flag_args(peeled)[2:]:  # after `push` and the remote
+                if ":" in token or token.startswith("+"):
+                    return Decision(
+                        False,
+                        f"refusing 'git push … {token}': that is a refspec, not a branch "
+                        "name. A refspec can publish any local ref onto any remote ref, "
+                        "which is how a sandboxed branch reaches main past every branch "
+                        "pattern. Push the branch by its own name.",
+                    )
+        return None
 
     def _check_bash_writes(self, command: str) -> Decision:
         """Apply the write matrix to what the command would actually write.
@@ -443,16 +549,25 @@ class Guardrail:
         for `Write` and `Edit`; reaching them through a shell is not a different
         permission, so it does not get a different answer.
         """
-        for segment in _shell_segments(command):
-            paths, undeterminable = _writes_of(segment)
+        if _tokenise(command) is None:
+            return Decision(
+                False,
+                "refusing this command: it cannot be parsed as a shell command "
+                "(unbalanced quote), so nothing can say what it writes. Use Write "
+                "or Edit, which name the file they change.",
+            )
+        for index, segment in enumerate(_shell_segments(command)):
+            paths, undeterminable = _writes_of(
+                segment, command, piped_into=index in _piped_into(command)
+            )
             if undeterminable:
                 if not self.policy.write_paths:
                     return self._read_only_decision()
                 return Decision(
                     False,
-                    f"refusing '{segment.strip()}': {undeterminable}, so this cannot be "
-                    "checked against your write paths. Use Write or Edit, which name the "
-                    "file they change.",
+                    f"refusing '{shlex.join(segment)}': {undeterminable}, so this cannot "
+                    "be checked against your write paths. Use Write or Edit, which name "
+                    "the file they change.",
                 )
             for raw in paths:
                 decision = self._check_path(raw)
@@ -465,9 +580,65 @@ def _is_glob(pattern: str) -> bool:
     return any(ch in pattern for ch in "*?[")
 
 
-def _shell_segments(command: str) -> list[str]:
-    """One command per element, so `ls && sed -i ...` is two things, not one."""
-    return [segment.strip() for segment in _SEGMENT_RE.split(command) if segment.strip()]
+def _tokenise(command: str) -> list[str] | None:
+    """The whole command as shell tokens, or None if it cannot be read.
+
+    One quote-aware pass replaces what used to be two passes that disagreed: a
+    regex split on `[;|&\\n]` followed by `shlex.split` per piece. The regex
+    could not see quoting, so `echo 'hello; world' && ls` was cut into three
+    nonsense fragments -- and, the other way round, `echo x >| f` was cut at the
+    `|` of `>|`, leaving a dangling `>` whose target was never checked and a
+    bare `f` that looked like a command.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        # An unbalanced quote. We cannot read it, so we cannot clear it.
+        return None
+
+
+def _shell_segments(command: str) -> list[list[str]]:
+    """One command per element, as its token list.
+
+    `ls && sed -i ... f` is two commands, and only the second writes.
+    """
+    tokens = _tokenise(command)
+    if tokens is None:
+        return []
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in _OPERATORS:
+            if current:
+                segments.append(current)
+            current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _piped_into(command: str) -> set[int]:
+    """Indices of the segments that receive another command's output.
+
+    Needed because `curl … | sh` hides the program entirely: the `sh` segment is
+    the single token `sh`, with no `-c` and no script file, and its actual
+    program arrives on stdin. Nothing in argv says what it writes.
+    """
+    tokens = _tokenise(command)
+    if tokens is None:
+        return set()
+    piped: set[int] = set()
+    index = 0
+    for token in tokens:
+        if token in _OPERATORS:
+            if token in {"|", "|&"}:
+                piped.add(index + 1)
+            index += 1
+    return piped
 
 
 def _non_flag_args(parts: list[str]) -> list[str]:
@@ -478,47 +649,174 @@ def _non_flag_args(parts: list[str]) -> list[str]:
         if skip:
             skip = False
             continue
-        if token.startswith("-"):
+        if token == "--":
+            continue
+        if token.startswith("-") and token != "-":
             skip = token in _FLAG_TAKES_VALUE
             continue
         args.append(token)
     return args
 
 
-def _writes_of(segment: str) -> tuple[list[str], str | None]:
+def _target_directory(parts: list[str]) -> str | None:
+    """The `-t DIR` / `--target-directory=DIR` destination, if one is given."""
+    for i, token in enumerate(parts):
+        if token in _TARGET_DIR_FLAGS and i + 1 < len(parts):
+            return parts[i + 1]
+        if token.startswith("--target-directory="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _is_in_place_sed(parts: list[str]) -> bool:
+    """Both spellings. `"--in-place".startswith("-i")` is False -- the second
+    character is a dash -- so the old test cleared `sed --in-place`, which is
+    the same command with a longer name."""
+    return any(
+        part == "-i" or (part.startswith("-i") and not part.startswith("--"))
+        or part == "--in-place" or part.startswith("--in-place=")
+        for part in parts
+    )
+
+
+def _paths_after_double_dash(parts: list[str]) -> list[str]:
+    """Everything after `--`, which is how git spells "these are paths"."""
+    return parts[parts.index("--") + 1:] if "--" in parts else []
+
+
+def _writes_of(
+    segment: list[str], raw: str, *, piped_into: bool = False
+) -> tuple[list[str], str | None]:
     """What one command writes: (paths, why the destination is undeterminable).
 
     A non-None second element means "this mutates and I cannot say where", which
     the caller must treat as a refusal rather than as an empty path list. The two
     are deliberately different: no paths and no reason means the command writes
     nothing and is none of our business.
+
+    The default used to be the wrong way round. Anything whose `parts[0]` was
+    not on one of the tables below fell through to `([], None)` -- "writes
+    nothing" -- which is the opposite of what the module says about itself, and
+    it made every mutator reachable by putting one word in front of it. Verified
+    against the shipped roster: read-only VERIFIER could run `env sed -i`,
+    `timeout 5 sed -i`, `xargs sed -i`, `find -exec sed -i`, `curl | sh` and
+    `echo $(rm f)` against paths FIXER itself is forbidden.
     """
-    targets = [t for t in _REDIRECT_RE.findall(segment) if t not in _DEV_SINKS]
-    try:
-        parts = shlex.split(segment)
-    except ValueError:
-        # An unbalanced quote. We cannot read it, so we cannot clear it.
-        return targets, "it cannot be parsed as a shell command"
-    if not parts:
+    targets = [t for t in _REDIRECT_RE.findall(raw) if t not in _DEV_SINKS]
+
+    # Command substitution runs a command this function cannot see. Refuse
+    # before looking at argv0 -- the visible command is irrelevant.
+    if _SUBSTITUTION_RE.search(raw):
+        return targets, "it contains command substitution, which can run anything"
+    if not segment:
         return targets, None
 
+    parts = _peel_wrappers(segment)
+    if not parts:
+        return targets, "it is a wrapper with nothing to wrap"
     name = Path(parts[0]).name
     args = _non_flag_args(parts)
 
-    if name in _SCRIPT_RUNNERS and any(flag in parts for flag in _INLINE_SCRIPT_FLAGS):
-        return targets, f"an inline {name} script can write anywhere"
+    if name in _INDIRECT:
+        return targets, f"`{name}` runs a command chosen at runtime"
+    if name in _SCRIPT_RUNNERS:
+        if any(flag in parts for flag in _INLINE_SCRIPT_FLAGS):
+            return targets, f"an inline {name} script can write anywhere"
+        if not args and piped_into:
+            # `curl … | sh`. A shell with no script argument at the end of a pipe
+            # is reading its program from stdin, which is the one case where the
+            # program is not in the command at all. Refused for the same reason
+            # `-c` is: there is no destination to resolve.
+            return targets, f"`{name}` at the end of a pipe runs a script from stdin"
+        # NOT refused: `python foo.py`, `python -m pytest`. Both are arbitrary
+        # code and both could write anywhere, and that is a real residual limit
+        # of reading a shell command rather than a gap nobody noticed. Refusing
+        # them was tried here and refuses `python -m pytest tests/ -x`, which is
+        # how FIXER and VERIFIER run the suite -- a guardrail that blocks the
+        # system's own happy path is a guardrail that gets switched off. The
+        # enforced tools (`Write`/`Edit`) and the agent's `write_paths` remain
+        # the boundary for anything a script leaves behind.
+    if name == "find":
+        # `-exec`/`-execdir`/`-ok` run another command per match; `-delete` and
+        # `-fprint` write directly. None of them has a destination this can name.
+        if any(p in {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint"} for p in parts):
+            return targets, "`find` is running an action over paths it chooses itself"
     if name == "patch" or (name == "git" and "apply" in parts[1:3]):
         return targets, "a patch carries its own destinations"
-    if name == "sed" and any(part.startswith("-i") for part in parts):
+    if name == "git":
+        return _git_writes(parts, targets)
+    if name == "sed" and _is_in_place_sed(parts):
         # `sed -i '' s/x/y/ f.py` (BSD) and `sed -i s/x/y/ f.py` (GNU) differ by
         # an empty argument. Drop the empties, then drop the script expression;
         # whatever is left is a file being rewritten in place.
         non_empty = [a for a in args if a]
         return targets + non_empty[1:], None
+    if name in _DELETES_ALL_ARGS:
+        return targets + args, None
     if name in _WRITES_ALL_ARGS:
         return targets + args, None
     if name in _WRITES_LAST_ARG and args:
-        return targets + args[-1:], None
+        # `-t DIR` inverts the shape: the destination is the flag's value and
+        # every positional is a source. `mv`'s sources are destroyed too, so
+        # they are writes in their own right.
+        into = _target_directory(parts)
+        destinations = [into] if into else args[-1:]
+        sources = args if into else args[:-1]
+        if name == "mv":
+            destinations = destinations + sources
+        return targets + destinations, None
+    return targets, None
+
+
+def _looks_like_wrapper_operand(token: str) -> bool:
+    """A token that belongs to the wrapper, not to the command it wraps.
+
+    Three shapes, and nothing else: an option (`-n`, `--foreground`), an
+    environment assignment (`FOO=1`, which is how `env` takes its arguments),
+    and a bare duration or niceness (`5`, `1.5`, `30s`).
+    """
+    if token.startswith("-"):
+        return True
+    if "=" in token and not token.startswith("/"):
+        return True
+    return token.rstrip("smhd").replace(".", "", 1).isdigit()
+
+
+def _peel_wrappers(parts: list[str]) -> list[str]:
+    """Strip `env FOO=1`, `timeout 5`, `nice -n 10` … down to the real command.
+
+    Bounded at four layers because a fifth is not a command anyone types, and an
+    unbounded loop over agent-supplied argv is not a thing to have.
+    """
+    for _ in range(4):
+        if not parts or Path(parts[0]).name not in _WRAPPERS:
+            return parts
+        rest = parts[1:]
+        while rest and _looks_like_wrapper_operand(rest[0]):
+            rest = rest[1:]
+        parts = rest
+    return parts
+
+
+def _git_writes(parts: list[str], targets: list[str]) -> tuple[list[str], str | None]:
+    """Git subcommands that change the working tree.
+
+    `GIT_WRITE` gates the ones that move a *branch*; these move *files*, and
+    neither table knew about them. `git checkout -- api/app/auth.py` reverts a
+    protected file, `git rm` deletes it, and `git clean`/`git stash` remove work
+    across paths chosen from the index rather than from argv.
+    """
+    sub = next((p for p in parts[1:] if not p.startswith("-")), "")
+    if sub in {"clean", "stash"}:
+        return targets, f"`git {sub}` chooses its own paths from the index"
+    if sub == "rm":
+        return targets + _non_flag_args(parts)[1:], None
+    if sub in {"checkout", "restore"}:
+        paths = _paths_after_double_dash(parts)
+        if paths:
+            return targets + paths, None
+        if sub == "restore":
+            return targets + _non_flag_args(parts)[1:], None
     return targets, None
 
 

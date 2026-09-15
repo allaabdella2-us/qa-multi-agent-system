@@ -10,10 +10,19 @@ A guide to `qaas` for someone who has never opened it. Read this before
 
 `qaas` points a team of AI agents at an application, finds real defects in it,
 reproduces them with runnable failing tests, files tickets, fixes some of them,
-reviews the fixes, and verifies the fix actually worked. It is not a chatbot with
-tools bolted on. It is a Python state machine that invokes agents the way a build
-system invokes compilers: on a schedule, within a budget, with hard limits on
-what each one may touch.
+reviews the fixes, and verifies the fix actually worked.
+
+It is not a chatbot with tools bolted on, and it is **not a program that calls an
+API**. It is a harness around Claude Code itself: the SDK resolves
+`shutil.which("claude")` and spawns that binary once per agent invocation, so a
+run is sixteen real Claude Code sessions — each with its own context, its own
+tool allowlist and its own budget — run in a phase order by a Python state
+machine that can refuse any tool call any of them makes. It invokes agents the
+way a build system invokes compilers: on a schedule, within a budget, with hard
+limits on what each one may touch.
+
+That is what makes the context boundary and the per-agent cost number real
+rather than bookkeeping. They are separate operating-system processes.
 
 The thing it is pointed at is called the **target**. A bundled deliberately-buggy
 demo app (`target-app/`) ships with it, along with a list of every bug seeded
@@ -92,7 +101,7 @@ Everything else is in service of those.
 **ROUTER is Python, not a prompt.** The original design has an orchestrator
 agent. It is implemented as an ordinary state machine instead, because *a model
 cannot enforce a budget it is itself spending*. Phase ordering, concurrency,
-retries, escalation and the budget governor are all plain code in
+escalation and the budget governor are all plain code in
 `router.py`. This also makes runs reproducible and cheap to unit-test — 547
 tests run offline with no API calls.
 
@@ -115,25 +124,28 @@ $ qaas run --mode full-loop
     cli.py  ── loads config/system.yaml + config/agents/*.yaml + the target profile
         │
         ▼
- router.py  ── runs five phases in order, in-process
+ router.py  ── runs seven phases in order, in-process
         │
-        ├── PHASE 1  map        MAPPER                    → system-map.json (versioned, pinned)
-        ├── PHASE 2  discover   API, BROWSER, …           → DefectEnvelopes   [concurrent]
-        ├── PHASE 3  reproduce  REPRODUCER                → failing test per finding
-        ├── PHASE 4  file       TRIAGE                    → tickets
-        └── PHASE 5  verify     VERIFIER ⇄ FIXER ⇄ REVIEWER   [bounded loop]
+        ├── PHASE 1  map         MAPPER                    → system-map.json (versioned, pinned)
+        ├── PHASE 2  discover    API, BROWSER, …           → DefectEnvelopes   [concurrent]
+        ├── PHASE 3  synthesise  SYNTHESIZER               → findings no single agent could make
+        ├── PHASE 4  reproduce   REPRODUCER                → failing test per finding
+        ├── PHASE 5  file        TRIAGE                    → tickets
+        ├── PHASE 6  verify      VERIFIER ⇄ FIXER ⇄ REVIEWER   [bounded loop]
+        └── PHASE 7  report      REPORTER                  → what the run learned
 ```
 
 Each phase is a method on `Router`: `_phase_map`, `_phase_discover`,
-`_phase_reproduce`, `_phase_file`, `_phase_verify`.
+`_phase_synthesise`, `_phase_reproduce`, `_phase_file`, `_phase_verify`,
+`_phase_report`.
 
 Which agents run is **config, not code** — `run_modes` in `config/system.yaml`:
 
 ```yaml
-pr-check:   [MAPPER, API, BROWSER, REPRODUCER, TRIAGE]        $16
-nightly:    [MAPPER, API, BROWSER, REPRODUCER, TRIAGE]        $40
-fix-cycle:  [VERIFIER, FIXER, REVIEWER]                              $20
-full-loop:  all eight                                             $60
+pr-check:   [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, REPRODUCER, TRIAGE]
+nightly:    those eight + SOCKET, GUIDE, LOAD, SYNTHESIZER, REPORTER
+fix-cycle:  [VERIFIER, FIXER, REVIEWER]
+full-loop:  all sixteen
 ```
 
 Note the shape: **REPRODUCER runs once per finding at or above
@@ -170,7 +182,8 @@ router._dispatch(spec, task)
 ```
 
 Failures are **captured, not raised**. One agent falling over costs the run that
-agent's findings, not the whole run; the router decides whether to retry, skip
+agent's findings, not the whole run; the router escalates and carries on. It
+does not retry — see `router.py`'s docstring; that is a decision, not a gap
 or escalate.
 
 ### 5.3 The remediation loop (phase 5)
@@ -327,7 +340,7 @@ that mentions one repo's layout or one app's seeded users works exactly once.
 | VERIFIER | verify | re-runs the original test → VERIFIED / NOT_FIXED / REGRESSED |
 | REPORTER | reporting | what the run found, what recurred, and what it could not reach |
 
-ROUTER is the sixteenth. It is the Python state machine in `router.py`
+ROUTER is the seventeenth. It is the Python state machine in `router.py`
 rather than an agent, because a model cannot enforce a budget it is spending.
 
 ---
@@ -459,7 +472,7 @@ Four tiers, cheapest first:
 1. `qaas validate` then `qaas run --mode pr-check --dry-run` — see the machine
    describe itself, for free
 2. `envelope.py` — the contract everything else moves
-3. `router.py::run` — the five phases
+3. `router.py::run` — the seven phases
 4. `config/agents/api.yaml` + `prompts/API.md` — what an agent *is*
 5. `guardrails.py::check` — the one function both enforcement points call
 6. `.qaas/runs/<id>/ledger.jsonl` from a real run — what actually happened
@@ -472,12 +485,28 @@ Four tiers, cheapest first:
 happens — the phase rail, one card per agent, findings, refusals, cost. Three
 properties matter more than anything it draws.
 
-**It is read-only, and structurally so.** Every route is a GET; there is no code
-path from the page to a dispatch, a ticket or a write. A test asserts that the
-route table contains nothing but GET, so adding a POST means changing a test
-that says why it exists.
+**It reads, with one deliberate exception.** There is no code path from the page
+to a dispatch, a ticket, a branch or the target's files. Every route is a GET
+except **one**, and `test_only_the_override_route_writes` names it in
+`WRITE_ROUTES`: adding a second means changing a test that says why it exists.
 
-**It adds no ledger kind and no router change.** The six phases are never
+That one route writes `overrides.yaml`, and the shape of the exception is the
+point — it changes what a model *is* (which model an agent runs, a turn cap, a
+threshold) and never what an agent is *allowed to do*. `config.TUNABLE_AGENT_FIELDS`
+is the whole vocabulary; `policy`, `mcp_servers`, `builtin_tools`, `skills` and
+`must_call` are absent deliberately, because a page reachable by anything
+running as this user must not be a second, quieter door onto the §8.1 matrix
+that `guardrails.py` enforces. A refused field is named in the error rather than
+dropped, and the candidate is validated through a real `load_config` in a
+scratch copy before it lands.
+
+`overrides.yaml` is also the only **partial** config layer in the system.
+Everything else replaces whole — an `agents/fixer.yaml` in a nearer directory
+shadows the packaged file entirely — which is right for forking an agent and
+wrong for changing one line, because the fork freezes that agent's policy and
+prompt on the day it was copied.
+
+**It adds no ledger kind and no router change.** The seven phases are never
 written to the ledger — there is no `phase_started` — so the dashboard *derives*
 the phase from the `layer` of the agents that have started (`control → map`,
 `discovery → discover`, and so on; the `triage` layer splits by name, because the
@@ -510,13 +539,22 @@ default offline suite.
 
 Honesty about what is *not* proven, so nobody inherits a false impression:
 
-- **Eight of sixteen agents.** ARCHITECT, DBA, SOCKET, GUIDE, AUDITOR, LOAD and
-  REPORTER are designed but not built.
-- **The extensibility claim is untested.** "A new agent needs only a prompt and a
-  YAML" is the architecture's central promise, and no one has added a ninth agent
-  to check it.
+- **Seeded defects are easier than real ones.** The calibration corpus is a demo
+  app whose bugs the system was told about. A good score there shows the loop
+  works end to end and does not spray false positives; it does not show it will
+  find the hard bug in a codebase nobody planted anything in.
+- **One real repository, not a population.** All sixteen agents have now run
+  against a real application outside this project, and the loop closed there:
+  seventeen findings, ten filed, one fixed on a branch, reviewed, re-verified and
+  moved to Done. That is one data point. Precision on unfamiliar code is still
+  the number this project most needs and least has.
 - **`fix-cycle` leaves the working tree on a `fix/*` branch.** Harmless when
   watched; it would corrupt the next run of an unattended `qaas sweep` on cron.
-- **Only ever run against the bundled demo app**, whose bugs it was told about.
-- **`wont_fix` and `duplicate`** have no matching status in the connected Jira
-  workflow, so those transitions would fail.
+- **`wont_fix` and `duplicate`** have no matching status in a typical Jira
+  workflow, so those transitions fail where the project has not defined them.
+- **A reopen can land on the wrong-looking column.** `open` resolves through an
+  alias list against the project's own statuses, so a workflow whose only
+  open-ish state is `Backlog` reopens to `Backlog`. The transition is correct;
+  the board just does not appear to move.
+- **One provider.** Everything runs on the Claude Agent SDK. The seam is about
+  forty lines and the plan is written (`PROVIDERS_PLAN.md`), but it is a plan.

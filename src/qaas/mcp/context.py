@@ -49,11 +49,24 @@ class ToolContext:
         return self.store.touched_files(self.agent.name)
 
     def bump(self, key: str) -> int:
-        self.counters[key] = self.counters.get(key, 0) + 1
-        return self.counters[key]
+        counters = self._run_counters()
+        counters[key] = counters.get(key, 0) + 1
+        return counters[key]
 
     def count(self, key: str) -> int:
-        return self.counters.get(key, 0)
+        return self._run_counters().get(key, 0)
+
+    def _run_counters(self) -> dict[str, int]:
+        """The tally that spans the run, falling back to this context's own.
+
+        Delegated to the store the way `touched_files` already is: a context is
+        built per dispatch and a run outlives many of them, so a counter living
+        here bounded one invocation rather than one run. The local `counters`
+        dict stays as the fallback for a context built without a real store.
+        """
+        store = getattr(self, "store", None)
+        getter = getattr(store, "counters", None)
+        return getter(self.agent.name) if callable(getter) else self.counters
 
 
 def ok(text: str, **structured: Any) -> dict[str, Any]:
@@ -69,8 +82,18 @@ def err(text: str) -> dict[str, Any]:
 
     Tool errors are returned, not raised: the agent should read the reason and
     correct itself rather than have the turn die.
+
+    Both spellings of the flag are set, and that is not belt-and-braces -- it is
+    the bug. The MCP wire format spells it `isError`, and this returned only
+    that; the SDK reads the handler's dict with `result.get("is_error", False)`
+    (`claude_agent_sdk.__init__`, `run_tool`) and drops anything else. So every
+    refusal from all seven in-process servers -- a guardrail denial, "you may not
+    file", "not reproducible" -- was delivered to the model as a *successful*
+    tool result, and the whole "read the reason and correct itself" contract had
+    never once run. Keep `isError` for any reader that speaks the wire format,
+    and `is_error` because that is the key the thing on the other end reads.
     """
-    return {"content": [{"type": "text", "text": text}], "isError": True}
+    return {"content": [{"type": "text", "text": text}], "isError": True, "is_error": True}
 
 
 def handlers(tools: list) -> dict[str, Any]:

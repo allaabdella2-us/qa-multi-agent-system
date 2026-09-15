@@ -4,7 +4,15 @@ Deliberately not an LLM. §4.1 wants its reasoning shallow (routing, not analysi
 and §10 makes it the enforcement point for budget and concurrency — and a model
 cannot enforce a budget it is itself spending. Everything here is ordinary code:
 dispatch, phase ordering, concurrency limits, the spend governor, the §8.3 loop
-breakers, retries and escalation.
+breakers and escalation.
+
+There is deliberately **no retry**. A failed agent is escalated and the run
+continues without it. Four documents used to promise retries and a dead-letter
+queue and no such code has ever existed, so a transient 429 was indistinguishable
+from a real failure while the docs said otherwise. Building it properly needs a
+classifier for which errors are transient and a guarantee that a retry cannot
+duplicate side effects -- an agent that opened a branch before it died must not
+open a second one. Until that exists, saying so is better than implying it.
 
 The phases exist because the dependencies are real, not for tidiness:
 
@@ -17,6 +25,7 @@ Within a phase, agents are independent and run concurrently up to the mode's cap
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -26,9 +35,10 @@ from typing import Any, Callable
 from qaas.config import AgentSpec, SystemConfig, load_config
 from qaas.envelope import DefectEnvelope
 from qaas.target import agent_usable
+from qaas.mcp import defect_memory
 from qaas.mcp.context import ToolContext
 from qaas.runner import RunOutcome, run_agent
-from qaas.store import RunStore, SystemMapStore
+from qaas.store import AgentResult, RunStore, SystemMapStore
 from qaas import tasks
 
 
@@ -79,6 +89,66 @@ def target_revision(root: Path | str | None) -> dict[str, Any]:
     return info
 
 
+def _with_protected_test(spec: AgentSpec, envelope: DefectEnvelope) -> AgentSpec:
+    """FIXER, for this ticket, with the failing test declared unwritable.
+
+    `Guardrail._protected_path` and the `protected_paths` branch of `_check_bash`
+    have existed since M3 and were dead code: no agent YAML sets
+    `protected_paths` and nothing else populated it, so the predicate always
+    returned False. Meanwhile `fixer.yaml` grants `write_paths: [api/app,
+    web/src, qa/repro]` -- and `qa/repro` is REPRODUCER's sandbox, holding the
+    very test `tasks.fixer` hands FIXER as "the test that defines success". So
+    §10's whole symptom-fix guard ("a fixer that edits the test patches the
+    symptom") was a sentence in a prompt with nothing behind it.
+
+    It has to be per-invocation rather than in the YAML, because which test is
+    protected depends on which ticket is being fixed. The spec is deep-copied so
+    one ticket's protection cannot leak into the next one's dispatch -- the
+    roster is shared across the whole run.
+    """
+    test = envelope.reproduction.failing_test
+    if not test:
+        return spec
+    # `qa/repro/test_x.py::test_case` names a case; the file is what is written.
+    path = test.split("::", 1)[0].strip()
+    if not path:
+        return spec
+    guarded = spec.model_copy(deep=True)
+    if path not in guarded.policy.protected_paths:
+        guarded.policy.protected_paths = [*guarded.policy.protected_paths, path]
+    return guarded
+
+
+#: VERIFIER's verdict -> the outcome recorded against the defect. REGRESSED is
+#: `regressed` and not a failure of the defect: the fix broke something else, and
+#: a future run needs to know that this area is one where fixes have consequences.
+_VERDICT_OUTCOMES = {
+    "VERIFIED": "verified",
+    "NOT_FIXED": "not_fixed",
+    "REGRESSED": "regressed",
+}
+
+
+def _review_feedback(entry, observed: str) -> str:
+    """What the last attempt got wrong, assembled from typed ledger data.
+
+    Prose built in Python out of fields the agents already recorded -- no new
+    tool, no new LedgerKind, and nothing a model has to be trusted to pass on.
+    """
+    parts: list[str] = []
+    if observed:
+        parts.append(f"VERIFIER observed: {observed}")
+    reasoning = str(entry.detail.get("reasoning") or "").strip()
+    if reasoning:
+        parts.append(f"REVIEWER's reasoning: {reasoning}")
+    concerns = entry.detail.get("concerns") or []
+    if isinstance(concerns, str):
+        concerns = [concerns]
+    for concern in concerns:
+        parts.append(f"  - {concern}")
+    return "\n".join(parts)
+
+
 @dataclass
 class RunReport:
     run_id: str
@@ -110,9 +180,20 @@ class RunReport:
 class Budget:
     """The spend and wall-clock governor. Checked before every dispatch."""
 
-    def __init__(self, max_usd: float | None, max_seconds: int, *, already_spent: float = 0.0):
+    def __init__(
+        self,
+        max_usd: float | None,
+        max_seconds: int,
+        *,
+        already_spent: float = 0.0,
+        reserve_fraction: float = 0.0,
+    ):
         self.max_usd = max_usd
         self.max_seconds = max_seconds
+        #: See `RunMode.reserve_fraction`. The finding phases stop at
+        #: `max_seconds * (1 - reserve_fraction)`; filing and reporting run
+        #: against the full cap.
+        self.reserve_fraction = max(0.0, min(0.9, reserve_fraction))
         #: What this run has already cost, including earlier invocations.
         #:
         #: A resumed run (`qaas run --run-id <existing>`) used to start the
@@ -136,21 +217,36 @@ class Budget:
     def spend(self, amount: float) -> None:
         self.spent += amount
 
-    def check(self) -> None:
+    def check(self, *, reserve: bool = False) -> None:
         # `max_usd is None` means no spend ceiling -- the shipped config sets
         # none, because a dollar figure bakes one vendor's pricing into a tool
         # meant to run against local models too. The wall-clock cap and each
         # agent's `max_turns` still bound a run; those are model-agnostic.
         if self.max_usd is not None and self.spent >= self.max_usd:
             raise BudgetExceeded(f"spend cap reached: ${self.spent:.2f} of ${self.max_usd:.2f}")
-        if self.elapsed >= self.max_seconds:
+        limit = self.max_seconds
+        if reserve and self.reserve_fraction:
+            limit = self.max_seconds * (1.0 - self.reserve_fraction)
+        if self.elapsed >= limit:
             raise BudgetExceeded(
-                f"wall-clock cap reached: {self.elapsed:.0f}s of {self.max_seconds}s"
+                f"wall-clock cap reached: {self.elapsed:.0f}s of {limit:.0f}s"
+                + (" (the reserve is held back for filing and reporting)" if reserve else "")
             )
 
-    def allowance(self, spec: AgentSpec) -> float | None:
-        """What this agent may spend, or None when neither it nor the run caps it."""
-        caps = [c for c in (spec.max_budget_usd, self.remaining_usd) if c is not None]
+    def allowance(self, spec: AgentSpec, *, slots: int = 1) -> float | None:
+        """What this agent may spend, or None when neither it nor the run caps it.
+
+        `slots` divides the remainder across the dispatches actually in flight.
+        `spent` only moves in `_dispatch` *after* an agent returns, so `_gather`
+        started up to `max_concurrency` agents each told it could spend the
+        entire remaining budget -- three agents, one budget, handed out three
+        times. The run-level check still stops the run, but only after the
+        overspend has happened.
+        """
+        remaining = self.remaining_usd
+        if remaining is not None and slots > 1:
+            remaining = remaining / slots
+        caps = [c for c in (spec.max_budget_usd, remaining) if c is not None]
         return max(0.01, min(caps)) if caps else None
 
 
@@ -217,6 +313,7 @@ class Router:
             run_mode.max_budget_usd,
             run_mode.max_wall_clock_s,
             already_spent=store.total_cost_usd() if run_id else 0.0,
+            reserve_fraction=run_mode.reserve_fraction,
         )
         report = RunReport(run_id=store.run_id, mode=mode)
 
@@ -230,10 +327,23 @@ class Router:
         )
         self._emit("run_started", run_id=store.run_id, mode=mode, agents=sorted(specs))
 
+        map_version = self.maps.latest_version()
         try:
+            # The finding phases run against the reserved clock, so that running
+            # out of time means "stop looking" rather than "throw away what was
+            # found". Filing, verifying and reporting run against the full cap
+            # below, outside this try.
             map_version = await self._phase_map(specs, store, budget, report)
             await self._phase_discover(specs, store, budget, report, mode, map_version)
+            await self._phase_synthesise(specs, store, budget, report, mode, map_version)
             await self._phase_reproduce(specs, store, budget, report, map_version)
+        except BudgetExceeded as exc:
+            report.stopped_early = str(exc)
+            report.escalations.append(str(exc))
+            store.log("escalation", reason=str(exc))
+            self._emit("stopped", reason=str(exc))
+
+        try:
             if run_mode.files_tickets:
                 await self._phase_file(specs, store, budget, report, map_version)
             else:
@@ -245,10 +355,111 @@ class Router:
             report.escalations.append(str(exc))
             store.log("escalation", reason=str(exc))
             self._emit("stopped", reason=str(exc))
+        except Exception as exc:  # noqa: BLE001 — see below
+            # `run()` caught only `BudgetExceeded`, so anything else -- a task
+            # builder raising `ValueError` because no profile is loaded, an
+            # OSError from a full disk -- propagated out of a run that had
+            # already written `run_started`. The ledger then held an opening line
+            # with no closing one, which `qaas runs`, `qaas show` and the
+            # dashboard all read as "still running", forever. A run that died
+            # has to say so.
+            note = f"{type(exc).__name__}: {exc}"
+            report.stopped_early = note
+            report.escalations.append(note)
+            store.log("escalation", reason=note)
+            self._emit("stopped", reason=note)
 
+        self._record_outcomes(store, mode)
         store.log("run_finished", **report.summary())
         self._emit("run_finished", **report.summary())
         return report
+
+    def _record_outcomes(self, store: RunStore, mode: str) -> None:
+        """Write what this run learned into the memory that outlives it.
+
+        Called once, at the end, from the router — which is the point. Everything
+        written here was already known *inside* a run and lost at the end of it:
+        a finding the evidence gate held, a fix REVIEWER rejected, a verdict of
+        NOT_FIXED. All typed ledger lines, all read back by `_verify_loop` and
+        `_remediate`, none of them read by anything ever again. So the system
+        could say "I have seen this defect before" and never "…and last time it
+        was not reproducible", which is the difference between a memory and a
+        lesson.
+
+        Deliberately not a tool. An agent that can write its own outcomes can
+        record itself as correct and raise its own apparent precision without
+        finding anything — the same shape as an agent that can retire an entry
+        from the golden ledger, and CLAUDE.md is explicit that that has to be
+        designed out rather than trusted away. Agents read this back through
+        `search_similar`; nothing gives them a way to write it.
+
+        Never raises. A memory that cannot be written is a worse next run, not a
+        failed this one.
+        """
+        target = str(self.config.target or "")
+        try:
+            verdicts = [e for e in store.ledger("verdict")]
+            reviews = [e for e in store.ledger("review")]
+            envelopes = store.envelopes()
+        except OSError:
+            return
+
+        by_ticket = {e.jira.key: e for e in envelopes if e.jira.key}
+        written = 0
+
+        def write(envelope, outcome: str, detail: str = "") -> None:
+            nonlocal written
+            try:
+                defect_memory.record_outcome(
+                    self.root,
+                    fingerprint=envelope.fingerprint(),
+                    run_id=store.run_id,
+                    outcome=outcome,
+                    target=target,
+                    agent=envelope.discovered_by,
+                    detail=detail,
+                )
+                written += 1
+            except (sqlite3.Error, OSError, ValueError):
+                pass
+
+        for entry in verdicts:
+            envelope = by_ticket.get(entry.detail.get("ticket_key"))
+            verdict = str(entry.detail.get("verdict") or "").upper()
+            if envelope is None or verdict not in _VERDICT_OUTCOMES:
+                continue
+            write(envelope, _VERDICT_OUTCOMES[verdict], str(entry.detail.get("observed") or ""))
+            if verdict == "VERIFIED":
+                # This is the line that makes a regression reportable at all. The
+                # REGRESSION branch in `defect_memory.record` fires only on
+                # `resolved_at`, whose only writer was a tool no agent in the
+                # shipped roster holds -- VERIFIER closes tickets and has no
+                # `defect_memory` server. So the highest-value thing this system
+                # can say was unreachable in every configuration it ships with.
+                try:
+                    defect_memory.resolve(
+                        self.root, envelope.fingerprint(), envelope.jira.key, store.run_id
+                    )
+                except (sqlite3.Error, OSError):
+                    pass
+
+        for entry in reviews:
+            envelope = by_ticket.get(entry.detail.get("ticket_key"))
+            if envelope is None or entry.detail.get("decision") != "REQUEST_CHANGES":
+                continue
+            write(envelope, "review_rejected", str(entry.detail.get("reasoning") or ""))
+
+        floor = self.config.thresholds.min_confidence_to_file
+        for envelope in envelopes:
+            if envelope.reproduction.status.value == "not_reproducible":
+                write(envelope, "not_reproducible")
+                continue
+            fileable, why = envelope.is_fileable(floor)
+            if not fileable:
+                write(envelope, "held", why)
+
+        if written:
+            store.log("defect_memory", action="outcomes", count=written, mode=mode)
 
     # -- phases -----------------------------------------------------------
 
@@ -258,7 +469,7 @@ class Router:
         if spec is None:
             return self.maps.latest_version()
 
-        budget.check()
+        budget.check(reserve=True)
         before = self.maps.latest_version()
         outcome = await self._dispatch(spec, store, budget, report, tasks.mapper(self.config), None)
 
@@ -317,6 +528,53 @@ class Router:
 
         await self._gather(jobs, store, budget, report, map_version, self.config.run_modes[mode].max_concurrency)
 
+    async def _phase_synthesise(self, specs, store, budget, report, mode, map_version) -> None:
+        """The join. Dispatched by LAYER, between discover and reproduce.
+
+        Every other phase asks "what is wrong with this surface". This one asks
+        "do two of these findings, each unremarkable on its own, describe one
+        defect that is worse than either". Nothing in the system did that. Each
+        discovery agent is its own process with its own context, and although it
+        *can* read a peer's envelope -- `list_envelopes` re-globs the directory,
+        so a finding emitted thirty seconds ago is visible -- nothing ever asked
+        it to, and the prompts said the opposite: "leave the other surfaces to
+        the agents that own them". So a tenant bypass that is provable only from
+        API's "this handler filters by id, not org_id" *plus* DBA's "and there is
+        no owning-org constraint behind it" was emitted as two sub-blocker
+        findings in two domains -- which `fingerprint()`, leading with `domain`,
+        guarantees will never converge.
+
+        It sits *before* reproduce, and that placement is the whole design. A
+        composite emitted here is an ordinary envelope: it earns a REPRODUCER
+        context, a failing test and a ticket like any other finding. REPORTER
+        already sees everything and can already emit, and it is useless for this
+        precisely because it runs after file and verify -- anything it emits is
+        written, logged, scored, and never filed.
+
+        By layer, following `_phase_report`, so a second synthesis agent needs a
+        prompt and a YAML and no Python.
+        """
+        synthesis = [s for s in specs.values() if s.layer == "synthesis"]
+        if not synthesis:
+            return
+        # Nothing to join. One finding is not a conjunction, and dispatching a
+        # frontier-model context to discover that is a bill for nothing.
+        findings = store.envelopes()
+        if len(findings) < 2:
+            store.log(
+                "skipped",
+                reason=f"{len(findings)} finding(s); synthesis needs at least two to join",
+                agents=[s.name for s in synthesis],
+            )
+            return
+
+        for spec in synthesis:
+            budget.check(reserve=True)
+            await self._dispatch(
+                spec, store, budget, report,
+                tasks.synthesis(self.config, mode, len(findings)), map_version,
+            )
+
     async def _phase_report(self, specs, store, budget, report, mode, map_version) -> None:
         """Reporting agents run last, over what the run itself produced.
 
@@ -335,10 +593,31 @@ class Router:
         if not reporting:
             return
 
+        before = {e.id for e in store.envelopes()}
         for spec in reporting:
             budget.check()
             await self._dispatch(
                 spec, store, budget, report, tasks.report(self.config, mode), map_version
+            )
+
+        # A reporting agent CAN emit -- REPORTER holds the envelope server and is
+        # told to cite its report with one -- and this phase runs after file and
+        # verify, so anything emitted here is written, logged, scored and never
+        # filed. Re-running `_phase_file` would put a cycle into the one part of
+        # the pipeline that has none, so the orphaning stays, and is said out
+        # loud instead: a finding that silently goes nowhere is the worst shape a
+        # failure takes here. (A conjunction that deserves a ticket belongs in
+        # the synthesis phase, which runs before reproduce for exactly this
+        # reason.) No new LedgerKind -- `skipped` already exists.
+        orphaned = [e.id for e in store.envelopes() if e.id not in before]
+        if orphaned:
+            store.log(
+                "skipped",
+                reason=(
+                    "emitted during the reporting phase, after filing; recorded for "
+                    "the ledger and the scorecard, not filed"
+                ),
+                envelope_ids=orphaned,
             )
 
     async def _phase_reproduce(self, specs, store, budget, report, map_version) -> None:
@@ -411,7 +690,12 @@ class Router:
             (spec, tasks.reproducer(draft, self.config, self.config.thresholds.flake_runs))
             for draft in drafts
         ]
-        await self._gather(jobs, store, budget, report, map_version, concurrency=2)
+        # One at a time. Two REPRODUCER invocations are separate contexts but not
+        # separate sandboxes: both hold `vcs` and `env_control` against the same
+        # `target_root`, so they branch, commit and reset the *same* working tree
+        # and the same compose stack. Isolating them properly wants a worktree per
+        # finding; serialising them is the cheap correct answer.
+        await self._gather(jobs, store, budget, report, map_version, concurrency=1)
 
     async def _phase_file(self, specs, store, budget, report, map_version) -> None:
         spec = specs.get("TRIAGE")
@@ -421,9 +705,23 @@ class Router:
             e for e in store.envelopes()
             if e.is_fileable(self.config.thresholds.min_confidence_to_file)[0]
         ]
+        # A resumed run re-selects every envelope, and `create_issue` never looked
+        # at `jira.key` -- so `--from-board`, which resumes by design, filed the
+        # same defect a second time and the only thing standing between it and a
+        # duplicate storm was TRIAGE remembering to call `search_similar`. The
+        # dedupe is a courtesy; this is the gate.
+        already = [e for e in fileable if e.jira.key]
+        if already:
+            fileable = [e for e in fileable if not e.jira.key]
+            store.log(
+                "skipped", agent="TRIAGE",
+                reason=f"{len(already)} finding(s) already carry a ticket from an earlier pass",
+                tickets=sorted(e.jira.key for e in already),
+            )
         if not fileable:
             store.log("skipped", agent="TRIAGE", reason="nothing passed the gates")
             return
+        budget.check()
         cap = min(spec.policy.max_tickets_per_run, self.config.thresholds.max_tickets_per_run)
         await self._dispatch(spec, store, budget, report, tasks.triage(self.config, cap), map_version)
 
@@ -467,12 +765,21 @@ class Router:
         repro_branch = envelope.reproduction.environment.branch or "main"
         fix_branch: str | None = None
 
+        #: What the last VERIFIER actually observed, carried into the next fix
+        #: attempt. Without it `_remediate` re-dispatches FIXER with a
+        #: byte-identical prompt and the round trip buys a second bill.
+        observed: str = ""
+
         while True:
+            budget.check()
+            verdict_mark = len(list(store.ledger("verdict")))
             await self._dispatch(
                 specs["VERIFIER"], store, budget, report,
                 tasks.verifier(ticket, envelope, branch=fix_branch or repro_branch), map_version,
             )
-            verdict = self._latest_verdict(store, ticket)
+            entry = self._entry_since(store, "verdict", ticket, verdict_mark)
+            verdict = entry.detail.get("verdict") if entry else None
+            observed = str(entry.detail.get("observed") or "") if entry else ""
 
             if verdict is None:
                 self._escalate(report, store, "VERIFIER",
@@ -496,18 +803,29 @@ class Router:
             reopens += 1
             store.log("reopened", agent="VERIFIER", ticket_key=ticket, attempt=reopens)
             mark = len(list(store.ledger("vcs")))
-            if not await self._remediate(envelope, specs, store, budget, report, map_version):
+            if not await self._remediate(
+                envelope, specs, store, budget, report, map_version, observed=observed
+            ):
                 return
             # Keep the previous branch if this round wrote nothing: a re-verify
             # of the last fix beats silently falling back to the repro branch.
             fix_branch = self._branch_written_since(store, mark) or fix_branch
 
-    async def _remediate(self, envelope, specs, store, budget, report, map_version) -> bool:
+    async def _remediate(
+        self, envelope, specs, store, budget, report, map_version, *, observed: str = ""
+    ) -> bool:
         """FIXER -> REVIEWER, bounded. Returns whether a fix is ready to re-verify.
 
         Phase 3 agents. In a Phase 1 roster neither exists, so a NOT_FIXED
         verdict escalates to a human immediately — which is correct, and much
         better than the loop silently re-running VERIFIER against unchanged code.
+
+        `observed` and the review's concerns are what make this a loop rather
+        than a retry. `record_review` refuses REQUEST_CHANGES without `concerns`
+        on the stated grounds that "FIXER gets them verbatim" -- and then nothing
+        carried them, so round 2 dispatched FIXER with the same two arguments and
+        a byte-identical prompt. `max_mender_arbiter_round_trips: 2` bought a
+        second attempt at the same coin flip and a second bill.
         """
         ticket = envelope.jira.key
         fixer, reviewer = specs.get("FIXER"), specs.get("REVIEWER")
@@ -518,21 +836,32 @@ class Router:
                 "Nothing here can produce a fix; a human takes it from here")
             return False
 
+        fixer = _with_protected_test(fixer, envelope)
+        feedback = observed
+
         for trip in range(1, self.config.thresholds.max_mender_arbiter_round_trips + 1):
             budget.check()
             await self._dispatch(fixer, store, budget, report,
-                                 tasks.fixer(ticket, envelope), map_version)
+                                 tasks.fixer(ticket, envelope, feedback=feedback), map_version)
             if reviewer is None:
                 return True
 
+            budget.check()
+            review_mark = len(list(store.ledger("review")))
             await self._dispatch(reviewer, store, budget, report,
                                  tasks.reviewer(ticket, envelope), map_version)
-            review = self._latest_review(store, ticket)
+            entry = self._entry_since(store, "review", ticket, review_mark)
+            review = entry.detail.get("decision") if entry else None
             if review == "APPROVE":
                 return True
             if review == "ESCALATE_TO_HUMAN":
                 self._escalate(report, store, "REVIEWER", f"{ticket}: REVIEWER escalated the fix")
                 return False
+            if entry is None:
+                self._escalate(report, store, "REVIEWER",
+                    f"{ticket}: REVIEWER recorded no decision; the fix stays unreviewed")
+                return False
+            feedback = _review_feedback(entry, observed)
             store.log("review_round_trip", agent="REVIEWER", ticket_key=ticket, trip=trip)
 
         self._escalate(report, store, "REVIEWER",
@@ -558,15 +887,27 @@ class Router:
         return None
 
     @staticmethod
-    def _latest_verdict(store, ticket_key: str) -> str | None:
-        """VERIFIER's verdict is a typed ledger entry, never parsed from prose."""
-        verdicts = [e for e in store.ledger("verdict") if e.detail.get("ticket_key") == ticket_key]
-        return verdicts[-1].detail.get("verdict") if verdicts else None
+    def _entry_since(store, kind: str, ticket_key: str, mark: int):
+        """The entry *this* dispatch recorded, or None if it recorded nothing.
 
-    @staticmethod
-    def _latest_review(store, ticket_key: str) -> str | None:
-        reviews = [e for e in store.ledger("review") if e.detail.get("ticket_key") == ticket_key]
-        return reviews[-1].detail.get("decision") if reviews else None
+        Scoped to entries added since `mark`, the way `_branch_written_since`
+        already is, and for the same reason one step further on. Unscoped, these
+        returned the last entry for the ticket from anywhere in the ledger -- so
+        a VERIFIER that finished without calling `record_verdict` silently
+        inherited the *previous* verdict. That is not only a crash path: the Stop
+        hook deliberately lets an agent through after one block, so a silent
+        VERIFIER is an ordinary outcome. On a resumed run, where `_phase_verify`
+        re-selects every envelope that carries a ticket, it means a VERIFIED
+        nobody verified.
+
+        The whole entry, not just the decision, because the reasoning is what
+        makes the remediation loop a loop instead of a retry.
+        """
+        entries = [
+            e for e in list(store.ledger(kind))[mark:]
+            if e.detail.get("ticket_key") == ticket_key
+        ]
+        return entries[-1] if entries else None
 
     def _escalate(self, report, store, agent: str, note: str) -> None:
         report.escalations.append(note)
@@ -575,7 +916,9 @@ class Router:
 
     # -- dispatch ---------------------------------------------------------
 
-    async def _gather(self, jobs, store, budget, report, map_version, concurrency: int) -> None:
+    async def _gather(
+        self, jobs, store, budget, report, map_version, concurrency: int, *, reserve: bool = True
+    ) -> None:
         """Run jobs concurrently, but stop dispatching once the budget is gone.
 
         The semaphore bounds how many run at once; the budget check inside each
@@ -585,6 +928,7 @@ class Router:
         if not jobs:
             return
         sem = asyncio.Semaphore(max(1, concurrency))
+        in_flight = min(max(1, concurrency), len(jobs))
         stopped: list[str] = []
 
         async def one(spec: AgentSpec, task: str) -> None:
@@ -592,24 +936,47 @@ class Router:
                 if stopped:
                     return
                 try:
-                    budget.check()
+                    budget.check(reserve=reserve)
                 except BudgetExceeded as exc:
                     stopped.append(str(exc))
                     return
-                await self._dispatch(spec, store, budget, report, task, map_version)
+                await self._dispatch(
+                    spec, store, budget, report, task, map_version, slots=in_flight
+                )
 
         await asyncio.gather(*(one(spec, task) for spec, task in jobs))
         if stopped:
             raise BudgetExceeded(stopped[0])
 
-    async def _dispatch(self, spec, store, budget, report, task, map_version) -> RunOutcome:
+    async def _dispatch(
+        self, spec, store, budget, report, task, map_version, *, slots: int = 1
+    ) -> RunOutcome:
         ctx = self._context(store, spec, map_version)
-        allowance = budget.allowance(spec)
+        allowance = budget.allowance(spec, slots=slots)
 
         self._emit("agent_started", agent=spec.name, budget=allowance)
-        outcome = await run_agent(
-            spec, ctx, task, max_budget_usd=allowance, on_event=self.on_event
-        )
+        # `max_wall_clock_s` was a gate checked *between* dispatches and nothing
+        # more: once this await was entered, no clock could end it. One wedged
+        # agent -- a stuck Playwright session, a Bash call with no timeout of its
+        # own, an SDK stream that never yields a ResultMessage -- outlived the
+        # run's own cap indefinitely, and `pr-check` advertised a 900-second
+        # bound it could not keep. Bounded by what is left of the run's clock, so
+        # no agent can outlive the run; floored so a nearly-exhausted budget
+        # still gives the agent long enough to record what it has.
+        deadline = max(30.0, budget.max_seconds - budget.elapsed)
+        try:
+            outcome = await asyncio.wait_for(
+                run_agent(spec, ctx, task, max_budget_usd=allowance, on_event=self.on_event),
+                timeout=deadline,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            # Partial work survives: envelopes and artifacts are written through
+            # the MCP tools as they happen, not at the end.
+            error = f"exceeded the run's remaining wall clock ({deadline:.0f}s)"
+            store.log("agent_error", agent=spec.name, error=error)
+            result = AgentResult(agent=spec.name, subtype="timeout", error=error)
+            store.put_result(result)
+            outcome = RunOutcome(result=result)
 
         budget.spend(outcome.result.cost_usd)
         report.outcomes.append(outcome)

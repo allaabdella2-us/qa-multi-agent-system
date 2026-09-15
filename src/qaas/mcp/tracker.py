@@ -145,7 +145,13 @@ def build_tools(ctx: ToolContext) -> list:
                 "Emit your finding as an envelope; TRIAGE files it.",
             )
 
-        cap = policy.max_tickets_per_run
+        # The *effective* cap, which is what the router already computes and
+        # passes into TRIAGE's task: `min(policy, thresholds)`. The tool checked
+        # only the policy, so lowering `thresholds.max_tickets_per_run` to 3
+        # through the dashboard left the real limit at the policy's 10, and the
+        # only thing holding the lower number was TRIAGE having read its prompt.
+        # A threshold enforced by a prompt is not a threshold.
+        cap = min(policy.max_tickets_per_run, ctx.config.thresholds.max_tickets_per_run)
         if ctx.count("tickets") >= cap:
             ctx.store.log(
                 "escalation", agent=ctx.agent.name,

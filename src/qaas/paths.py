@@ -190,6 +190,10 @@ class Workspace:
     #: The `skills/` inside each plugin, in the same order.
     skill_dirs: tuple[Path, ...]
     state_root: Path
+    #: An explicitly named config directory (`--config`, `QAAS_CONFIG_DIR`) that
+    #: does not exist. Recorded rather than raised, because `resolve` is called
+    #: by every command including `--help`; `qaas validate` reports it.
+    missing_explicit_config: str | None = None
 
     @classmethod
     def resolve(
@@ -209,6 +213,17 @@ class Workspace:
 
         explicit = config or os.environ.get(CONFIG_DIR_ENV) or None
         explicit_path = Path(explicit).resolve() if explicit else None
+        # An explicitly named directory that does not exist is a user error, not
+        # a layer to skip. `_existing` filters it out silently, so a typo in
+        # `QAAS_CONFIG_DIR` -- or a relative path evaluated from the wrong cwd --
+        # dropped the highest-precedence layer and ran happily on the packaged
+        # defaults, which is a different configuration than the one asked for.
+        # Recorded rather than raised: `Workspace.resolve` is called by every
+        # command including `--help`, and "never raises" is its contract. The
+        # field is what `qaas validate` and `describe()` report.
+        missing_explicit = (
+            str(explicit_path) if explicit_path and not explicit_path.is_dir() else None
+        )
 
         home = os.environ.get(HOME_ENV)
         home_path = Path(home).resolve() if home else None
@@ -240,11 +255,19 @@ class Workspace:
             state = Path(state_root).resolve()
         elif proj_state is not None:
             state = proj_state
+        elif home_path is not None:
+            # QAAS_HOME reached config_dirs, prompt_dirs and plugin_dirs and not
+            # this, so with no project on disk `qaas prompts eject` wrote to
+            # `<cwd>/.qaas/prompts/` -- a directory outside the very search path
+            # the override had just established. The ejected prompt was never
+            # read back, and nothing said so.
+            state = home_path
         else:
             state = (here / STATE_DIRNAME).resolve()
 
         return cls(
             project=project,
+            missing_explicit_config=missing_explicit,
             config_dirs=config_dirs,
             prompt_dirs=prompt_dirs,
             plugin_dirs=plugin_dirs,

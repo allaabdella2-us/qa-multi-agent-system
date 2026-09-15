@@ -80,7 +80,81 @@ CREATE TABLE IF NOT EXISTS defects (
     resolved_ticket_key TEXT
 );
 CREATE INDEX IF NOT EXISTS defects_domain ON defects(domain);
+
+-- What happened to a defect after it was reported. The table that turns memory
+-- into learning: `defects` can say "seen before", and only this can say "and it
+-- was wrong", "and the fix did not hold", "and it came back".
+--
+-- Written by the ROUTER and by `qaas score`, never by an agent. That is not
+-- tidiness -- an agent that can write its own outcome can raise its own
+-- precision without finding anything, which is the same failure mode as an
+-- agent that can retire an entry from the golden ledger. Agents read this
+-- through `search_similar` and cannot reach it any other way.
+CREATE TABLE IF NOT EXISTS outcomes (
+    fingerprint TEXT NOT NULL,
+    target      TEXT NOT NULL DEFAULT '',
+    run_id      TEXT NOT NULL,
+    at          TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    agent       TEXT,
+    detail      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (fingerprint, run_id, outcome)
+);
+CREATE INDEX IF NOT EXISTS outcomes_fingerprint ON outcomes(fingerprint);
 """
+
+#: Added after 0.0.1 shipped. SQLite has no `ADD COLUMN IF NOT EXISTS`, so these
+#: are applied by reading `PRAGMA table_info` -- an existing `memory.db` migrates
+#: in place on the next `connect`, and a fresh one gets them from the start.
+_MIGRATIONS = {
+    # Memory was one file per *state root*, with no target column and an
+    # unfiltered `SELECT * FROM defects`. `qaas run --repo` clones every target
+    # under that one root, so one project's memory answered another project's
+    # questions -- and could suppress a real defect as "already tracked as
+    # PROJ-N, do not file again", persisting that suppression into every future
+    # run. `''` means "recorded before this column existed" and stays visible, so
+    # no existing memory is orphaned.
+    "defects": [("target", "TEXT NOT NULL DEFAULT ''")],
+}
+
+#: What `record_outcome` accepts. A closed set for the same reason `LedgerKind`
+#: is one: `search_similar` renders these back to an agent, so they are a wire
+#: format rather than labels.
+OUTCOMES = frozenset(
+    {
+        "verified", "not_fixed", "regressed", "review_rejected", "held",
+        "not_reproducible",
+        # Written only by `qaas score`/`qaas sweep`, from
+        # `Scorecard.regressions_on_planted` -- a finding that matched something
+        # the golden ledger plants as correct-but-suspicious. The one outcome
+        # that is a judgement on the *report* rather than on the defect, and the
+        # reason it is safe is that it comes from a process with no agent in it,
+        # measured against a ledger no agent may write.
+        "false_positive",
+    }
+)
+
+#: How an outcome reads to an agent. Written as a *consequence*, not as a label:
+#: "held" alone says nothing an agent can act on, whereas "held, so it was never
+#: filed" tells it what to do differently this time.
+_OUTCOME_NOTES = {
+    "verified": "a fix for this was verified in an earlier run",
+    "not_fixed": "an earlier fix for this did NOT hold when verified",
+    "regressed": "an earlier fix for this broke something else",
+    "review_rejected": "an earlier fix for this was rejected in review",
+    "held": "an earlier report of this was HELD, not filed — check the evidence bar",
+    "not_reproducible": "an earlier report of this could NOT be reproduced",
+    "false_positive": (
+        "an earlier report of this was scored a FALSE POSITIVE against the golden "
+        "ledger — the code it describes is correct. Read it again before reporting it"
+    ),
+}
+
+
+def _target(ctx: "ToolContext") -> str:
+    """Which target this memory row belongs to. Never a tool argument: an agent
+    that can name its own partition can read another target's memory."""
+    return str(getattr(ctx.config, "target", "") or "")
 
 
 def _utcnow_iso() -> str:
@@ -94,7 +168,99 @@ def connect(root: Path | str) -> sqlite3.Connection:
     conn = sqlite3.connect(root / MEMORY_DB)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a `memory.db` written by an older version up to this schema.
+
+    Additive columns only, applied by inspecting what is actually there. The
+    memory deliberately outlives a release -- dedupe across runs is the whole
+    point of it -- so a schema change that orphaned an existing file would throw
+    away the thing the file exists for.
+    """
+    for table, columns in _MIGRATIONS.items():
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for name, ddl in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+    conn.commit()
+
+
+# -- the write path Python owns ---------------------------------------------
+#
+# These three are module-level functions taking a root and plain values, not
+# closures over a ToolContext, because the router has to call them and the
+# router holds no agent. That separation is the design, not a convenience:
+#
+#   * `resolve` closes the regression loop. It was unreachable before -- the
+#     REGRESSION branch fires only on `resolved_at`, the only writer was the
+#     `mark_resolved` *tool*, and VERIFIER, the one agent that closes a ticket,
+#     has no `defect_memory` server. So no shipped roster could ever report "this
+#     was fixed and it came back", which is the single most valuable thing a
+#     system with a memory can say. The fix is not to grant VERIFIER the server:
+#     it is for the router to write the fact it already knows.
+#
+#   * `record_outcome` is how a run's judgements survive it. Held findings,
+#     REQUEST_CHANGES and NOT_FIXED were all typed ledger entries that the router
+#     read back *within* the run and nothing read afterwards.
+#
+# An agent can read these through `search_similar` and cannot write them at all.
+
+
+def resolve(
+    root: Path | str, fingerprint: str, ticket_key: str | None, run_id: str
+) -> bool:
+    """Mark a defect fixed. Returns whether anything was known by that fingerprint."""
+    conn = connect(root)
+    try:
+        cursor = conn.execute(
+            "UPDATE defects SET resolved_at = ?, resolved_ticket_key = COALESCE(?, ticket_key), "
+            "last_run_id = ? WHERE fingerprint = ?",
+            (_utcnow_iso(), ticket_key, run_id, fingerprint),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def record_outcome(
+    root: Path | str,
+    *,
+    fingerprint: str,
+    run_id: str,
+    outcome: str,
+    target: str = "",
+    agent: str | None = None,
+    detail: str = "",
+) -> None:
+    """Persist what became of one finding. Idempotent per (fingerprint, run, outcome)."""
+    if outcome not in OUTCOMES:
+        raise ValueError(f"unknown outcome '{outcome}'; expected one of {sorted(OUTCOMES)}")
+    conn = connect(root)
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO outcomes "
+            "(fingerprint, target, run_id, at, outcome, agent, detail) VALUES (?,?,?,?,?,?,?)",
+            (fingerprint, target or "", run_id, _utcnow_iso(), outcome, agent, detail[:500]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def outcomes_for(root: Path | str, fingerprint: str) -> list[dict[str, Any]]:
+    """Everything this system has learned about one defect, newest first."""
+    conn = connect(root)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM outcomes WHERE fingerprint = ? ORDER BY at DESC", (fingerprint,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 # -- similarity -----------------------------------------------------------
@@ -252,7 +418,22 @@ def build_tools(ctx: ToolContext) -> list:
 
         conn = connect(root)
         try:
-            rows = conn.execute("SELECT * FROM defects").fetchall()
+            # Scoped to this target, plus the legacy rows that predate the
+            # column. Unscoped, a second project under the same state root -- the
+            # ordinary case with `qaas run --repo` -- answered this project's
+            # questions, and a close-enough match from an unrelated codebase came
+            # back as "already tracked as PROJ-N, do not file again". A
+            # suppression, persisted, repeating every run.
+            rows = conn.execute(
+                "SELECT * FROM defects WHERE target IN (?, '')", (_target(ctx),)
+            ).fetchall()
+            learned = {
+                r["fingerprint"]: r
+                for r in conn.execute(
+                    "SELECT fingerprint, outcome, at, agent, detail FROM outcomes "
+                    "ORDER BY at ASC"
+                )
+            }
         finally:
             conn.close()
 
@@ -270,13 +451,29 @@ def build_tools(ctx: ToolContext) -> list:
                 searched=len(rows),
             )
 
-        candidates = [_row_view(r, s) for s, r in matches]
-        lines = [
-            f"  {c['similarity']:.2f}  {c['ticket_key'] or 'unfiled'}  "
-            f"x{c['occurrence_count']}  last seen {c['last_seen']}  {c['title']}"
-            + ("  [RESOLVED — a recurrence is a regression]" if c["resolved"] else "")
-            for c in candidates
-        ]
+        candidates = []
+        for s, r in matches:
+            view = _row_view(r, s)
+            # What the system learned about this defect *after* it was reported.
+            # Without it memory can only say "seen before", which tells an agent
+            # nothing about whether reporting it was right.
+            outcome = learned.get(r["fingerprint"])
+            view["last_outcome"] = dict(outcome) if outcome else None
+            candidates.append(view)
+
+        lines = []
+        for c in candidates:
+            line = (
+                f"  {c['similarity']:.2f}  {c['ticket_key'] or 'unfiled'}  "
+                f"x{c['occurrence_count']}  last seen {c['last_seen']}  {c['title']}"
+            )
+            if c["resolved"]:
+                line += "  [RESOLVED — a recurrence is a regression]"
+            if c["last_outcome"]:
+                line += f"\n      last outcome: {_OUTCOME_NOTES.get(c['last_outcome']['outcome'], c['last_outcome']['outcome'])}"
+                if c["last_outcome"]["detail"]:
+                    line += f" ({c['last_outcome']['detail']})"
+            lines.append(line)
         return ok(
             f"{len(candidates)} prior defect(s) resemble this one:\n" + "\n".join(lines),
             candidates=candidates,
@@ -317,6 +514,18 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def record(args: dict[str, Any]) -> dict[str, Any]:
+        # Gated like every comparable write: `record_reproduction` is
+        # REPRODUCER's, `record_verdict` is VERIFIER's, `put_system_map` is
+        # MAPPER's. This one mutates the store that outlives the run and was open
+        # to any agent holding the server -- so a discovery agent could write
+        # "already tracked as PROJ-N" against its own finding and suppress it in
+        # every future run.
+        if not ctx.agent.policy.may_create_tickets:
+            return err(
+                f"{ctx.agent.name} may not record into the cross-run defect memory "
+                "(§8.1: TRIAGE files, and filing is what makes a defect worth "
+                "remembering). Emit your finding as an envelope."
+            )
         envelope = ctx.store.get_envelope(args["envelope_id"])
         if envelope is None:
             return err(f"No envelope '{args['envelope_id']}' in this run. Emit it first.")
@@ -332,8 +541,8 @@ def build_tools(ctx: ToolContext) -> list:
                 conn.execute(
                     "INSERT INTO defects (fingerprint, title, summary, domain, defect_class, "
                     "service, endpoint, ui_route, paths, ticket_key, occurrence_count, "
-                    "first_seen, last_seen, last_run_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?,?)",
+                    "first_seen, last_seen, last_run_id, target) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)",
                     (
                         fp,
                         envelope.title,
@@ -348,6 +557,7 @@ def build_tools(ctx: ToolContext) -> list:
                         now,
                         now,
                         ctx.store.run_id,
+                        _target(ctx),
                     ),
                 )
                 conn.commit()
@@ -458,6 +668,12 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def mark_resolved(args: dict[str, Any]) -> dict[str, Any]:
+        if not ctx.agent.policy.may_transition_tickets:
+            return err(
+                f"{ctx.agent.name} may not mark a defect resolved. A recurrence after "
+                "this is reported as a REGRESSION, so writing it wrongly suppresses "
+                "the highest-value signal this system has."
+            )
         fp = args["fingerprint"]
         ticket_key = args.get("ticket_key") or None
         now = _utcnow_iso()

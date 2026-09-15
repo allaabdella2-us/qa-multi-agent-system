@@ -152,6 +152,32 @@ def docker_bin() -> str | None:
 # --------------------------------------------------------------------------
 
 
+_ABSOLUTE_URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://|^//")
+
+
+def _is_absolute_url(value: str) -> bool:
+    return bool(_ABSOLUTE_URL_RE.match(value.strip()))
+
+
+def _http_call(
+    url: str, method: str, data: bytes | None, headers: dict[str, str], timeout: float
+) -> tuple[int | None, str, dict[str, str]]:
+    """One request, returning the status even for a 4xx/5xx.
+
+    An error status is the *answer* here, not a failure: "this endpoint returns
+    500 for an empty cart" is the finding. `urlopen` raises on those, so
+    `HTTPError` is caught and read rather than propagated.
+    """
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode(errors="replace"), dict(response.headers)
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode(errors="replace"), dict(exc.headers or {})
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        return None, str(exc), {}
+
+
 def _environment(ctx: ToolContext):
     """The target's environment block, or None when no profile is loaded."""
     profile = getattr(ctx.config, "profile", None)
@@ -394,8 +420,42 @@ def build_tools(ctx: ToolContext) -> list:
 
     compose_file = _compose_path(ctx)
 
-    def preflight(*, needs_docker: bool = True) -> dict[str, Any] | None:
-        """One gate for the two ways this server can be unusable."""
+    def preflight(
+        *, needs_docker: bool = True, needs_lifecycle: bool = False
+    ) -> dict[str, Any] | None:
+        """One gate for the ways this server can be unusable, or not permitted.
+
+        `needs_lifecycle` is the third way, and it was missing. The profile's
+        `environment.mode` is the load-bearing field of the whole target system
+        -- `none` means static reads only, `external` means "exercise it but
+        never reset it, someone else may be relying on it", `compose` means this
+        run owns the lifecycle -- and this server checked only whether a compose
+        file happened to exist and whether `docker` was on PATH. So against a
+        target declaring `external`, `reset` and `tear_down` would find a
+        compose file left lying in the repository and destroy somebody's shared
+        staging environment, having been told in the profile not to.
+
+        `tasks._environment_brief` tells the agent the rule in prose. This is
+        the rule.
+        """
+        if needs_lifecycle:
+            environment = getattr(getattr(ctx.config, "profile", None), "environment", None)
+            mode = getattr(environment, "mode", None)
+            if mode is not None and not getattr(environment, "is_managed", False):
+                return err(
+                    f"This target declares `environment.mode: {mode}`, so this system "
+                    "does not own the environment and may not create, reset or destroy "
+                    "it. "
+                    + (
+                        "There is no running instance to control at all -- work "
+                        "statically, from the code, the schema and the tests."
+                        if mode == "none"
+                        else "You may read it and exercise it. Someone else may be "
+                        "relying on this instance, and a reset has no undo. If the "
+                        "work genuinely needs a disposable environment, that is an "
+                        "escalation, not a call to make here."
+                    )
+                )
         if not compose_file.exists():
             return err(
                 f"No compose file at {compose_file}. This server drives the target app "
@@ -518,7 +578,7 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def spin_up(args: dict[str, Any]) -> dict[str, Any]:
-        gate = preflight()
+        gate = preflight(needs_lifecycle=True)
         if gate:
             return gate
 
@@ -597,7 +657,7 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def seed(args: dict[str, Any]) -> dict[str, Any]:
-        gate = preflight()
+        gate = preflight(needs_lifecycle=True)
         if gate:
             return gate
         return await run_seed(str(args["fixture"]))
@@ -609,7 +669,7 @@ def build_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {"fixture": {"type": "string", "description": "Override the fixture to re-apply. Default: whatever seed() last loaded."}}},
     )
     async def reset(args: dict[str, Any]) -> dict[str, Any]:
-        gate = preflight()
+        gate = preflight(needs_lifecycle=True)
         if gate:
             return gate
 
@@ -752,6 +812,100 @@ def build_tools(ctx: ToolContext) -> list:
         )
 
     @tool(
+        "http_request",
+        "Call an endpoint on the application under test and get back the real status, "
+        "headers and body. This is how a finding stops being a hypothesis.",
+        {
+            "type": "object",
+            "required": ["method", "path"],
+            "properties": {
+                "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]},
+                "path": {"type": "string", "description": "Path on the app, e.g. '/v1/orders?limit=5'. Not a full URL."},
+                "token": {"type": "string", "description": "Bearer token from impersonate(), to call as a role."},
+                "headers": {"type": "object", "description": "Extra request headers."},
+                "body": {"type": "object", "description": "JSON request body."},
+                "timeout_s": {"type": "number", "description": f"Default {LOGIN_TIMEOUT_S}s, capped."},
+            },
+        },
+    )
+    async def http_request(args: dict[str, Any]) -> dict[str, Any]:
+        """One HTTP call against the target, contained to the target's origin.
+
+        API.md, AUDITOR.md and LOAD.md all make observation the evidence bar --
+        "bring the environment up with `env_control`, call the endpoint, and
+        capture the actual request and response. A finding you have not observed
+        is a hypothesis, not a defect." None of those agents held a tool that
+        could issue an HTTP request. `WebFetch` is refused to every agent by the
+        guardrail, on the correct grounds that findings come from the code and
+        the running app rather than the web; the gap was that nothing let them
+        reach the running app either. So the highest evidence bar in the system
+        was one no agent could clear, and the honest response to the prompt was
+        to lower confidence on every finding.
+
+        Contained the same way `contract_diff._read_spec` is: a *path*, resolved
+        against the one origin this run is pointed at. An agent cannot name a
+        host, so this is not a network-research tool wearing a different name.
+        """
+        environment = _environment(ctx)
+        # `environment.mode: none` means there is no running instance, which is
+        # a supported and common state -- a target profile that says so must not
+        # have this tool quietly attempt a connection anyway.
+        if environment is not None and not getattr(environment, "is_reachable", False):
+            return err(
+                "This target declares `environment.mode: none`, so there is no running "
+                "instance to call. Work statically: read the code, the schema, the spec "
+                "and the tests. Say so plainly in any finding you could not execute -- a "
+                "defect reasoned to but not observed is a weaker claim and its confidence "
+                "should show that."
+            )
+
+        base = os.environ.get("QAAS_TARGET_BASE_URL") or getattr(environment, "api_url", None)
+        if not base:
+            return err(
+                "This target has no `environment.api_url`, so there is nothing to call. "
+                "Work statically and say so in the finding: a defect reasoned to but not "
+                "observed is a weaker claim and its confidence should show that."
+            )
+
+        path = str(args["path"])
+        if _is_absolute_url(path):
+            return err(
+                f"'{path}' is a URL. Pass a path -- this calls the application under "
+                "test and nothing else, and naming a host is how that stops being true."
+            )
+        url = base.rstrip("/") + ("/" + path.lstrip("/"))
+
+        payload = args.get("body")
+        data = json.dumps(payload).encode() if payload is not None else None
+        headers = {str(k): str(v) for k, v in (args.get("headers") or {}).items()}
+        if data is not None:
+            headers.setdefault("Content-Type", "application/json")
+        if args.get("token"):
+            headers["Authorization"] = f"Bearer {args['token']}"
+
+        timeout = max(1.0, min(float(args.get("timeout_s") or LOGIN_TIMEOUT_S), 60.0))
+        method = str(args["method"]).upper()
+        status, body, resp_headers = await asyncio.to_thread(
+            _http_call, url, method, data, headers, timeout
+        )
+        if status is None:
+            return err(f"{method} {url} failed: {body}")
+
+        ctx.store.log(
+            "env", agent=ctx.agent.name, action="http_request",
+            method=method, url=url, status=status,
+        )
+        return ok(
+            f"{method} {path} -> {status}\n{body[:4000]}",
+            status=status,
+            url=url,
+            method=method,
+            headers=resp_headers,
+            body=body[:20000],
+            truncated=len(body) > 20000,
+        )
+
+    @tool(
         "impersonate",
         "Get a real bearer token for a seeded user with the given role, by logging in against the "
         "running API. Use the token in an Authorization header exactly as a browser would.",
@@ -765,9 +919,21 @@ def build_tools(ctx: ToolContext) -> list:
         gate = preflight(needs_docker=False)
         if gate:
             return gate
-        role = str(args["role"]).lower()
+        # Case-blind on BOTH sides. The argument was lowercased and then looked
+        # up in a dict whose keys come straight from `profile.auth.roles` with
+        # no normalisation, so a profile declaring `Admin` could never be
+        # impersonated by any spelling at all -- `"Admin".lower()` is not a key
+        # and `"Admin"` was never tried.
+        requested = str(args["role"]).strip()
         roles = _roles(ctx)
-        entry = roles.get(role)
+        entry = roles.get(requested)
+        if entry is None:
+            folded = {name.lower(): name for name in roles}
+            actual = folded.get(requested.lower())
+            entry = roles.get(actual) if actual else None
+            if actual:
+                requested = actual
+        role = requested
         if entry is None:
             return err(
                 f"No role '{role}' for this target. Declared roles: "
@@ -783,13 +949,28 @@ def build_tools(ctx: ToolContext) -> list:
                 "Export it and try again -- credentials are never read from the profile itself."
             )
 
-        compose = _load_compose(compose_file)
-        urls = _service_urls(compose)
-        base = os.environ.get("QAAS_TARGET_BASE_URL") or next(
-            (u for n, u in urls.items() if u.startswith("http") and n != "web"), None
-        )
-        if base is None:
-            return err("No HTTP service with a published port in the compose file; nowhere to log in.")
+        # The profile is the authority; compose is the fallback. This read
+        # `QAAS_TARGET_BASE_URL or <the first compose service that is not named
+        # "web">` -- and `n != "web"` is a fact about the bundled demo's service
+        # naming sitting in the one file whose whole job is to be
+        # target-agnostic. Any application whose API service happens to be
+        # called "web" was unreachable; any whose frontend is called something
+        # else had its login POSTed at the frontend.
+        environment = _environment(ctx)
+        base = os.environ.get("QAAS_TARGET_BASE_URL") or getattr(environment, "api_url", None)
+        if not base:
+            compose = _load_compose(compose_file)
+            urls = _service_urls(compose)
+            web = getattr(environment, "web_url", None)
+            base = next(
+                (u for u in urls.values() if u.startswith("http") and u != web), None
+            )
+        if not base:
+            return err(
+                "No API base URL for this target: set `environment.api_url` in the "
+                "target profile, export QAAS_TARGET_BASE_URL, or publish an HTTP port "
+                "in the compose file. There is nowhere to log in."
+            )
 
         # Field names come from the profile: not every API calls them
         # "email" and "password".
@@ -883,7 +1064,7 @@ def build_tools(ctx: ToolContext) -> list:
         {"type": "object", "properties": {}},
     )
     async def tear_down(args: dict[str, Any]) -> dict[str, Any]:
-        gate = preflight()
+        gate = preflight(needs_lifecycle=True)
         if gate:
             return gate
         proc = await _exec(compose_argv("down", "-v"), SHORT_TIMEOUT_S * 4, cwd=ctx.target_root)
@@ -897,7 +1078,10 @@ def build_tools(ctx: ToolContext) -> list:
         ctx.store.log("env", agent=ctx.agent.name, action="tear_down")
         return ok("Environment torn down and volumes removed.")
 
-    return [spin_up, seed, reset, set_flag, get_flags, set_clock, impersonate, status, tear_down]
+    return [
+        spin_up, seed, reset, set_flag, get_flags, set_clock,
+        http_request, impersonate, status, tear_down,
+    ]
 
 
 def _rows_affected(sql: str, psql_output: str) -> dict[str, int]:

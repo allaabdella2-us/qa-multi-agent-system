@@ -3,7 +3,7 @@
 # the CLI are both `qaas`.
 name = "qaas-python"
 version = "0.0.2"
-description = "Autonomous Quality Assurance: a harness that lets a fleet of governed agents run the entire QA lifecycle — find, file, fix, verify"
+description = "A harness that runs fifteen governed Claude Code sessions over your repo: find, reproduce, file, fix, verify"
 dynamic = ["readme"]
 license = "MIT"
 license-files = ["LICENSE"]
@@ -93,6 +93,10 @@ include = [
     "src/", "config/", "target-app/", "tests/",
     "README.md", "LICENSE", "ARCHITECTURE.md", "CLAUDE.md", "BUILD_PLAN.md",
     "CHANGELOG.md",
+    # README and CLAUDE.md both link these, and the sdist shipped neither -- so
+    # the one distribution that carries the docs carried dangling links to them.
+    "MANUAL.md", "PROVIDERS_PLAN.md", "qa-agent-system-architecture.md",
+    "docs/*.md",
     "pyproject.toml",
 ]
 

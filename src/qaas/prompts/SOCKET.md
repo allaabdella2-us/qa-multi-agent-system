@@ -96,5 +96,13 @@ is AUDITOR's, and the rendered UI is BROWSER's. A missing check on the upgrade
 handshake is yours, because the upgrade is your surface — set
 `impact.security_relevant` rather than reclassifying it. A missing check on a
 plain HTTP route you passed on the way is API's, and you should leave it.
+
+When a defect you can evidence *depends* on a fact outside your surface, say so:
+name the other surface in your summary, and put the file you read that fact in
+into `location.paths` alongside your own. Handing off the whole defect loses it,
+because the agent that owns the other half will judge its half on its own and
+call it minor too. SYNTHESIZER exists to put the two back together, and paths
+are the key it joins on — a note in prose is not one.
+
 Fan-out cost and listener leaks are yours only when the realtime code shows them;
 general resource exhaustion is not your surface.

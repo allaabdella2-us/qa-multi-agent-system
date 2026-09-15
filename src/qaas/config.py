@@ -22,7 +22,7 @@ from qaas.target import TargetProfile, load_target
 # selection accuracy falls off past roughly 5-7. Enforced, not just documented.
 MAX_MCP_SERVERS_PER_AGENT = 6
 
-Layer = Literal["control", "discovery", "triage", "remediation", "reporting"]
+Layer = Literal["control", "discovery", "synthesis", "triage", "remediation", "reporting"]
 
 
 class Policy(BaseModel):
@@ -177,6 +177,16 @@ class RunMode(BaseModel):
     max_concurrency: int = 3
     files_tickets: bool = True
 
+    #: How much of the clock the finding phases may NOT have, so that filing and
+    #: reporting still can. `BudgetExceeded` unwinds all the way to `run()`, so a
+    #: run that ran out of time during discovery or reproduce skipped file,
+    #: verify and report entirely -- the envelopes sat on disk, no ticket existed,
+    #: no report existed, and whoever scheduled it saw a run that cost money and
+    #: produced nothing they could act on. `pr-check` is the likely victim at 900
+    #: seconds. The reserve converts work already paid for into tickets instead of
+    #: discarding it; the run still stops early and still escalates.
+    reserve_fraction: float = 0.15
+
 
 class SystemConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -277,6 +287,61 @@ VCS_ENV = "QAAS_VCS"
 TARGET_ENV = "QAAS_TARGET"
 
 
+#: What `overrides.yaml` may change on an agent. Tuning, never permission.
+#: Anything touching the §8.1 write-permission matrix is absent on purpose:
+#: `policy`, `mcp_servers`, `builtin_tools`, `skills` and `must_call` are what
+#: bound an agent, and a partial layer able to widen them would be a quieter
+#: second door onto the rules `guardrails.py` exists to enforce.
+TUNABLE_AGENT_FIELDS = frozenset({
+    "model", "effort", "max_turns", "max_budget_usd", "enabled",
+})
+
+#: What it may change globally. Thresholds are governors, so they are the other
+#: thing worth tuning without editing a committed file.
+TUNABLE_SECTIONS = frozenset({"agents", "thresholds"})
+
+#: Where the dashboard and `qaas config set` write. One file, so "what did I
+#: change" is one `cat`, and reverting is one `rm`.
+OVERRIDES_FILE = "overrides.yaml"
+
+
+def _apply_overrides(raw: dict[str, Any], dirs: Sequence[Path]) -> None:
+    """Merge the nearest `overrides.yaml` into an already-layered config.
+
+    Nearest wins and stops: unlike agents, these are not unioned across layers.
+    Two override files disagreeing about FIXER's model is a state nobody can
+    read back, and the file exists precisely to be the one place a local change
+    lives.
+
+    An unknown field is dropped rather than raising. The file is written by a
+    UI and edited by hand afterwards, and a typo in it must not take down every
+    command that loads a config -- `qaas validate` is where that gets reported.
+    """
+    path = next((d / OVERRIDES_FILE for d in dirs if (d / OVERRIDES_FILE).is_file()), None)
+    if path is None:
+        return
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return
+    if not isinstance(data, dict):
+        return
+
+    for agent_name, fields in (data.get("agents") or {}).items():
+        spec = raw["agents"].get(agent_name)
+        if not isinstance(spec, dict) or not isinstance(fields, dict):
+            continue
+        for field, value in fields.items():
+            if field in TUNABLE_AGENT_FIELDS:
+                spec[field] = value
+
+    thresholds = data.get("thresholds")
+    if isinstance(thresholds, dict):
+        current = dict(raw.get("thresholds") or {})
+        current.update(thresholds)
+        raw["thresholds"] = current
+
+
 def load_config(
     config_dir: Path | str | None = None,
     *,
@@ -285,15 +350,23 @@ def load_config(
 ) -> SystemConfig:
     """Read system.yaml plus every agents/*.yaml, layered across search paths.
 
-    Passing `config_dir` positionally means "this directory and nothing else",
-    which is exactly the old behaviour and what every test does. Passing
-    `search` layers several directories: `system.yaml` is taken whole from the
-    first that has one, while `agents/*.yaml` and `targets/*.yaml` are unioned
-    by filename with earlier directories shadowing later ones -- so a user can
-    override one agent without forking all eight and freezing on today's roster.
+    Passing `config_dir` positionally puts that directory at the **head of the
+    layered search**, which is what `paths.py` has always documented --
+    "1. explicit --config / QAAS_CONFIG_DIR, 2. project, 3. packaged" -- and
+    what `QAAS_CONFIG_DIR` already did. It used to mean "this directory and
+    nothing else", so the flag and the environment variable, documented as the
+    same precedence step, behaved differently: `--config .qaas/config` pointed
+    at a directory holding one overridden agent and hid the other fourteen, and
+    `--config <packaged>` could not see the project's own `targets/`.
 
-    With neither argument, the workspace resolver decides (an explicit
-    --config, then the project, then what shipped in the wheel).
+    Passing `search` gives the layer list verbatim, for callers that have
+    already resolved it (and for tests that want exactly one directory).
+    `system.yaml` is taken whole from the first layer that has one, while
+    `agents/*.yaml` and `targets/*.yaml` are unioned by filename with earlier
+    directories shadowing later ones -- so a user can override one agent without
+    forking the whole roster and freezing on today's version of it.
+
+    With neither argument, the workspace resolver decides.
 
     `target` beats everything -- system.yaml, QAAS_TARGET, the single-profile
     guess. It is what `qaas run --target X` and `qaas run --repo <url>` mean:
@@ -302,7 +375,22 @@ def load_config(
     before the override the operator had just typed was ever consulted.
     """
     if config_dir is not None:
-        dirs: list[Path] = [Path(config_dir)]
+        from qaas.paths import Workspace
+
+        workspace = Workspace.resolve(config=config_dir)
+        if workspace.missing_explicit_config:
+            # A directory that does not exist is a typo, not a layer to skip.
+            # `_existing` drops it silently, so `--config /wrogn/path` quietly
+            # discarded the highest-precedence layer and ran on the packaged
+            # defaults -- a different configuration than the one asked for,
+            # reported as success. An *empty* directory is a different thing and
+            # legitimately layers: that is how a user with one overridden agent
+            # and no `system.yaml` of their own is meant to work.
+            raise FileNotFoundError(
+                f"--config names {workspace.missing_explicit_config}, which is not a "
+                "directory. Nothing was read from it."
+            )
+        dirs = list(workspace.config_dirs)
     elif search is not None:
         dirs = [Path(d) for d in search]
     else:
@@ -362,6 +450,22 @@ def load_config(
 
     raw["agents"] = agents
 
+    # `overrides.yaml` is a *partial* layer, and the only one.
+    #
+    # Every other layer replaces whole: an `agents/fixer.yaml` in a nearer
+    # directory shadows the packaged file entirely, which is right for someone
+    # forking an agent and wrong for someone who wants FIXER on a different
+    # model. Forking the file to change one line freezes that agent's policy,
+    # prompt and tool list on the day it was copied, so a later fix to a
+    # `forbidden_paths` pattern never reaches them.
+    #
+    # So this merges, and it is deliberately narrow: `TUNABLE_AGENT_FIELDS`
+    # holds the model and the budget knobs and nothing else. A policy is not
+    # tunable from here -- the write-permission matrix is the thing the
+    # guardrails enforce, and a partial layer that could widen `write_paths`
+    # would be a second, quieter way to edit them.
+    _apply_overrides(raw, dirs)
+
     config = SystemConfig.model_validate(raw)
 
     # Resolve the target profile if one is named and findable.
@@ -389,13 +493,26 @@ def load_config(
     if not chosen and len(profiles) == 1:
         chosen = next(iter(profiles))
 
-    if chosen and profiles:
+    # `and profiles` used to guard this, so "named but absent stays fatal" held
+    # only when at least one profile existed *somewhere*. With none -- which is
+    # every fresh `pip install`, since the packaged `defaults/config/` ships no
+    # `targets/` at all -- a target named by `--target`, `QAAS_TARGET` or
+    # `system.yaml` was silently ignored and `target_root()` fell back to the
+    # working directory. The run then pointed every write-path sandbox, the test
+    # runner's cwd and the SDK subprocess at whatever directory the operator
+    # happened to be standing in, and said nothing.
+    if chosen:
         if chosen not in profiles:
             # Named but absent stays fatal: running the wrong application is
             # worse than not running. Listed from the merged view, so the
             # suggestion names every profile the user actually has.
+            available = (
+                f"Available: {', '.join(sorted(profiles))}. "
+                if profiles
+                else "No target profiles are visible on the config path at all. "
+            )
             raise FileNotFoundError(
-                f"no target profile '{chosen}'. Available: {', '.join(sorted(profiles))}. "
+                f"no target profile '{chosen}'. {available}"
                 "Create one with `qaas init <path-to-repo>`."
             )
         profile = load_target(chosen, profiles[chosen].parent)

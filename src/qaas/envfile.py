@@ -19,6 +19,7 @@ from becoming a second configuration system:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 #: Where to look, in order. The state directory first, because `.qaas/` is
@@ -54,7 +55,18 @@ def parse_env(text: str) -> dict[str, str]:
             continue
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            # Quoted: everything inside is the value, `#` included. A token
+            # containing a hash is the reason to quote it in the first place.
             value = value[1:-1]
+        else:
+            # Unquoted: a trailing `# ...` is a comment, not part of the value.
+            # Whole-line comments were stripped and this was not, so
+            # `JIRA_PROJECT_KEY=KAN  # the kanban board` became the project key
+            # `"KAN  # the kanban board"` -- a credential silently corrupted by
+            # the annotation someone added to explain it. Anchored on whitespace
+            # before the hash so a value that is *only* hashes (a fragment, a
+            # colour) survives.
+            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
         values[key] = value
     return values
 
@@ -67,11 +79,29 @@ def load_env_file(start: Path | str | None = None) -> tuple[Path | None, list[st
     as not set by the file, because that is the fact an operator debugging a
     wrong project key needs.
     """
+    def _project_base() -> Path:
+        """The project root, or the cwd when there is no project.
+
+        Imported here rather than at module scope: `envfile` is loaded by the
+        CLI's bootstrap before anything else, and a module-level import of
+        `paths` would make the credential loader depend on the resource
+        resolver. They are independent and should stay so.
+        """
+        from qaas.paths import project_root
+
+        return project_root()
+
     override = os.environ.get(ENV_FILE_VAR)
     if override is not None and not override.strip():
         return None, []
 
-    base = Path(start).expanduser() if start else Path.cwd()
+    # The *project*, not the working directory. Every other resolution in the
+    # system walks up to find the project root -- `find_project` says so in its
+    # own docstring, "running `qaas` from a subdirectory must not change what it
+    # reads" -- and this one did not, so `cd api && qaas run` found no `.env`,
+    # loaded no credentials, and failed on a missing variable several steps
+    # later with nothing pointing at the real cause.
+    base = Path(start).expanduser() if start else _project_base()
     candidates = (Path(override).expanduser(),) if override else tuple(base / n for n in CANDIDATES)
     for path in candidates:
         if not path.is_file():

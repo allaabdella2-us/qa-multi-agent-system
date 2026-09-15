@@ -103,7 +103,9 @@ def _remote_refusal(adapter: VcsAdapter, capability: str) -> str | None:
     return None
 
 
-def _path_refusal(ctx: ToolContext, raw: str) -> tuple[Path | None, str | None]:
+def _path_refusal(
+    ctx: ToolContext, raw: str, *, count_against_budget: bool = True
+) -> tuple[Path | None, str | None]:
     """Resolve a repo-relative path and say why it is off limits, if it is.
 
     Resolution happens before the containment check so `..`, an absolute path
@@ -134,7 +136,7 @@ def _path_refusal(ctx: ToolContext, raw: str) -> tuple[Path | None, str | None]:
             f"({root}). Paths must stay inside the checkout."
         )
 
-    decision = Guardrail(ctx)._check_path(raw)
+    decision = Guardrail(ctx)._check_path(raw, count_against_budget=count_against_budget)
     if not decision.allowed:
         return None, decision.reason
     return resolved, None
@@ -285,7 +287,13 @@ def build_tools(ctx: ToolContext) -> list:
         requested = args.get("paths") or ctx.agent.policy.write_paths
         staged: list[str] = []
         for raw in requested:
-            resolved, path_refusal = _path_refusal(ctx, raw)
+            # Read-only: staging a path is not changing it. The §8.2 diff budget
+            # counts *files an agent has written*, and `commit` is handed the
+            # agent's own `write_paths` as pathspecs -- so committing `api/app`
+            # and `web/src` charged two of FIXER's five before a line had
+            # changed. The files themselves were already counted when they were
+            # written.
+            resolved, path_refusal = _path_refusal(ctx, raw, count_against_budget=False)
             if path_refusal:
                 return _deny(ctx, "commit", path_refusal)
             assert resolved is not None

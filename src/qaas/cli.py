@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from qaas import trace as trace_mod
-from qaas.paths import Workspace, package_root, packaged_prompts, project_root
+from qaas.paths import STATE_DIRNAME, Workspace, package_root, packaged_prompts, project_root
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config, target_files
 from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
 from qaas.ui.serve import DEFAULT_PORT
@@ -91,6 +92,21 @@ def _system_yaml(config_dir: Path | str | None) -> Path:
     return found or (ws.state_root / "config" / "system.yaml")
 
 
+def _load_config_or_exit(config_dir: Path | str | None, target: str | None):
+    """`load_config`, with a missing target reported rather than raised.
+
+    `load_config` raises a bare `FileNotFoundError` for a target it cannot
+    resolve, and `doctor`, `run` and `board` all call it *before* they reach
+    `_load_target` -- whose friendly `typer.BadParameter` was therefore
+    unreachable from any of them. A mistyped `--target` printed a traceback.
+    """
+    try:
+        return load_config(config_dir, target=target)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+
+
 def _writable_targets_dir(config_dir: Path | str | None) -> Path:
     """Where `qaas init` and `qaas run --repo` write a generated profile.
 
@@ -154,6 +170,25 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", text.lower()).strip("-")[:40] or "target"
 
 
+def _redact_url(url: str) -> str:
+    """A URL with any embedded credential removed.
+
+    `https://user:ghp_xxx@github.com/org/repo` is a perfectly ordinary thing to
+    paste, and this printed it to stdout and then wrote it verbatim into the
+    generated target profile -- a file the tool tells people to commit. The
+    credential still reaches `git clone`, which gets the original argv; it just
+    stops being echoed and stored.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.netloc or "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urllib.parse.urlunsplit(parts._replace(netloc=host))
+
+
 def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str | None]:
     """A repo argument -> (local directory, origin url or None), cloning a URL.
 
@@ -176,7 +211,7 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
         return root, repo
 
     root.parent.mkdir(parents=True, exist_ok=True)
-    console.print(f"cloning {repo} -> {root}")
+    console.print(f"cloning {_redact_url(repo)} -> {root}")
     try:
         result = subprocess.run(
             ["git", "clone", "--depth", "50", repo, str(root)],
@@ -192,9 +227,11 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
         raise typer.Exit(1) from None
     if result.returncode != 0:
         shutil.rmtree(root, ignore_errors=True)
-        console.print(f"[red]clone failed:[/red] {result.stderr.strip()[:400]}")
+        console.print(f"[red]clone failed:[/red] {_redact_url(result.stderr.strip()[:400])}")
         raise typer.Exit(1)
-    return root, repo
+    # The redacted form is what gets stored: `repo_url` ends up on the profile,
+    # which is a committed file.
+    return root, _redact_url(repo)
 
 
 def _default_branch(root: Path) -> str:
@@ -273,7 +310,20 @@ def _provision_target(
     existing = _target_files(config_dir).get(target_name)
     if existing is not None and not force:
         if reuse_existing:
-            return load_target(target_name, existing.parent), target_name, existing, [], False
+            stored = load_target(target_name, existing.parent)
+            # The name is the repository's *basename*, so two different
+            # checkouts called `api` collide -- and `--repo` reused the stored
+            # profile without ever comparing what it pointed at. The run then
+            # read one repository while every write-path sandbox, the test
+            # runner's cwd and the vcs sandbox were anchored on another.
+            if stored.root_path().resolve() != root.resolve():
+                console.print(
+                    f"[red]target '{target_name}' already points at {stored.root_path()}[/red], "
+                    f"not at {root}. Two repositories share a basename. Pass --name to "
+                    "give this one its own profile, or --force to repoint the existing one."
+                )
+                raise typer.Exit(1)
+            return stored, target_name, existing, [], False
         console.print(f"[red]{existing} already exists.[/red] Use --force to overwrite.")
         raise typer.Exit(1)
 
@@ -364,8 +414,15 @@ def init(
     # `.qaas/` now holds a user's committed config next to their disposable run
     # state, so the obvious `.gitignore` line for `.qaas/` would drop the
     # configuration too. Spell out which half is which.
-    gitignore = project_config.parent / ".gitignore"
-    if not gitignore.exists():
+    # Derived from the *state root*, not from wherever `--config` happened to
+    # point. `project_config.parent` is `.qaas` for the default path and, with
+    # `--config some/dir`, is `some/` -- so `qaas init --config` dropped a
+    # `.gitignore` containing `runs/`, `artifacts/` and `generated/` into a real
+    # source directory, which then ignored any directory of those names the
+    # project already had.
+    state_root = Workspace.resolve().state_root
+    gitignore = state_root / ".gitignore"
+    if state_root.name == STATE_DIRNAME and state_root.is_dir() and not gitignore.exists():
         gitignore.write_text(
             "# Run state: regenerated every run, never worth committing.\n"
             "runs/\ntickets/\ngenerated/\nsystem-map/\nmemory.db\nartifacts/\n"
@@ -433,7 +490,7 @@ def doctor(
     target: str = typer.Option(None, "--target", "-t", help="Check this profile instead of the active one."),
 ) -> None:
     """Check whether a target is ready to run against."""
-    cfg = load_config(config_dir, target=target)
+    cfg = _load_config_or_exit(config_dir, target)
     profile = _load_target(target, config_dir) if target else cfg.profile
     if profile is None:
         console.print("[red]no target profile loaded[/red]")
@@ -602,6 +659,26 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
             f"[dim]{rm.max_wall_clock_s}s[/dim]{filing}"
         )
 
+    # Each agent runs as a Claude Code subprocess, so `validate` -- the command
+    # whose whole job is "tell me what is wrong before I spend anything" --
+    # should say when there is no binary to spawn.
+    #
+    # Mirror the SDK's own resolution order and not just `shutil.which`. The
+    # wheel *bundles* a `claude` executable and the SDK prefers it over PATH
+    # (`subprocess_cli._find_cli`), so on a normal `pip install` there is
+    # nothing to install separately. Checking PATH alone reported a problem to
+    # every user whose only copy was the bundled one -- which is most of them.
+    where = _claude_cli()
+    if where is None:
+        problems.append(
+            "no Claude Code binary to run. Normally the claude-agent-sdk wheel "
+            "bundles one; this install has neither that nor `claude` on PATH, "
+            "which usually means a platform with no bundled build. Install the "
+            "CLI: https://claude.com/claude-code"
+        )
+    elif shutil.which("claude") and where != shutil.which("claude"):
+        notes.append(f"claude: bundled with the SDK ({where})")
+
     if notes:
         console.print("\n[dim]notes:[/dim]")
         for note in notes:
@@ -613,6 +690,27 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
             console.print(f"  - {p}")
         raise typer.Exit(1)
     console.print("\n[green]config ok[/green]")
+
+
+def _claude_cli() -> str | None:
+    """The binary the SDK will actually spawn, or None.
+
+    Mirrors `claude_agent_sdk`'s own order -- **bundled first, then PATH** --
+    rather than guessing. The wheel ships a `claude` executable for common
+    platforms, so `pip install qaas-python` is usually enough on its own and a
+    PATH-only check calls a working install broken.
+    """
+    try:
+        from claude_agent_sdk._internal.transport import subprocess_cli
+
+        bundled = (
+            Path(subprocess_cli.__file__).parent.parent.parent / "_bundled" / "claude"
+        )
+        if bundled.is_file():
+            return str(bundled)
+    except Exception:
+        pass
+    return shutil.which("claude")
 
 
 def _describe_writes(spec) -> str:
@@ -963,7 +1061,9 @@ def _follow(store, *, agent: str | None, kinds, as_json: bool, quiet: bool = Fal
     wanted = set(kinds) if kinds else None
     name = agent.upper() if agent else None
     console.print(f"[dim]following {store.run_id} — ctrl-c to stop[/dim]")
-    hidden = trace_mod.QUIET_KINDS if quiet else frozenset()
+    # The same subtraction `trace.select` makes, so the streaming view and the
+    # replayed one cannot disagree about what `--quiet --kind tool_call` means.
+    hidden = (trace_mod.QUIET_KINDS - (wanted or frozenset())) if quiet else frozenset()
     seen = 0
     try:
         for entry in trace_mod.tail(store):
@@ -1154,7 +1254,81 @@ def _dashboard_kwargs(config_dir: Path | None) -> dict:
         "specs": dict(cfg.agents),
         "min_confidence": cfg.thresholds.min_confidence_to_file,
         "ledger_path": ledger if ledger and ledger.exists() else None,
+        # The whole config, for the page's configuration half. The specs alone
+        # cannot answer "which tracker", "which run modes" or "what does this
+        # threshold cost".
+        "cfg": cfg,
+        # Where an override would be written and validated against. Nearest
+        # first, exactly as `load_config` searches.
+        "config_dirs": list(Workspace.resolve().config_dirs),
     }
+
+
+#: How many of this repo's tickets `--from-board` reads before matching status.
+#: Generous because the filter is applied locally, bounded because a shared
+#: project can hold thousands and this runs before every board-driven cycle.
+BOARD_SCAN_LIMIT = 200
+
+
+def _tickets_in_status(cfg, status: str, root: Path) -> set[str]:
+    """Ticket keys sitting in `status` on this repo's board.
+
+    The one place the board drives the system rather than recording it. A person
+    drags a card into the status they have chosen as the trigger, and the next
+    run works on exactly those tickets -- no run id to look up, no ticket key to
+    copy.
+
+    It is a pull, not a subscription: put this on a cron or a timer and "drag a
+    card and an agent picks it up" is literally true, without sixteen agents
+    polling a rate-limited API for the rest of the run. Everything after this
+    point is scheduled by ROUTER out of the ledger exactly as before -- the
+    board chooses the *work*, never the order it happens in.
+
+    The repo label is what scopes it. Without that, a shared project would hand
+    one repository's run the tickets of every other repository on the board.
+    """
+    from qaas.adapters.tracker import TrackerError, build_tracker, repo_label
+
+    label = repo_label(cfg.target)
+    try:
+        # Constructed *inside* the try. `build_tracker` validates its
+        # environment at construction and raises `TrackerConfigError`, which is a
+        # `TrackerError` -- so with Jira half-configured, the one line that was
+        # above this block turned a missing `JIRA_BASE_URL` into a traceback
+        # rather than the tidy "the board could not be read" below it.
+        tracker = build_tracker(str(cfg.tracker), root)
+        # Scoped by label and matched on status *here*, rather than asking the
+        # adapter to filter by status too. A status name is the project's own
+        # vocabulary -- "Ready for Fix" is whatever casing someone typed when
+        # they made the column -- and both backends match it exactly, so
+        # `--from-board "ready for fix"` silently found nothing. Comparing
+        # case-blind locally is the only way the flag behaves the way the person
+        # who dragged the card expects.
+        issues = tracker.search(label=label, limit=BOARD_SCAN_LIMIT)
+    except TrackerError as exc:
+        console.print(f"[red]the board could not be read:[/red] {exc}")
+        raise typer.Exit(1) from None
+    wanted = status.strip().lower()
+    return {i.key for i in issues if i.status.strip().lower() == wanted}
+
+
+def _run_holding_tickets(root: Path, tickets: set[str]) -> str | None:
+    """The newest run whose envelopes carry one of these ticket keys.
+
+    Newest first and first hit wins: a defect refiled across several runs is the
+    case this exists for, and the most recent run is the one whose evidence and
+    failing test match the tree the fix will be written against.
+    """
+    from qaas.store import RunStore, list_runs
+
+    for candidate in list_runs(root):
+        store = RunStore(candidate, root=root, create=False)
+        try:
+            if any(e.jira.key in tickets for e in store.envelopes() if e.jira.key):
+                return candidate
+        except Exception:
+            continue          # a half-written run is not a reason to stop looking
+    return None
 
 
 @app.command()
@@ -1168,6 +1342,14 @@ def run(
     clone_to: Path = typer.Option(None, "--clone-to", help="Where to clone, for a git URL. Default: <state>/targets/."),
     run_id: str = typer.Option(None, "--run-id", help="Continue an existing run rather than starting one."),
     ticket: list[str] = typer.Option(None, "--ticket", help="Restrict a fix-cycle to these tickets."),
+    from_board: str = typer.Option(
+        None,
+        "--from-board",
+        metavar="STATUS",
+        help="Take the tickets from the board: every issue carrying this repo's "
+             "label that currently sits in STATUS. Drag a card there and the next "
+             "run picks it up.",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Render the plan without calling the API."),
     dashboard_: bool = typer.Option(
         False, "--dashboard", help="Serve the live dashboard alongside the run."
@@ -1211,7 +1393,7 @@ def run(
             else f"[dim]reusing the existing profile at {path} (--force to regenerate)[/dim]"
         )
 
-    cfg = load_config(config_dir, target=target)
+    cfg = _load_config_or_exit(config_dir, target)
     if target:
         # The profile object we already hold, rather than a second lookup by
         # name: `_provision_target` may have written into the writable config
@@ -1237,11 +1419,25 @@ def run(
         console.print(f"[dim]target: {cfg.target} ({cfg.profile.environment.mode})[/dim]")
     if only:
         wanted = {a.upper() for a in only}
+        # Checked against the MODE, not the whole roster. Against the roster,
+        # `--only FIXER` on `pr-check` passed validation, filtered the mode's
+        # agent list down to nothing, ran zero agents and exited 0 -- which reads
+        # as "the run found nothing" rather than "you asked for an agent this
+        # mode does not have".
+        mode_cfg = cfg.run_modes[mode]
+        in_mode = {a.upper() for a in mode_cfg.agents}
         unknown = wanted - set(cfg.agents)
         if unknown:
             console.print(f"[red]unknown agents: {', '.join(sorted(unknown))}[/red]")
             raise typer.Exit(1)
-        mode_cfg = cfg.run_modes[mode]
+        elsewhere = wanted - in_mode
+        if elsewhere:
+            console.print(
+                f"[red]{', '.join(sorted(elsewhere))} "
+                f"{'is' if len(elsewhere) == 1 else 'are'} not in mode '{mode}'.[/red] "
+                f"It has: {', '.join(sorted(in_mode))}."
+            )
+            raise typer.Exit(1)
         cfg = cfg.model_copy(
             update={
                 "run_modes": {
@@ -1258,6 +1454,41 @@ def run(
         f"[bold]{mode}[/bold] — {len(specs)} agents, "
         f"concurrency {rm.max_concurrency}"
     )
+
+    # Resolved before the dry-run return on purpose: reading the board is free
+    # and read-only, and "what would this pick up?" is precisely the question
+    # `--dry-run` exists to answer. Rendering a plan that silently omits which
+    # tickets it would work on is a rehearsal of a different run.
+    tickets = list(ticket) if ticket else None
+    if from_board:
+        from qaas.adapters.tracker import repo_label
+
+        found = _tickets_in_status(cfg, from_board, root)
+        label = repo_label(cfg.target) or "this repo's label"
+        if not found:
+            console.print(
+                f"[yellow]no tickets in '{from_board}'[/yellow] carrying {label}"
+                " — nothing to do"
+            )
+            raise typer.Exit(0)
+        console.print(
+            f"[dim]from the board[/dim] {from_board} ({label}): "
+            f"{', '.join(sorted(found))}"
+        )
+        tickets = sorted(set(tickets or []) | found)
+        # The fix cycle reads each finding, its evidence and its failing test
+        # out of the run that produced it, so "which run" is not optional -- it
+        # is just something a person dragging a card should not have to know.
+        if run_id is None:
+            run_id = _run_holding_tickets(root, found)
+            if run_id is None:
+                console.print(
+                    "[red]those tickets name no envelope in any run under "
+                    f"{root}[/red]. The fix cycle needs the run that found the "
+                    "defect; this board may be pointed at a different checkout."
+                )
+                raise typer.Exit(1)
+            console.print(f"[dim]working from[/dim] {run_id}")
 
     if dry_run:
         # The same search path the run itself would use, so `prompt: N chars`
@@ -1289,7 +1520,22 @@ def run(
         elif kind == "stopped":
             console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
 
-    router = Router(cfg, root=root, on_event=on_event, tickets=list(ticket) if ticket else None)
+    if run_id is not None:
+        # `--run-id` means *resume*, and `RunStore` creates by default -- so a
+        # typo silently started a brand new empty run under the mistyped id.
+        # Worse than a wasted run: the budget carry-forward reads the *existing*
+        # ledger to decide what has already been spent, so the resumed cap
+        # started at zero and the mode's budget applied twice.
+        resumed = RunStore(run_id, root, create=False)
+        if not resumed.ledger_path.exists():
+            known = list_runs(root)[:5]
+            console.print(
+                f"[red]no run '{run_id}' under {root}.[/red] "
+                + (f"Recent: {', '.join(known)}" if known else "There are no runs here.")
+            )
+            raise typer.Exit(1)
+
+    router = Router(cfg, root=root, on_event=on_event, tickets=tickets)
     report = asyncio.run(router.run(mode, run_id=run_id))
 
     console.print()
@@ -1347,14 +1593,18 @@ def score(
         run_id = ids[0]
 
     store = RunStore(run_id, root, create=False)
+    envelopes = store.envelopes()
     card = score_run(
-        store.envelopes(),
+        envelopes,
         GoldenLedger.load(ledger_path),
         phase=phase,
         domains=set(domains) if domains else None,
         cost_usd=store.total_cost_usd(),
     )
     s = card.summary()
+    per_agent = card.by_agent(envelopes)
+    _persist_score(root, run_id, s, per_agent)
+    _remember_false_positives(root, cfg_target(config_dir), run_id, card, envelopes)
 
     console.print(f"[bold]{run_id}[/bold]")
     table = Table(header_style="bold")
@@ -1368,6 +1618,26 @@ def score(
     table.add_row("severity agreement", f"{s['severity_agreement']:.0%}")
     console.print(table)
 
+    if per_agent:
+        console.print("\n[bold]by agent[/bold]  [dim]which agent to tune, not just whether to[/dim]")
+        agents = Table(header_style="bold")
+        agents.add_column("agent")
+        agents.add_column("found", justify="right")
+        agents.add_column("false pos", justify="right")
+        agents.add_column("dupes", justify="right")
+        agents.add_column("precision", justify="right")
+        agents.add_column("sev agree", justify="right")
+        for name, r in per_agent.items():
+            agents.add_row(
+                name,
+                str(r["matched"]),
+                str(r["false_positive"]),
+                str(r["duplicate"]),
+                "—" if r["precision"] is None else f"{r['precision']:.0%}",
+                "—" if r["severity_agreement"] is None else f"{r['severity_agreement']:.0%}",
+            )
+        console.print(agents)
+
     if card.matches:
         console.print("\n[bold]found[/bold]")
         for m in card.matches:
@@ -1379,6 +1649,82 @@ def score(
         console.print("\n[red]reported deliberately-correct behaviour as a defect[/red]")
         for env_id, planted in card.regressions_on_planted:
             console.print(f"  {planted}  [dim]({env_id})[/dim]")
+
+
+def cfg_target(config_dir: Path | None) -> str:
+    """The active target's name, for partitioning memory. Never fatal."""
+    try:
+        return str(load_config(config_dir).target or "")
+    except Exception:  # noqa: BLE001 — scoring must not fail on a config problem
+        return ""
+
+
+def _remember_false_positives(
+    root: Path, target: str, run_id: str, card, envelopes: list
+) -> None:
+    """Write "this report was wrong" where the next run will read it.
+
+    The golden ledger's `not_defects` section plants correct-but-suspicious code
+    precisely so precision is measured rather than assumed, and
+    `regressions_on_planted` is the list of times an agent fell for it. That list
+    was printed and discarded, so the same agent fell for the same code next week
+    and the operator's only remedy was to edit a prompt by hand and hope.
+
+    Written from here and nowhere else, and that is what makes it safe to act on:
+    `qaas score` runs in a process with no agent in it, invoked by a person or by
+    cron, measured against a ledger that is in nobody's `write_paths`. An agent
+    that could write this could mark its own mistakes correct.
+
+    Never raises. A memory that cannot be written is a worse next run.
+    """
+    if not card.regressions_on_planted:
+        return
+    from qaas.mcp import defect_memory
+
+    by_id = {e.id: e for e in envelopes}
+    for envelope_id, planted_id in card.regressions_on_planted:
+        envelope = by_id.get(envelope_id)
+        if envelope is None:
+            continue
+        try:
+            defect_memory.record_outcome(
+                root,
+                fingerprint=envelope.fingerprint(),
+                run_id=run_id,
+                outcome="false_positive",
+                target=target,
+                agent=envelope.discovered_by,
+                detail=f"matched {planted_id}, which the golden ledger plants as correct",
+            )
+        except Exception:  # noqa: BLE001 — a lost lesson, not a failed scoring
+            pass
+
+
+def _persist_score(root: Path, run_id: str, summary: dict, per_agent: dict) -> None:
+    """Keep the scorecard. It used to be computed and thrown away.
+
+    All three call sites printed it or gated on it and none of them wrote it, so
+    the one honest number the system produces about itself existed for as long as
+    a terminal scrollback. "Run `qaas score` after changing any prompt, threshold
+    or model" is only answerable against the previous score, and there was none.
+
+    Written here rather than by the router on purpose: scoring happens in a
+    process with no agent in it, invoked by a person or by cron, against a golden
+    ledger no agent may write. That is what makes the number un-inflatable — the
+    same reason `target-app/defects.yaml` is in nobody's `write_paths`.
+
+    Never raises: an unwritable score directory is a lost record, not a failed
+    scoring.
+    """
+    try:
+        out = Path(root) / "scores"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / f"{run_id}.json").write_text(
+            json.dumps({"run_id": run_id, "summary": summary, "by_agent": per_agent}, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 @app.command()
@@ -1405,6 +1751,18 @@ def sweep(
     router = Router(cfg, root=root)
     report = asyncio.run(router.run(mode))
     console.print_json(data=report.summary())
+
+    # Run health first, and before the no-ledger return. This is the cron entry
+    # point, documented as the one that "fails loudly", and it consulted neither
+    # `report.failed` nor `report.stopped_early` -- unlike `run`, which exits 1
+    # for exactly those. So a sweep whose agents all crashed, or that blew its
+    # wall clock after filing nothing, printed a summary and exited 0. And when
+    # the target had no golden ledger it returned before any check at all, so the
+    # gate was silently off for every target but the demo.
+    if report.failed or report.stopped_early:
+        reason = report.stopped_early or f"agents failed: {', '.join(report.failed)}"
+        console.print(f"[red]the run did not complete cleanly[/red] — {reason}")
+        raise typer.Exit(1)
 
     ledger_path = _ledger_path(cfg)
     if ledger_path is None or not ledger_path.exists():
@@ -1773,7 +2131,7 @@ def board(
     carries. That is why it needs no administrator rights: creating a Jira
     *project* per repository does, creating a filter does not.
     """
-    cfg = load_config(config_dir, target=target)
+    cfg = _load_config_or_exit(config_dir, target)
     if target:
         cfg = cfg.model_copy(update={"target": target, "profile": _load_target(target, config_dir)})
 

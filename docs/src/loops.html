@@ -1,0 +1,119 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>qaas loops</title>
+<style>
+  body { margin:0; background:#f8fafc;
+         font: 15px ui-sans-serif, -apple-system, "Segoe UI", Inter, sans-serif; }
+  .sheet { width:2000px; height:1180px; padding:34px; background:#f8fafc; position:relative; }
+  .frame { position:absolute; inset:34px; border:1px solid #e2e8f0;
+           border-radius:20px; background:#fff; }
+  svg { position:absolute; inset:0; width:100%; height:100%; z-index:1; }
+  .lane { position:absolute; border-radius:16px; z-index:0; }
+  .lane h2 { position:absolute; top:-46px; left:0; margin:0; font-size:26px;
+             font-weight:800; display:flex; align-items:center; gap:11px; }
+  .lane h2 i { width:15px; height:15px; border-radius:4px; display:block; }
+
+  .node { z-index:2; position:absolute; width:250px; background:#fff; border-radius:13px;
+          padding:14px 0; text-align:center; border:2.5px solid; }
+  .node b { display:block; font-size:21px; font-weight:800; color:#0f172a; }
+  .node span { display:block; font-family:ui-monospace,monospace; font-size:13.5px;
+               color:#64748b; margin-top:3px; }
+  .tag { z-index:3; position:absolute; top:-14px; right:12px; white-space:nowrap; background:#7c3aed; color:#fff;
+         font-size:12px; font-weight:800; letter-spacing:.06em;
+         padding:4px 11px; border-radius:999px; }
+
+  .ticket { z-index:2; position:absolute; width:330px; background:#fffbeb; border:2.5px solid #d97706;
+            border-radius:13px; padding:15px 0; text-align:center; }
+  .ticket b { display:block; font-size:22px; font-weight:800; color:#0f172a; }
+  .ticket span { display:block; font-family:ui-monospace,monospace; font-size:13.5px;
+                 color:#92400e; margin-top:3px; }
+
+  .edge { font-style:italic; font-size:16px; fill:#b45309; }
+  .key { position:absolute; left:52px; bottom:22px; display:flex; gap:30px;
+         align-items:center; color:#475569; font-size:15px; }
+  .key .k { display:flex; align-items:center; gap:9px; }
+  .key .k i { width:13px; height:13px; border-radius:50%; display:block; }
+  .note { position:absolute; right:52px; bottom:22px; font-family:ui-monospace,monospace;
+          font-size:14px; color:#94a3b8; }
+</style>
+<div class="sheet"><div class="frame">
+
+  <svg viewBox="0 0 1932 1112" preserveAspectRatio="none">
+    <defs>
+      <marker id="b" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+        <path d="M0,0 L9,4.5 L0,9 z" fill="#4f46e5"/></marker>
+      <marker id="v" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+        <path d="M0,0 L9,4.5 L0,9 z" fill="#7c3aed"/></marker>
+      <marker id="o" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+        <path d="M0,0 L9,4.5 L0,9 z" fill="#ea580c"/></marker>
+      <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+        <path d="M0,0 L9,4.5 L0,9 z" fill="#b45309"/></marker>
+    </defs>
+
+    <!-- discovery: mapper -> api / browser -->
+    <path d="M400,215 C330,255 255,258 228,282" stroke="#4f46e5" stroke-width="3" fill="none" marker-end="url(#b)"/>
+    <path d="M500,215 C570,255 645,258 672,282" stroke="#4f46e5" stroke-width="3" fill="none" marker-end="url(#b)"/>
+    <!-- api / browser -> synthesizer -->
+    <path d="M225,382 C255,430 330,434 396,462" stroke="#7c3aed" stroke-width="3" fill="none" marker-end="url(#v)"/>
+    <path d="M675,382 C645,430 570,434 504,462" stroke="#7c3aed" stroke-width="3" fill="none" marker-end="url(#v)"/>
+    <!-- synthesizer -> reproducer -> triage -->
+    <path d="M450,560 L450,626" stroke="#4f46e5" stroke-width="3" fill="none" marker-end="url(#b)"/>
+    <path d="M450,728 L450,794" stroke="#4f46e5" stroke-width="3" fill="none" marker-end="url(#b)"/>
+
+    <!-- remediation chain -->
+    <path d="M1520,300 L1520,366" stroke="#ea580c" stroke-width="3" fill="none" marker-end="url(#o)"/>
+    <path d="M1520,468 L1520,534" stroke="#ea580c" stroke-width="3" fill="none" marker-end="url(#o)"/>
+
+    <!-- triage -> ticket -->
+    <path d="M450,896 C450,980 700,1000 806,1000" stroke="#b45309" stroke-width="3" fill="none" marker-end="url(#a)"/>
+    <text class="edge" x="620" y="968">file</text>
+    <!-- verifier -> ticket (close) -->
+    <path d="M1520,636 C1520,900 1300,1000 1126,1000" stroke="#b45309" stroke-width="3" fill="none" marker-end="url(#a)"/>
+    <text class="edge" x="1230" y="968">close</text>
+    <!-- ticket -> fixer (assign) -->
+    <path d="M1136,984 C1500,940 1760,800 1700,255 C1690,220 1650,212 1648,212"
+          stroke="#b45309" stroke-width="3" fill="none" marker-end="url(#a)"/>
+    <text class="edge" x="1770" y="810">assign</text>
+  </svg>
+
+  <!-- DISCOVERY LANE -->
+  <div class="lane" style="left:52px; top:96px; width:860px; height:860px;
+       background:#eef2ff; border:1px solid #c7d2fe">
+    <h2><i style="background:#4f46e5"></i>Discovery loop</h2>
+  </div>
+  <div class="node" style="left:325px; top:126px; border-color:#4f46e5">
+    <b>Mapper</b><span>system map</span></div>
+  <div class="node" style="left:100px; top:292px; border-color:#4f46e5">
+    <b>API</b><span>contracts &amp; authz</span></div>
+  <div class="node" style="left:550px; top:292px; border-color:#4f46e5">
+    <b>Browser</b><span>UI &amp; flows</span></div>
+  <div class="node" style="left:325px; top:470px; border-color:#7c3aed">
+    <b>Synthesizer</b><span>join the halves</span></div>
+  <div class="node" style="left:325px; top:638px; border-color:#4f46e5">
+    <b>Reproducer</b><span>minimal repro</span></div>
+  <div class="node" style="left:325px; top:806px; border-color:#4f46e5">
+    <b>Triage</b><span>dedupe &amp; file</span></div>
+
+  <!-- REMEDIATION LANE -->
+  <div class="lane" style="left:1150px; top:96px; width:740px; height:600px;
+       background:#fff7ed; border:1px solid #fed7aa">
+    <h2><i style="background:#ea580c"></i>Remediation loop</h2>
+  </div>
+  <div class="node" style="left:1395px; top:210px; border-color:#ea580c">
+    <b>Fixer</b><span>patch + test</span></div>
+  <div class="node" style="left:1395px; top:378px; border-color:#ea580c">
+    <b>Reviewer</b><span>risk gate</span></div>
+  <div class="node" style="left:1395px; top:546px; border-color:#ea580c">
+    <b>Verifier</b><span>confirm fixed</span></div>
+
+  <div class="ticket" style="left:806px; top:962px">
+    <b>Ticket</b><span>shared artifact</span></div>
+
+  <div class="key">
+    <span class="k"><i style="background:#4f46e5"></i>Discovery agent</span>
+    <span class="k"><i style="background:#7c3aed"></i>Synthesis agent</span>
+    <span class="k"><i style="background:#ea580c"></i>Remediation agent</span>
+    <span class="k"><i style="background:#d97706"></i>Ticket (shared artifact)</span>
+  </div>
+  <div class="note">full 16-agent roster → ARCHITECTURE.md</div>
+</div></div>

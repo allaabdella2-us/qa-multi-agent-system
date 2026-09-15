@@ -164,3 +164,17 @@ def build_run(
 def run_root(tmp_path: Path) -> Path:
     build_run(tmp_path)
     return tmp_path
+
+
+#: `TestClient` defaults to `Host: testserver`, which is not a loopback literal
+#: -- and `build_app` now refuses a non-loopback Host. That is not pedantry: a
+#: site on attacker-controlled DNS with a short TTL rebinds its own name to
+#: 127.0.0.1, becomes same-origin with this page, and reads the whole run
+#: ledger. So the suite has to speak to the app the way a browser does.
+LOCAL_BASE_URL = "http://127.0.0.1"
+
+
+def local_client(app):
+    from starlette.testclient import TestClient
+
+    return TestClient(app, base_url=LOCAL_BASE_URL)

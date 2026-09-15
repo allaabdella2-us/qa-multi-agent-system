@@ -120,8 +120,9 @@ async def run_agent(
     """Invoke one agent and record the outcome.
 
     Failures are captured, not raised. One agent falling over should cost the run
-    that agent's findings, not the whole run — the router decides whether to
-    retry, skip, or escalate.
+    that agent's findings, not the whole run — the router escalates and carries
+    on without it. It does not retry: see `router.py`'s module docstring for why
+    that is a decision rather than an omission.
     """
     # Building the options can fail on its own — a missing prompt file
     # (FileNotFoundError), an MCP server the config names but nothing provides
@@ -156,6 +157,7 @@ async def run_agent(
     subtype = "success"
     error: str | None = None
     cost = 0.0
+    cost_estimated = False
     turns = 0
 
     def emit(kind: str, **detail: Any) -> None:
@@ -185,12 +187,33 @@ async def run_agent(
         subtype = "failure"
         error = f"{type(exc).__name__}: {exc}"
         ctx.store.log("agent_error", agent=spec.name, error=error)
+        # `cost` is only ever assigned inside the ResultMessage branch, so a
+        # stream that dropped at turn 60 of FIXER's 80 recorded $0.00 -- and
+        # `budget.spend(0.0)` told the governor nothing had been spent. The money
+        # is gone from the account either way, and on a resumed run the
+        # under-count compounds, because `already_spent` is read back from these
+        # same records. A pessimistic estimate is the right default for a
+        # governor; zero is the one answer that is certainly wrong. It is flagged
+        # rather than presented as measured.
+        if cost == 0.0 and tool_calls > 0 and max_budget_usd is not None:
+            cost = max_budget_usd
+            cost_estimated = True
 
-    produced = [e.id for e in ctx.store.envelopes() if e.id not in before]
+    # Filtered on `discovered_by`, not only on "new since I started". Discovery
+    # agents run concurrently against one store, so the unfiltered diff credited
+    # every envelope a *sibling* emitted to whichever agent happened to finish
+    # after it -- which put another agent's findings in this one's
+    # `envelope_ids`, in `agent_finished`, and in any per-agent tally built on
+    # them. `envelope_server` already stamps the field; nothing read it.
+    produced = [
+        e.id for e in ctx.store.envelopes()
+        if e.id not in before and e.discovered_by == spec.name
+    ]
     result = AgentResult(
         agent=spec.name,
         subtype=subtype,
         cost_usd=cost,
+        cost_estimated=cost_estimated,
         num_turns=turns,
         duration_s=round(time.monotonic() - started, 2),
         envelope_ids=produced,

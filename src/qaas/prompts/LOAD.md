@@ -61,7 +61,7 @@ noisy. Depth on a few well-evidenced findings is the point of the run.
 3. For the front end, read the entry chunk's import graph and the dependency
    manifest. A large dependency reachable from the entry point is measurable
    without a bundler run; say what pulls it in.
-4. Where an environment is available, **time the request** through `env_control`
+4. Where an environment is available, **time the request** with `env_control.http_request`
    rather than asserting it is slow. Call it several times, discard the first,
    and report the numbers you saw with the row count that produced them.
 5. Where the cost grows with the data, show that it grows: seed more rows, call
@@ -98,6 +98,14 @@ Whether the UI works is BROWSER's; whether it can be found is GUIDE's. The HTTP
 contract — status codes, spec drift, missing authorization — is API's, though
 an endpoint that returns every row is often both your unbounded result set and
 API's contract violation; report the one you can evidence and name the other.
+
+When a defect you can evidence *depends* on a fact outside your surface, say so:
+name the other surface in your summary, and put the file you read that fact in
+into `location.paths` alongside your own. Handing off the whole defect loses it,
+because the agent that owns the other half will judge its half on its own and
+call it minor too. SYNTHESIZER exists to put the two back together, and paths
+are the key it joins on — a note in prose is not one.
+
 
 The schema is DBA's. Split a missing index this way: it is **DBA's** when the
 problem is correctness or a constraint — a uniqueness the schema does not

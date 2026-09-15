@@ -242,9 +242,15 @@ class DefectEnvelope(Strict):
         parts = [
             self.domain.value,
             self.defect_class.value,
-            self.location.service or "",
-            self.location.endpoint or "",
-            self.location.ui_route or "",
+            # Folded the way `defect_memory.location_score` already folds them.
+            # Paths were normalised and these three were hashed verbatim, so the
+            # two halves of the dedupe system disagreed: `GET /v1/orders` and
+            # `get /v1/orders/` scored as the same location and fingerprinted as
+            # two different defects, which is a duplicate ticket with a straight
+            # face.
+            _fold(self.location.service),
+            _fold(self.location.endpoint),
+            _fold(self.location.ui_route),
             "|".join(paths),
         ]
         # Everything above comes from `location`, which is entirely optional in
@@ -276,6 +282,13 @@ class DefectEnvelope(Strict):
     @classmethod
     def from_json(cls, raw: str | bytes) -> "DefectEnvelope":
         return cls.model_validate_json(raw)
+
+
+def _fold(value: str | None) -> str:
+    """A location string reduced to its identity: trimmed, lowercased, no
+    trailing slash. One helper so `fingerprint` and the similarity scorer cannot
+    drift apart again."""
+    return (value or "").strip().lower().rstrip("/")
 
 
 def _normalize_title(title: str) -> str:

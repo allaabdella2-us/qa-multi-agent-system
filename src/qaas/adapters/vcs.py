@@ -157,7 +157,16 @@ class LocalGit(VcsAdapter):
 
     def commit(self, message: str, paths: Sequence[str] | None = None) -> str:
         if paths:
-            self._git("add", "--", *paths)
+            # One pathspec at a time, tolerating the ones that match nothing.
+            # `git add -- a b c` is all-or-nothing: a single unmatched pathspec
+            # is `fatal: pathspec 'b' did not match any files`, exit 128, and
+            # *nothing* is staged. Callers pass the agent's `write_paths`, and a
+            # repository that simply has no `web/src` -- an API-only service --
+            # made every commit fail with an error about a directory the agent
+            # was never going to touch. What actually got staged is checked
+            # below, so a genuinely empty commit still refuses.
+            for path in paths:
+                self._git("add", "--", path, check=False)
         else:
             self._git("add", "-A")
         staged = self._git("diff", "--cached", "--name-only").strip()

@@ -17,7 +17,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterator
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from qaas.envelope import DefectEnvelope
 
@@ -106,6 +106,11 @@ class AgentResult(BaseModel):
     agent: str
     subtype: str = "success"
     cost_usd: float = 0.0
+    #: True when `cost_usd` is a conservative estimate rather than a measured
+    #: figure -- an agent whose stream dropped before it reported one. Flagged so
+    #: `qaas show` and the dashboard can mark it instead of presenting an
+    #: invented number as measured.
+    cost_estimated: bool = False
     num_turns: int = 0
     duration_s: float = 0.0
     envelope_ids: list[str] = Field(default_factory=list)
@@ -137,6 +142,10 @@ class RunStore:
                 (self.dir / sub).mkdir(parents=True, exist_ok=True)
         #: agent -> files it has written this run. See `touched_files`.
         self._touched: dict[str, set[str]] = {}
+        #: Lines the last `ledger()` scan could not parse. See `ledger`.
+        self.unreadable_lines = 0
+        #: agent -> per-run tallies. See `counters`.
+        self._counters: dict[str, dict[str, int]] = {}
 
     @classmethod
     def new(cls, root: Path | str = DEFAULT_ROOT, prefix: str = "run") -> "RunStore":
@@ -160,15 +169,41 @@ class RunStore:
             fh.write(entry.model_dump_json() + "\n")
         return entry
 
-    def ledger(self, kind: LedgerKind | str | None = None) -> Iterator[LedgerEntry]:
+    def ledger(
+        self, kind: LedgerKind | str | None = None, *, strict: bool = False
+    ) -> Iterator[LedgerEntry]:
+        """Entries in order, tolerating a line that does not parse.
+
+        Tolerant by default because of when the intolerant version failed. A run
+        killed mid-`log` -- ^C, an OOM, a full disk -- leaves a truncated last
+        line, and `model_validate_json` raised out of *every* reader built on
+        this: `qaas show`, `qaas trace`, `trace.summarise` and all nine dashboard
+        routes. A crashed run is precisely when the audit trail is worth
+        something, and it was the one run whose ledger could not be opened.
+
+        A skipped line is not swallowed silently -- it lands in
+        `unreadable_lines`, so a reader that cares can say "this trail is short
+        by two lines" rather than quietly presenting a shortened history as a
+        complete one. `strict=True` is for a caller that would rather fail than
+        read a partial history. No new `LedgerKind` for this: a corrupt line is
+        a property of the file, not an event in the run.
+        """
         if not self.ledger_path.exists():
             return
+        skipped = 0
         for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            entry = LedgerEntry.model_validate_json(line)
+            try:
+                entry = LedgerEntry.model_validate_json(line)
+            except ValidationError:
+                if strict:
+                    raise
+                skipped += 1
+                continue
             if kind is None or entry.kind == kind:
                 yield entry
+        self.unreadable_lines = skipped
 
     # -- envelopes --------------------------------------------------------
 
@@ -196,6 +231,19 @@ class RunStore:
     def get_envelope(self, envelope_id: str) -> DefectEnvelope | None:
         path = self.dir / "envelopes" / f"{envelope_id}.json"
         return DefectEnvelope.from_json(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    def counters(self, agent: str) -> dict[str, int]:
+        """Per-agent tallies that must span the whole run, not one dispatch.
+
+        Held here for the same reason `touched_files` is, and it is the same bug
+        one file over: `ToolContext.counters` lived on a context the router
+        rebuilds for *every* `_dispatch`, so `max_findings_per_agent_run` and
+        `max_tickets_per_run` were per-invocation caps wearing per-run names.
+        REPRODUCER runs once per finding and FIXER once per review round trip, so
+        each of them got a fresh allowance every time -- and on a resumed run
+        every cap in the system started again from zero.
+        """
+        return self._counters.setdefault(agent, {})
 
     def touched_files(self, agent: str) -> set[str]:
         """The distinct files one agent has written this run (§8.2's denominator).
@@ -226,13 +274,43 @@ class RunStore:
         return flat, path
 
     def put_artifact(self, name: str, content: str | bytes) -> str:
-        """Store evidence and return the artifact:// uri that references it."""
+        """Store evidence and return the artifact:// uri that references it.
+
+        A name already taken by *different* content gets a counter rather than
+        clobbering it. Names are agent-supplied and agents converge on the
+        obvious one, so two findings calling their screenshot `orders.png` used
+        to resolve to one file -- and the first envelope's `artifact://` uri then
+        pointed at the second finding's evidence. Evidence that silently belongs
+        to another defect is worse than no evidence: `is_fileable` still passes,
+        and a human reads a ticket whose proof is of something else.
+
+        Identical content keeps the same name, so an agent re-storing the same
+        thing is idempotent rather than accumulating copies.
+        """
         safe, path = self._artifact_path(name)
+        blob = content.encode() if isinstance(content, str) else content
+        if path.exists():
+            try:
+                if path.read_bytes() != blob:
+                    safe, path = self._unique_artifact_path(safe)
+            except OSError:
+                safe, path = self._unique_artifact_path(safe)
         if isinstance(content, bytes):
             path.write_bytes(content)
         else:
             path.write_text(content, encoding="utf-8")
         return f"artifact://{self.run_id}/{safe}"
+
+    def _unique_artifact_path(self, flat: str) -> tuple[str, Path]:
+        """`orders.png` -> `orders-02.png`, first free number wins."""
+        stem, dot, suffix = flat.rpartition(".")
+        stem, suffix = (stem, f".{suffix}") if dot else (flat, "")
+        for n in range(2, 1000):
+            candidate = f"{stem}-{n:02d}{suffix}"
+            path = (self.dir / "artifacts" / candidate).resolve()
+            if not path.exists():
+                return candidate, path
+        raise ValueError(f"too many artifacts named like {flat!r}")
 
     def copy_artifact(self, name: str, source: Path | str) -> str:
         safe, path = self._artifact_path(name)
@@ -285,11 +363,19 @@ class SystemMapStore:
     half-propagate mid-run (§10, context poisoning).
     """
 
-    def __init__(self, root: Path | str = DEFAULT_ROOT):
+    def __init__(self, root: Path | str = DEFAULT_ROOT, *, create: bool = True):
         self.dir = Path(root) / "system-map"
-        self.dir.mkdir(parents=True, exist_ok=True)
+        # `create=False` for readers, mirroring `RunStore`, which carries a
+        # comment about having removed exactly this: a reader that writes. `qaas
+        # map` and the dashboard construct one of these to look, and an
+        # unconditional mkdir left a `.qaas/system-map/` in whatever directory
+        # the operator happened to be standing in. `get`, `latest_version` and
+        # `versions` all already degrade to None/[] on a missing directory.
+        if create:
+            self.dir.mkdir(parents=True, exist_ok=True)
 
     def put(self, payload: dict[str, Any]) -> str:
+        self.dir.mkdir(parents=True, exist_ok=True)
         # The suffix is not decoration: a bare second-resolution timestamp lets
         # two maps written in the same second collide, which would silently
         # rewrite a version another run had already pinned.

@@ -17,18 +17,27 @@ from starlette.testclient import TestClient
 from qaas.store import AgentResult, RunStore
 from qaas.ui.server import Dashboard, build_app
 
-from .conftest import SPECS, build_run
+from .conftest import SPECS, build_run, local_client
 
 FAST = 0.01
 
 
-async def next_event(client: asyncio.Queue, event: str, timeout: float = 5.0) -> dict:
-    """The next message of one kind, ignoring the rest."""
+async def next_event(
+    client: asyncio.Queue, event: str, timeout: float = 5.0, collect: list | None = None
+) -> dict:
+    """The next message of one kind, ignoring the rest.
+
+    `collect` keeps the ignored ones. Without it a caller cannot assert on what
+    did *not* arrive, because this discards it first -- which is how
+    `test_tool_calls_do_not_reach_the_stream` came to be unable to fail.
+    """
     async with asyncio.timeout(timeout):
         while True:
             message = await client.get()
             if message["event"] == event:
                 return message["data"]
+            if collect is not None:
+                collect.append(message)
 
 
 async def test_a_live_run_streams_its_entries(tmp_path: Path) -> None:
@@ -74,10 +83,17 @@ async def test_tool_calls_do_not_reach_the_stream_but_do_move_the_card(
     client = watcher.attach()
     before = watcher.view.agents["API"].tool_calls
     store.log("tool_call", agent="API", tool="Grep", tool_use_id="z", allowed=True)
-    patch = await next_event(client, "patch")
+
+    # Collected, not drained. This asserted `all(... for m in client._queue)`
+    # *after* `next_event`, and `next_event` discards every message that is not
+    # the one it wants -- so a `ledger` event would have been thrown away before
+    # the assertion looked, and the test could not fail. Keep what goes past.
+    seen: list[dict] = []
+    patch = await next_event(client, "patch", collect=seen)
+
     assert patch["agents"]["API"]["tool_calls"] == before + 1
     assert patch["agents"]["API"]["last_tool"] == "Grep"
-    assert all(m["event"] != "ledger" for m in list(client._queue))
+    assert [m["event"] for m in seen if m["event"] == "ledger"] == [], seen
 
 
 async def test_a_new_finding_is_its_own_event(tmp_path: Path) -> None:
@@ -159,7 +175,7 @@ async def test_cost_rides_along_on_the_patch(tmp_path: Path) -> None:
 
 def test_the_sse_route_opens_with_a_snapshot(tmp_path: Path) -> None:
     build_run(tmp_path, "run-sse", finish=True)
-    client = TestClient(build_app(Dashboard(tmp_path, specs=SPECS, poll=FAST)))
+    client = local_client(build_app(Dashboard(tmp_path, specs=SPECS, poll=FAST)))
     with client.stream("GET", "/api/runs/run-sse/stream") as response:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")

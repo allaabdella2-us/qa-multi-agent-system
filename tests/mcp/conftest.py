@@ -35,8 +35,16 @@ TARGET_ROOT = _CONFIG.target_root(base=REPO_ROOT)
 
 
 def is_error(result: dict[str, Any]) -> bool:
-    """Whether a tool result is a refusal. Tools return errors, never raise."""
-    return bool(result.get("isError"))
+    """Whether a tool result is a refusal. Tools return errors, never raise.
+
+    Reads `is_error` -- the key the SDK's `run_tool` actually consumes -- and not
+    `isError`, which is the MCP wire spelling. This helper read `isError` and the
+    whole suite agreed with it, which is how every refusal in the system could
+    reach the model marked *successful* while two hundred tests asserted it was a
+    refusal. A test double that reads a different field from the real consumer
+    tests the double.
+    """
+    return bool(result.get("is_error"))
 
 
 def text_of(result: dict[str, Any]) -> str:

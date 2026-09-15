@@ -40,7 +40,12 @@ run_modes:
 
   nightly:
     trigger: cron
-    agents: [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, SOCKET, GUIDE, LOAD, REPRODUCER, TRIAGE, REPORTER]
+    # SYNTHESIZER runs between discovery and reproduce, and only in the modes
+    # that can afford it: it is the one agent whose input is the other agents'
+    # output, so it is worthless in a roster that produces one finding and
+    # valuable in one that produces twenty. Deliberately not in `pr-check`,
+    # whose 900 seconds are better spent on depth than on a join.
+    agents: [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, SOCKET, GUIDE, LOAD, SYNTHESIZER, REPRODUCER, TRIAGE, REPORTER]
     max_wall_clock_s: 7200
     max_concurrency: 3
 
@@ -64,6 +69,6 @@ run_modes:
   # expensive mode in the system and the only one that closes the loop.
   full-loop:
     trigger: on_demand
-    agents: [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, SOCKET, GUIDE, LOAD, REPRODUCER, TRIAGE, FIXER, REVIEWER, VERIFIER, REPORTER]
+    agents: [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, SOCKET, GUIDE, LOAD, SYNTHESIZER, REPRODUCER, TRIAGE, FIXER, REVIEWER, VERIFIER, REPORTER]
     max_wall_clock_s: 10800
     max_concurrency: 3
