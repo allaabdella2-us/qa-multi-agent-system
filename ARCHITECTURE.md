@@ -101,7 +101,7 @@ Everything else is in service of those.
 **ROUTER is Python, not a prompt.** The original design has an orchestrator
 agent. It is implemented as an ordinary state machine instead, because *a model
 cannot enforce a budget it is itself spending*. Phase ordering, concurrency,
-retries, escalation and the budget governor are all plain code in
+escalation and the budget governor are all plain code in
 `router.py`. This also makes runs reproducible and cheap to unit-test — 547
 tests run offline with no API calls.
 
@@ -182,7 +182,8 @@ router._dispatch(spec, task)
 ```
 
 Failures are **captured, not raised**. One agent falling over costs the run that
-agent's findings, not the whole run; the router decides whether to retry, skip
+agent's findings, not the whole run; the router escalates and carries on. It
+does not retry — see `router.py`'s docstring; that is a decision, not a gap
 or escalate.
 
 ### 5.3 The remediation loop (phase 5)

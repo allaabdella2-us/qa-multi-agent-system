@@ -4,7 +4,15 @@ Deliberately not an LLM. §4.1 wants its reasoning shallow (routing, not analysi
 and §10 makes it the enforcement point for budget and concurrency — and a model
 cannot enforce a budget it is itself spending. Everything here is ordinary code:
 dispatch, phase ordering, concurrency limits, the spend governor, the §8.3 loop
-breakers, retries and escalation.
+breakers and escalation.
+
+There is deliberately **no retry**. A failed agent is escalated and the run
+continues without it. Four documents used to promise retries and a dead-letter
+queue and no such code has ever existed, so a transient 429 was indistinguishable
+from a real failure while the docs said otherwise. Building it properly needs a
+classifier for which errors are transient and a guarantee that a retry cannot
+duplicate side effects -- an agent that opened a branch before it died must not
+open a second one. Until that exists, saying so is better than implying it.
 
 The phases exist because the dependencies are real, not for tidiness:
 

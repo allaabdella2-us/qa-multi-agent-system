@@ -19,7 +19,7 @@ Status: plan approved, no code written yet. The milestone table below is the wor
 
 ## Two design decisions that shape everything
 
-**1. ROUTER is Python, not a prompt.** §4.1 says "keep its reasoning shallow — routing, not analysis," and §10 makes it the enforcement point for budget and concurrency. A model cannot enforce a budget it is spending. So the run state machine, dispatch, retries, dead-letter queue, and the §8.3 loop breakers are ordinary code. This also makes runs reproducible and cheap to test.
+**1. ROUTER is Python, not a prompt.** §4.1 says "keep its reasoning shallow — routing, not analysis," and §10 makes it the enforcement point for budget and concurrency. A model cannot enforce a budget it is spending. So the run state machine, dispatch and the §8.3 loop breakers are ordinary code. (Retries and a dead-letter queue were specified here and never built; `router.py` records why, and the claim is removed rather than left standing.) This also makes runs reproducible and cheap to test.
 
 **2. Every agent is its own top-level `query()`, not a subagent of a parent.** The SDK's `agents=` parameter nests subagents under one conversation; that blurs the per-agent tool allowlist §5.3 depends on and pools cost into one number. Running each agent as a separate `query()` gives a genuine context boundary (design principle §2), an enforceable per-agent allowlist, and per-agent `total_cost_usd` from its `ResultMessage`. `AgentDefinition`/`agents=` stays available for *intra-agent* fan-out (e.g. BROWSER exploring several routes in parallel).
 
@@ -39,7 +39,7 @@ qa-multi-agent-system/
 ├── src/qaas/
 │   ├── envelope.py        # Pydantic DefectEnvelope v1.0 (§6) — the only inter-agent type
 │   ├── registry.py        # AgentSpec (YAML) -> ClaudeAgentOptions
-│   ├── router.py       # run state machine, budget governor, concurrency, dead-letter
+│   ├── router.py       # run state machine, budget governor, concurrency, escalation
 │   ├── runner.py          # invoke one agent, stream messages, record cost/usage/artifacts
 │   ├── guardrails.py      # can_use_tool + hooks = the §8.1 permission matrix, in code
 │   ├── store.py           # run ledger, artifact store, versioned system-map

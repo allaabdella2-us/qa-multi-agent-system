@@ -120,8 +120,9 @@ async def run_agent(
     """Invoke one agent and record the outcome.
 
     Failures are captured, not raised. One agent falling over should cost the run
-    that agent's findings, not the whole run — the router decides whether to
-    retry, skip, or escalate.
+    that agent's findings, not the whole run — the router escalates and carries
+    on without it. It does not retry: see `router.py`'s module docstring for why
+    that is a decision rather than an omission.
     """
     # Building the options can fail on its own — a missing prompt file
     # (FileNotFoundError), an MCP server the config names but nothing provides
