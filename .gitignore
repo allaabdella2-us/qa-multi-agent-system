@@ -22,3 +22,8 @@ target-app/*.png
 
 # Personal notes, not published.
 tutorial/
+
+# REPRODUCER writes failing tests into the target's qa/repro/ during a run.
+# They are run output, reproducible from the ledger, and they accumulate one
+# file per finding across every run -- not source, and not reviewable as a diff.
+target-app/qa/

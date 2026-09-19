@@ -181,12 +181,17 @@ def _path_overlap(a: Iterable[str], b: Iterable[str]) -> float:
     return hits / len(golden)
 
 
+def _keyword_hits(text: str, keywords: Iterable[str]) -> int:
+    """How many of an entry's keywords the report actually uses."""
+    blob = text.lower()
+    return sum(1 for t in keywords if t.lower() in blob)
+
+
 def _keyword_overlap(text: str, keywords: Iterable[str]) -> float:
     terms = list(keywords)
     if not terms:
         return 0.0
-    blob = text.lower()
-    return sum(1 for t in terms if t.lower() in blob) / len(terms)
+    return _keyword_hits(text, terms) / len(terms)
 
 
 # Domains that describe the same surface. An agent choosing either one has
@@ -243,6 +248,10 @@ def _domains_compatible(reported: str, golden: GoldenDefect) -> bool:
 #: label, while a vague report that merely shares a file does not.
 CROSS_DOMAIN_PENALTY = 0.75
 
+# How many of a golden entry's keywords a report must use before it can be
+# credited with having found that entry. See the gate in `similarity`.
+MIN_KEYWORD_HITS = 2
+
 
 def similarity(env: DefectEnvelope, golden: GoldenDefect) -> float:
     """0..1 confidence that `env` reports `golden`."""
@@ -288,8 +297,28 @@ def similarity(env: DefectEnvelope, golden: GoldenDefect) -> float:
     # declares no keywords has nothing to say here and the anchor is all there
     # is. An unanchored defect already weights keywords at 0.65 and needs no
     # help.
-    if anchored and golden.keywords and keywords == 0.0:
-        return min(score, MATCH_THRESHOLD - 0.01)
+    # One word is a coincidence, not a topic. The gate below started as
+    # `keywords == 0.0` and two false credits walked straight through it, both
+    # on a single incidental hit:
+    #
+    #   DB-01 wants the missing UNIQUE on order_items. A report titled "Order
+    #   constraints exist only in PostgreSQL, so violations escape as HTTP 500"
+    #   -- the *opposite* claim about the same table -- shared the endpoint
+    #   (0.45) and the files (0.30) and needed nothing more than the word
+    #   "total_cents" to reach 0.81.
+    #
+    #   UI-06 wants a contrast failure in Button.tsx. A report about missing
+    #   role/name on order rows in OrdersList matched on "wcag" alone.
+    #
+    # Across the calibration run every one of the fourteen true matches used at
+    # least two keywords and the lowest sat at 2-of-7, so the floor separates
+    # them cleanly rather than being tuned to the boundary. Capped at the
+    # entry's own keyword count: an entry declaring a single keyword would
+    # otherwise become unmatchable by arithmetic rather than by judgement.
+    if anchored and golden.keywords:
+        needed = min(MIN_KEYWORD_HITS, len(golden.keywords))
+        if _keyword_hits(text, golden.keywords) < needed:
+            return min(score, MATCH_THRESHOLD - 0.01)
     return score * domain_factor
 
 

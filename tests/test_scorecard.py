@@ -48,7 +48,19 @@ def test_ledger_loads_with_defects_and_planted_cases(ledger):
     # that was never seeded, and that is a healthy event, not a broken test.
     assert len(ledger.defects) >= 14
     assert len(ledger.not_defects) >= 3
-    assert {d.domain for d in ledger.defects} == {"api", "frontend"}
+
+
+def test_the_corpus_can_measure_more_than_two_agents(ledger):
+    """A scorecard can only speak about domains the ledger has defects in.
+
+    It held `api` and `frontend` only, so six of the eight discovery agents had
+    nothing seeded in their own surface -- every judgement about DBA, ARCHITECT,
+    AUDITOR, SOCKET, LOAD and GUIDE was made on defects outside their
+    specialty. "DBA: 0 finds" read as a broken agent and meant an empty corpus.
+    """
+    covered = {d.domain for d in ledger.defects}
+    for domain in ("api", "frontend", "database", "security", "performance", "websocket"):
+        assert domain in covered, f"nothing seeded for {domain}; its agent cannot be scored"
 
 
 def test_discovered_defects_are_marked_as_such(ledger):
@@ -547,6 +559,47 @@ def test_an_entry_with_no_keywords_still_matches_on_its_anchor():
     """The rule applies only where there is something to overlap with."""
     golden = _golden(keywords=())
     assert similarity(_finding("Anything", "at all"), golden) >= MATCH_THRESHOLD
+
+
+def test_one_shared_word_is_a_coincidence_and_not_a_match():
+    """The gate was `keywords == 0.0`, and two false credits walked through it.
+
+    The endpoint (0.45) and the file (0.30) already reach 0.75 on their own, so
+    a single incidental word was the whole difference. On the calibration run
+    this credited DB-01 -- the missing UNIQUE on `order_items` -- to a report
+    arguing the *opposite*, that the constraints exist in PostgreSQL and only
+    the ORM lacks them; the shared word was "total_cents". Separately UI-06, a
+    contrast failure in `Button.tsx`, was credited to a missing-role finding in
+    `OrdersList` on the strength of "wcag".
+    """
+    golden = _golden(keywords=("tenant", "leak", "org", "authorization"))
+    coincidence = _finding(
+        "Response time is slow",
+        "The org filter makes this endpoint take two seconds.",
+    )
+    assert "org" in coincidence.summary  # the overlap is real, and it is one word
+    assert similarity(coincidence, golden) < MATCH_THRESHOLD
+
+
+def test_two_shared_words_are_a_topic():
+    """The floor must not swallow real reports; the corpus's weakest sat at 2."""
+    golden = _golden(keywords=("tenant", "leak", "org", "authorization"))
+    genuine = _finding(
+        "Orders leak across organisations",
+        "One org reads another org's orders; the tenant check is missing.",
+    )
+    assert similarity(genuine, golden) >= MATCH_THRESHOLD
+
+
+def test_a_single_keyword_entry_stays_matchable():
+    """The floor is capped at the entry's own keyword count.
+
+    Otherwise an entry declaring one keyword becomes unmatchable by arithmetic
+    rather than by judgement -- it could never supply the second hit.
+    """
+    golden = _golden(keywords=("tenant",))
+    assert similarity(_finding("Tenant leak", "Orders cross the tenant boundary."),
+                      golden) >= MATCH_THRESHOLD
 
 
 def test_a_websocket_finding_can_match_a_websocket_defect_recorded_under_api():
