@@ -914,6 +914,10 @@ async def test_a_resumed_run_does_not_repeat_the_agents_that_succeeded(
 
     assert "API" not in second, "a successful agent was asked to run again"
     assert "ARCHITECT" not in second
+    # MAPPER reads the whole repository and is the most expensive agent in the
+    # roster; the map it publishes is versioned and pinned, so re-running it on
+    # resume buys an identical artifact at full price.
+    assert "MAPPER" not in second, "a resumed run re-mapped the repository"
 
     store = RunStore(report.run_id, tmp_path, create=False)
     assert any(

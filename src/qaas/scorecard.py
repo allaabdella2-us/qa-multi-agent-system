@@ -226,10 +226,27 @@ def _domains_compatible(reported: str, golden: GoldenDefect) -> bool:
     return golden.domain in _EQUIVALENT_DOMAINS.get(reported, set())
 
 
+#: A domain the ledger did not expect weakens a match; it does not void one.
+#:
+#: `defect_memory.CROSS_DOMAIN_PENALTY` has always worked this way, and the
+#: scorer did not. It vetoed to 0.0 instead -- and the ledger labels every
+#: seeded defect `api` or `frontend`, so ARCHITECT (`architecture`) and DBA
+#: (`database`) could not score a hit against this corpus by construction. One
+#: run charged them twelve false positives; nine were real defects matching at
+#: 0.57 to 1.00, including a perfect 1.00 on API-04 and an API-09 that the same
+#: scorecard listed as *missed* while an agent was being penalised for finding
+#: it. The measured verdict was "these two agents are broken", which would have
+#: sent someone to rewrite two working prompts.
+#:
+#: 0.75 rather than a half: the gate still has to mean something. At this value
+#: a strong location-and-keyword agreement survives a different-but-defensible
+#: label, while a vague report that merely shares a file does not.
+CROSS_DOMAIN_PENALTY = 0.75
+
+
 def similarity(env: DefectEnvelope, golden: GoldenDefect) -> float:
     """0..1 confidence that `env` reports `golden`."""
-    if not _domains_compatible(env.domain.value, golden):
-        return 0.0
+    domain_factor = 1.0 if _domains_compatible(env.domain.value, golden) else CROSS_DOMAIN_PENALTY
 
     text = f"{env.title} {env.summary} {env.suggested_fix_area}"
 
@@ -273,7 +290,7 @@ def similarity(env: DefectEnvelope, golden: GoldenDefect) -> float:
     # help.
     if anchored and golden.keywords and keywords == 0.0:
         return min(score, MATCH_THRESHOLD - 0.01)
-    return score
+    return score * domain_factor
 
 
 def resembles_planted(env: DefectEnvelope, planted: PlantedNonDefect) -> float:

@@ -97,12 +97,42 @@ def test_path_prefix_and_line_numbers_do_not_defeat_matching(ledger):
     assert [m.golden_id for m in score([e], ledger, domains={"api"}).matches] == ["API-02"]
 
 
-def test_wrong_domain_never_matches(ledger):
+def test_an_unexpected_domain_weakens_a_match_rather_than_voiding_it(ledger):
+    """Right endpoint, right file, right words — different surface label.
+
+    This used to be a veto, and the veto was measurably wrong. The ledger labels
+    every seeded defect `api` or `frontend`, so ARCHITECT (`architecture`) and
+    DBA (`database`) could not score a hit against this corpus by construction:
+    one run charged them twelve false positives, of which nine were real defects
+    matching at 0.57 to 1.00 — including a perfect 1.00, and an API-09 the same
+    scorecard listed as *missed* while penalising the agent that found it.
+
+    A different-but-defensible label is not a misunderstood defect. It is the
+    same defect, found by an agent that owns a different surface.
+    """
     e = env(
         domain=Domain.FRONTEND,
         title="Orders list ignores the limit parameter",
         summary="unbounded pagination, limit ignored",
         location={"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
+    )
+    card = score([e], ledger)
+    assert card.matches, "a strong cross-domain match was thrown away"
+    assert card.matches[0].golden_id == "API-01"
+
+
+def test_a_weak_cross_domain_report_is_still_refused(ledger):
+    """The gate is softened, not removed.
+
+    Sharing a file with a seeded defect while describing something else must not
+    become a match just because the penalty is no longer fatal — `orders.py`
+    holds six seeded defects and the file alone identifies none of them.
+    """
+    e = env(
+        domain=Domain.DATABASE,
+        title="Connection pool size is not configurable",
+        summary="The pool is hardcoded and cannot be tuned per environment.",
+        location={"paths": ["api/app/routes/orders.py"]},
     )
     card = score([e], ledger)
     assert not card.matches
@@ -258,15 +288,37 @@ def test_a_ux_classification_of_a_frontend_defect_counts(ledger):
     assert [m.golden_id for m in score([e], ledger).matches] == ["UI-05"]
 
 
-def test_a_security_domain_does_not_match_a_defect_that_is_not_security_relevant(ledger):
-    """The gate is widened, not removed."""
+def test_a_security_label_on_a_non_security_defect_is_penalised_not_voided(ledger):
+    """`security` against a non-`security_relevant` entry gets no free pass...
+
+    ...but it is the same argument as every other domain: an agent that found
+    API-01 and filed it under `security` found API-01. The penalty is what keeps
+    the label from being free — a vague security claim over the same file still
+    fails, as the test above shows.
+    """
     e = env(
         domain=Domain.SECURITY,
         title="Orders list ignores the limit parameter",
         summary="unbounded pagination, limit ignored",
         location={"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
     )
-    assert not score([e], ledger).matches
+    card = score([e], ledger)
+    assert card.matches and card.matches[0].golden_id == "API-01"
+
+
+def test_the_expected_domain_still_scores_higher_than_a_surprising_one(ledger):
+    """The penalty has to be visible in the number, or it is not a gate."""
+    from qaas.scorecard import similarity
+
+    api_01 = next(d for d in ledger.defects if d.id == "API-01")
+    kw = dict(
+        title="Orders list ignores the limit parameter",
+        summary="unbounded pagination, limit ignored",
+        location={"endpoint": "GET /v1/orders", "paths": ["api/app/routes/orders.py"]},
+    )
+    expected = similarity(env(domain=Domain.API, **kw), api_01)
+    surprising = similarity(env(domain=Domain.DATABASE, **kw), api_01)
+    assert expected > surprising > MATCH_THRESHOLD
 
 
 def test_two_defects_in_one_file_on_one_route_are_both_credited(ledger):

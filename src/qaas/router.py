@@ -469,6 +469,21 @@ class Router:
         if spec is None:
             return self.maps.latest_version()
 
+        # A resumed run does not re-map. MAPPER reads the whole repository and
+        # is the single most expensive agent in the roster, and the map it
+        # publishes is versioned and pinned -- re-running it on resume buys an
+        # identical artifact at full price. Caught by watching a resume do
+        # exactly that: `_phase_discover` skipped its completed agents and this
+        # phase happily dispatched MAPPER again.
+        if spec.name in self._succeeded_agents(store):
+            version = self.maps.latest_version()
+            store.log(
+                "skipped", agent=spec.name,
+                reason="already mapped in this run; resuming on the published map",
+                version=version,
+            )
+            return version
+
         budget.check(reserve=True)
         before = self.maps.latest_version()
         outcome = await self._dispatch(spec, store, budget, report, tasks.mapper(self.config), None)
