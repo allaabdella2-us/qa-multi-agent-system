@@ -300,6 +300,41 @@ def test_from_board_picks_up_a_dragged_card(runner, tmp_path, monkeypatch):
     assert "run-board" in result.output
 
 
+def test_naming_a_ticket_directly_also_finds_the_run_that_holds_it(runner, tmp_path, monkeypatch):
+    """`--ticket` is the form the manual documents, and it got no resolution.
+
+    `_run_holding_tickets` was called only inside the `--from-board` branch, so
+    a bare `--ticket` left `run_id` as None. The router opened a fresh empty
+    store, `_phase_verify` filtered the ticket against its zero envelopes,
+    logged "unknown tickets", and the run exited 0 having dispatched nothing --
+    a silent no-op that reads as a clean run in every summary it prints.
+    """
+    config, _ = _board_project(tmp_path, status="in_review")
+    monkeypatch.setenv("QAAS_TARGET", "corvid")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        cli.app,
+        ["run", "--mode", "fix-cycle", "--config", str(config),
+         "--root", str(tmp_path / ".qaas"), "--ticket", "QAAS-1", "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "run-board" in result.output
+
+
+def test_a_ticket_no_run_knows_about_fails_loudly(runner, tmp_path, monkeypatch):
+    """The fix cycle cannot read evidence it has no run for, so it must not start."""
+    config, _ = _board_project(tmp_path, status="in_review")
+    monkeypatch.setenv("QAAS_TARGET", "corvid")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        cli.app,
+        ["run", "--mode", "fix-cycle", "--config", str(config),
+         "--root", str(tmp_path / ".qaas"), "--ticket", "QAAS-999", "--dry-run"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "no envelope in any run" in result.output
+
+
 def test_from_board_matches_the_status_case_blind(runner, tmp_path, monkeypatch):
     """"Ready for Fix" is whatever casing someone typed making the column.
 
@@ -341,3 +376,54 @@ def test_from_board_is_resolved_before_the_dry_run_renders(runner, tmp_path, mon
     board_line = result.output.index("from the board")
     plan_line = result.output.index("VERIFIER")
     assert board_line < plan_line, result.output
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Claude Code returned an error result: You've hit your session limit · resets 5:20pm",
+        "Error: rate limit exceeded, try again later",
+        "usage limit reached for this account",
+    ],
+)
+def test_a_run_stops_before_dispatch_when_the_model_is_refusing_work(monkeypatch, output):
+    """Thirteen agents walked into the same wall one at a time.
+
+    An account session limit is not a code failure and the router handles it
+    correctly — each agent escalates and the run carries on. But finding out
+    thirteen times costs forty minutes and a bill to learn what one probe
+    answers in three seconds. That run produced exactly one working agent.
+    """
+    import subprocess
+
+    from qaas import cli
+
+    monkeypatch.setattr(cli, "_claude_cli", lambda: "/fake/claude")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout=output, stderr=""),
+    )
+    assert cli._quota_preflight() is not None
+
+
+def test_a_healthy_model_lets_the_run_proceed(monkeypatch):
+    import subprocess
+
+    from qaas import cli
+
+    monkeypatch.setattr(cli, "_claude_cli", lambda: "/fake/claude")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="ok", stderr=""),
+    )
+    assert cli._quota_preflight() is None
+
+
+def test_a_preflight_that_cannot_run_is_not_a_reason_to_refuse(monkeypatch):
+    """No binary, or a probe that times out, must not block a run. The preflight
+    is an optimisation; treating its own failure as a failure would make it a
+    liability."""
+    from qaas import cli
+
+    monkeypatch.setattr(cli, "_claude_cli", lambda: None)
+    assert cli._quota_preflight() is None

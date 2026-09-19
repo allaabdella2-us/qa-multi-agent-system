@@ -336,6 +336,96 @@ defects:
       was scored as noise and counted against precision. The entry was misfiled,
       not the finding.
 
+  - id: DB-01
+    domain: database
+    class: bug
+    severity: major
+    title: Nothing stops one SKU appearing twice in an order, and the total doubles
+    location:
+      service: orders-api
+      endpoint: POST /v1/orders
+      paths: [api/migrations/001_init.sql:51, api/app/routes/orders.py:67, api/app/routes/orders.py:78]
+    detail: >
+      `order_items` carries a plain index on (order_id, sku) where a UNIQUE
+      constraint was intended -- the index makes the lookup fast and enforces
+      nothing. `create_order` appends one row per submitted item without
+      checking for a repeat, then computes `total_cents` as the sum of
+      quantity * unit_price over those rows. Submitting the same SKU twice is
+      accepted, stores two lines, and silently doubles the order total. The
+      application assumes the uniqueness; the database does not enforce it.
+    # Keywords are what an entry uses to say what the defect *is*, and the
+    # anchor gate in `similarity` only bites when they fail to overlap. These
+    # began as ["unique", "constraint", "index", ...] and a finding about
+    # models.py declaring none of the migration's constraints -- a different
+    # defect, in the opposite direction -- scored 0.90 here on the shared
+    # endpoint plus those three generic words. Every database report on
+    # POST /v1/orders would have been credited with finding this one. What is
+    # specific to *this* defect is the repeated SKU and the doubled total.
+    keywords: ["duplicate sku", "same sku twice", "order_items", "doubles", "total_cents", "unique index"]
+    phase: 1
+
+  - id: SEC-01
+    domain: security
+    class: vulnerability
+    severity: blocker
+    security_relevant: true
+    title: JWT signing key falls back to a secret committed to this repository
+    location:
+      service: orders-api
+      paths: [api/app/config.py:34, docker-compose.yml, api/app/auth.py:57]
+    detail: >
+      `get_settings` reads JWT_SECRET from the environment and falls back to the
+      literal "corvid-local-development-secret-key" when it is unset. Nothing
+      fails, warns, or refuses to boot. Any deployment that forgets the variable
+      signs its tokens with a key published in the source tree, so anyone can
+      mint a token for any org_id and any role. Verified against the running
+      app: a token forged from the committed string was accepted on
+      GET /v1/orders and returned another organisation's data.
+    keywords: ["jwt", "secret", "hardcoded", "fallback", "default", "sign", "forge", "token"]
+    phase: 1
+
+  - id: PERF-01
+    domain: performance
+    class: bug
+    severity: major
+    title: Listing invoices issues one extra query per row for the order reference
+    location:
+      service: orders-api
+      endpoint: GET /v1/invoices
+      paths: [api/app/routes/invoices.py:41, api/app/models.py:103, api/app/schemas.py:60]
+    detail: >
+      `list_invoices` selects a page of invoices in one statement and then reads
+      `invoice.order.reference` for each of them. `Invoice.order` is a plain
+      relationship with SQLAlchemy's default lazy loading, so every row emits
+      its own SELECT: a 25-row page costs 26 queries, and the default page size
+      is the only thing keeping it small. `Order.items` two files away sets
+      `lazy="selectin"` for exactly this reason, which is what makes the
+      omission a defect rather than a style.
+    keywords: ["n+1", "lazy", "query", "per row", "selectin", "invoices", "relationship"]
+    phase: 1
+
+  - id: WS-01
+    domain: websocket
+    class: bug
+    severity: major
+    security_relevant: true
+    title: The order stream checks the token once and then never again
+    location:
+      service: orders-api
+      endpoint: WEBSOCKET /v1/orders/stream
+      paths: [api/app/routes/stream.py:52, api/app/routes/stream.py:66, api/app/config.py:26]
+    detail: >
+      `orders_stream` decodes the token before `accept()` and then enters a loop
+      that polls the database every two seconds for as long as the socket is
+      open. The claims are never re-read and the expiry is never re-checked, so
+      a connection established one second before the token expires keeps
+      receiving that organisation's orders indefinitely --
+      `access_token_ttl_minutes` is 60, and a socket can stay open for days.
+      Revoking access on the HTTP surface does nothing to a stream that is
+      already running.
+    keywords: ["websocket", "token", "expiry", "revalidate", "revoke", "stream", "session"]
+    phase: 1
+
 # Things that look like defects and are not. A finding that matches one of these
 # is a false positive and is scored as such.
 not_defects:

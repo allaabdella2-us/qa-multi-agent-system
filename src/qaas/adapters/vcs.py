@@ -79,6 +79,16 @@ class VcsAdapter(ABC):
         """Local branch names."""
 
 
+#: Git subcommands that can change a repository. Reads (`status`, `log`, `diff`,
+#: `rev-parse`) are harmless wherever they run; these are the ones that must
+#: prove they are pointed at the target's own checkout first.
+_MUTATING_GIT = frozenset({
+    "add", "commit", "branch", "checkout", "switch", "restore", "rm", "mv",
+    "push", "tag", "apply", "am", "rebase", "merge", "reset", "clean", "stash",
+    "cherry-pick", "revert", "worktree", "init",
+})
+
+
 class LocalGit(VcsAdapter):
     """git in a local checkout, driven by argv lists.
 
@@ -90,10 +100,61 @@ class LocalGit(VcsAdapter):
     def __init__(self, repo: Path | str, timeout_s: int = GIT_TIMEOUT_S):
         self.repo = Path(repo).resolve()
         self.timeout_s = timeout_s
+        self._verified_root = False
 
     # -- plumbing ---------------------------------------------------------
 
+    def _require_own_repo(self) -> None:
+        """Refuse to touch a repository the target does not own.
+
+        `git` does not stop at a directory boundary. Every path check in this
+        system is anchored on `target_root` -- `Guardrail._check_path`, the test
+        runner's cwd, the vcs write sandbox -- and all of them hold. Git ignores
+        every one of them: run it inside a directory that is *part of* a larger
+        checkout and it operates on the enclosing repository.
+
+        This is not hypothetical and it is not subtle. The bundled demo lives at
+        `target-app/` inside the qaas checkout and has no `.git` of its own, so a
+        single nightly run created eighteen `qa/repro/*` branches in the qaas
+        repository and left the working tree checked out on one of them, based
+        off `main`. Every source file appeared to have reverted. 989 tests passed
+        the whole time, because the offline suite drives `LocalGit` against
+        temporary directories that *are* their own repositories -- which is
+        exactly the case that works.
+
+        The rule: the target root must be the git root. A subdirectory of a
+        larger repository is refused with the two commands that fix it, rather
+        than silently branching somebody's monorepo.
+        """
+        if self._verified_root:
+            return
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=self.repo, capture_output=True, text=True,
+            timeout=self.timeout_s, check=False,
+        )
+        if proc.returncode != 0:
+            raise VcsError(
+                f"{self.repo} is not a git repository, so there is nowhere to branch or "
+                f"commit. Run `git init` there, or point the target profile at a checkout."
+            )
+        toplevel = Path(proc.stdout.strip()).resolve()
+        if toplevel != self.repo:
+            raise VcsError(
+                f"{self.repo} is inside the git repository at {toplevel}, not its own. "
+                "Refusing: git does not stop at a directory boundary, so branching or "
+                "committing here would operate on the enclosing checkout — including "
+                "switching its working tree out from under whoever is using it. Make the "
+                f"target its own repository (`git init {self.repo}`) or point the profile "
+                "at one."
+            )
+        self._verified_root = True
+
     def _git(self, *args: str, check: bool = True) -> str:
+        # Reads are fine anywhere; anything that could *change* a repository has
+        # to prove it is changing the right one.
+        if args and args[0] in _MUTATING_GIT:
+            self._require_own_repo()
         try:
             proc = subprocess.run(
                 ["git", *args],

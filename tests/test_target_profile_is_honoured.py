@@ -147,3 +147,56 @@ def test_no_tool_description_names_one_specific_application(needle):
     A tool description is read by the model, so it is a prompt."""
     src = Path(contract_diff.__file__).read_text()
     assert needle not in src, f"a tool description still names the demo app: {needle}"
+
+
+def test_a_target_inside_a_larger_repo_blocks_a_run_rather_than_warning(tmp_path):
+    """The distinction is damage, not inconvenience.
+
+    `cli.run` treated everything except a missing root as a yellow warning and
+    carried on. So the target-inside-a-larger-checkout condition — the one that
+    rewrote a developer's working tree mid-run — was *printed* and then ignored.
+    A missing API spec costs one agent some context; this costs you your branch.
+    """
+    import subprocess
+
+    from qaas.cli import BLOCKING_READINESS
+    from qaas.target import TargetProfile
+
+    outer = tmp_path / "monorepo"
+    inner = outer / "services" / "api"
+    inner.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+
+    profile = TargetProfile(name="inner", root=str(inner))
+    problems = profile.readiness()
+    assert any("not its own" in p for p in problems), problems
+    assert any(
+        any(marker in p for marker in BLOCKING_READINESS) for p in problems
+    ), "the git-root problem must block, not warn"
+
+
+def test_a_target_that_owns_its_repo_is_clean(tmp_path):
+    import subprocess
+
+    from qaas.target import TargetProfile
+
+    repo = tmp_path / "own"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    assert TargetProfile(name="own", root=str(repo)).readiness() == []
+
+
+def test_a_capability_gap_still_only_warns(tmp_path):
+    """Not everything should stop a run. A missing spec is a smaller world for
+    one agent, not a reason to refuse."""
+    from qaas.cli import BLOCKING_READINESS
+    from qaas.target import TargetProfile
+
+    root = tmp_path / "plain"
+    root.mkdir()
+    profile = TargetProfile(name="plain", root=str(root), layout={"spec": "openapi.yaml"})
+    problems = profile.readiness()
+    assert any("API spec not found" in p for p in problems)
+    assert not any(
+        any(marker in p for marker in BLOCKING_READINESS) for p in problems
+    ), "a missing spec must not block a run"

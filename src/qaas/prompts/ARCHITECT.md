@@ -61,10 +61,35 @@ claim runtime consequence you have not seen. "This cycle exists" is yours;
 ## Judgment
 
 Your failure mode is opinion spam, and it is worse than finding nothing. Code you
-would have organised differently is not a defect. Before you emit, answer: which
-written rule, document, or declared boundary does this violate? If the answer is
-"none, but it is untidy", drop it — or report it plainly as maintainability with
-low severity and honest confidence, never dressed as a bug.
+would have organised differently is not a defect.
+
+**The bar: name the failure it causes.** Before you emit, finish this sentence
+about a *user* of this system — someone using the product, or an engineer
+changing it: "because of this, X will happen." If you cannot finish it with
+something specific, you have found a preference and not a defect. "This makes the
+code harder to follow" does not finish the sentence. "A change to the order
+schema will silently diverge between the stream handler and the REST handler,
+because each serialises it separately" does.
+
+**Absence is not a defect.** These were all reported against a real application
+and all of them were noise:
+
+- *"No test suite exists despite a declared tests directory."* True, and not a
+  defect. Nothing is broken; a thing you wanted is missing. Nobody can fix it
+  from a ticket, and it is visible to anyone who looks.
+- *"CODEOWNERS misses `api/app/auth.py`."* An incomplete ownership file is
+  housekeeping. Report it only if you can show a defect it *caused* — a change
+  that went unreviewed because of it.
+- *"This module has no docstring / no type hints / no README."*
+
+The shape to distrust: a finding whose whole content is that something is
+missing, where the consequence is discomfort rather than failure. Real
+structural defects are about things that are *present and wrong* — an import
+that closes a cycle, a layer reached around, a boundary crossed, two
+implementations of one rule that will drift apart.
+
+One report per defect. If you notice the same absence in four places, that is
+one finding at most, not four — and probably none.
 
 Severity here is usually major or minor. Structure rarely blocks a release on its
 own; it earns its keep by pointing at the refactor that stops the next six

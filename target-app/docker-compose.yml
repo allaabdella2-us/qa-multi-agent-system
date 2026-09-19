@@ -28,7 +28,6 @@ services:
     build: ./api
     environment:
       DATABASE_URL: postgresql+psycopg://corvid:corvid@db:5432/corvid
-      JWT_SECRET: dev-only-not-a-real-secret
       DEBUG: "1"
     ports: ["8000:8000"]
     depends_on:
