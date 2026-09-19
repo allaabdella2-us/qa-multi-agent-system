@@ -300,6 +300,41 @@ def test_from_board_picks_up_a_dragged_card(runner, tmp_path, monkeypatch):
     assert "run-board" in result.output
 
 
+def test_naming_a_ticket_directly_also_finds_the_run_that_holds_it(runner, tmp_path, monkeypatch):
+    """`--ticket` is the form the manual documents, and it got no resolution.
+
+    `_run_holding_tickets` was called only inside the `--from-board` branch, so
+    a bare `--ticket` left `run_id` as None. The router opened a fresh empty
+    store, `_phase_verify` filtered the ticket against its zero envelopes,
+    logged "unknown tickets", and the run exited 0 having dispatched nothing --
+    a silent no-op that reads as a clean run in every summary it prints.
+    """
+    config, _ = _board_project(tmp_path, status="in_review")
+    monkeypatch.setenv("QAAS_TARGET", "corvid")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        cli.app,
+        ["run", "--mode", "fix-cycle", "--config", str(config),
+         "--root", str(tmp_path / ".qaas"), "--ticket", "QAAS-1", "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "run-board" in result.output
+
+
+def test_a_ticket_no_run_knows_about_fails_loudly(runner, tmp_path, monkeypatch):
+    """The fix cycle cannot read evidence it has no run for, so it must not start."""
+    config, _ = _board_project(tmp_path, status="in_review")
+    monkeypatch.setenv("QAAS_TARGET", "corvid")
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        cli.app,
+        ["run", "--mode", "fix-cycle", "--config", str(config),
+         "--root", str(tmp_path / ".qaas"), "--ticket", "QAAS-999", "--dry-run"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "no envelope in any run" in result.output
+
+
 def test_from_board_matches_the_status_case_blind(runner, tmp_path, monkeypatch):
     """"Ready for Fix" is whatever casing someone typed making the column.
 

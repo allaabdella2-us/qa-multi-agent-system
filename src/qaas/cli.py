@@ -1522,19 +1522,27 @@ def run(
             f"{', '.join(sorted(found))}"
         )
         tickets = sorted(set(tickets or []) | found)
-        # The fix cycle reads each finding, its evidence and its failing test
-        # out of the run that produced it, so "which run" is not optional -- it
-        # is just something a person dragging a card should not have to know.
+
+    # The fix cycle reads each finding, its evidence and its failing test out of
+    # the run that produced it, so "which run" is not optional -- it is just
+    # something a person naming a ticket should not have to know.
+    #
+    # This resolution used to live inside the `--from-board` branch, so the
+    # documented `--ticket` form never got it: `run_id` stayed None, the router
+    # opened a fresh empty store, `_phase_verify` filtered the tickets against
+    # its zero envelopes and logged "unknown tickets", and the run exited 0
+    # having dispatched nothing. The board path worked and the flag the manual
+    # shows did not, and it failed as a clean no-op rather than an error.
+    if tickets and run_id is None:
+        run_id = _run_holding_tickets(root, set(tickets))
         if run_id is None:
-            run_id = _run_holding_tickets(root, found)
-            if run_id is None:
-                console.print(
-                    "[red]those tickets name no envelope in any run under "
-                    f"{root}[/red]. The fix cycle needs the run that found the "
-                    "defect; this board may be pointed at a different checkout."
-                )
-                raise typer.Exit(1)
-            console.print(f"[dim]working from[/dim] {run_id}")
+            console.print(
+                "[red]those tickets name no envelope in any run under "
+                f"{root}[/red]. The fix cycle needs the run that found the "
+                "defect; this board may be pointed at a different checkout."
+            )
+            raise typer.Exit(1)
+        console.print(f"[dim]working from[/dim] {run_id}")
 
     if dry_run:
         # The same search path the run itself would use, so `prompt: N chars`
