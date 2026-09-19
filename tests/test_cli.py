@@ -341,3 +341,54 @@ def test_from_board_is_resolved_before_the_dry_run_renders(runner, tmp_path, mon
     board_line = result.output.index("from the board")
     plan_line = result.output.index("VERIFIER")
     assert board_line < plan_line, result.output
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "Claude Code returned an error result: You've hit your session limit · resets 5:20pm",
+        "Error: rate limit exceeded, try again later",
+        "usage limit reached for this account",
+    ],
+)
+def test_a_run_stops_before_dispatch_when_the_model_is_refusing_work(monkeypatch, output):
+    """Thirteen agents walked into the same wall one at a time.
+
+    An account session limit is not a code failure and the router handles it
+    correctly — each agent escalates and the run carries on. But finding out
+    thirteen times costs forty minutes and a bill to learn what one probe
+    answers in three seconds. That run produced exactly one working agent.
+    """
+    import subprocess
+
+    from qaas import cli
+
+    monkeypatch.setattr(cli, "_claude_cli", lambda: "/fake/claude")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout=output, stderr=""),
+    )
+    assert cli._quota_preflight() is not None
+
+
+def test_a_healthy_model_lets_the_run_proceed(monkeypatch):
+    import subprocess
+
+    from qaas import cli
+
+    monkeypatch.setattr(cli, "_claude_cli", lambda: "/fake/claude")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="ok", stderr=""),
+    )
+    assert cli._quota_preflight() is None
+
+
+def test_a_preflight_that_cannot_run_is_not_a_reason_to_refuse(monkeypatch):
+    """No binary, or a probe that times out, must not block a run. The preflight
+    is an optimisation; treating its own failure as a failure would make it a
+    liability."""
+    from qaas import cli
+
+    monkeypatch.setattr(cli, "_claude_cli", lambda: None)
+    assert cli._quota_preflight() is None

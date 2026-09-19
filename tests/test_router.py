@@ -888,3 +888,54 @@ async def test_a_verified_fix_makes_the_next_sighting_a_regression(cfg, tmp_path
     )
     if row is not None:
         assert row["resolved_at"], "resolved_at is what makes a recurrence a regression"
+
+
+async def test_a_resumed_run_does_not_repeat_the_agents_that_succeeded(
+    cfg, tmp_path, fake_agents
+):
+    """The change that makes a failed run cheap to finish.
+
+    `--run-id` re-dispatched every discovery agent, so a run that died at the
+    twelfth of thirteen cost all thirteen to retry — resume was useless exactly
+    when it was needed. Three separate failures (a misconfigured tracker, a git
+    bug, an account rate limit) each paid full price and none of them produced a
+    score.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+
+    report = await make_conductor(cfg, tmp_path).run("pr-check")
+    first = {name for name, _ in calls}
+    assert "API" in first and "ARCHITECT" in first
+
+    calls.clear()
+    await make_conductor(cfg, tmp_path).run("pr-check", run_id=report.run_id)
+    second = {name for name, _ in calls}
+
+    assert "API" not in second, "a successful agent was asked to run again"
+    assert "ARCHITECT" not in second
+
+    store = RunStore(report.run_id, tmp_path, create=False)
+    assert any(
+        "already completed in this run" in str(e.detail.get("reason", ""))
+        for e in store.ledger("skipped")
+    ), "the skip was silent"
+
+
+async def test_an_agent_that_errored_is_retried_on_resume(cfg, tmp_path, fake_agents):
+    """Only *successful* finishes are skipped.
+
+    A rate-limited agent produced nothing, and that is the case this whole
+    change exists for — skipping it would make resume useless in the one
+    situation it was built to survive.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"subtype": "failure", "error": "session limit"}
+
+    report = await make_conductor(cfg, tmp_path).run("pr-check")
+    calls.clear()
+    behaviour["API"] = {}
+    await make_conductor(cfg, tmp_path).run("pr-check", run_id=report.run_id)
+
+    assert "API" in {name for name, _ in calls}, "the failed agent was not retried"

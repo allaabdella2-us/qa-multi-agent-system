@@ -508,6 +508,29 @@ class Router:
                 for spec in unusable:
                     self._emit("skipped", agent=spec.name, reason="target lacks the capability")
 
+        # Agents that already did their work in this run are not asked again.
+        #
+        # `--run-id` re-dispatched every discovery agent, so a run that died at
+        # the twelfth of thirteen cost all thirteen to retry -- which made resume
+        # useless exactly when it was needed, and is why three separate failures
+        # (a misconfigured tracker, a git bug, an account rate limit) each cost
+        # full price and none of them produced a score.
+        #
+        # Scoped to a *successful* finish. An agent that errored has produced
+        # nothing and must run again; one that was rate-limited is in that
+        # category, which is the case that matters most here.
+        done = self._succeeded_agents(store)
+        already = [s for s in discovery if s.name in done]
+        if already:
+            discovery = [s for s in discovery if s.name not in done]
+            store.log(
+                "skipped",
+                reason="already completed in this run; resuming the rest",
+                agents=sorted(s.name for s in already),
+            )
+            for spec in already:
+                self._emit("skipped", agent=spec.name, reason="already completed in this run")
+
         if not discovery:
             return
 
@@ -885,6 +908,21 @@ class Router:
             if branch:
                 return str(branch)
         return None
+
+    @staticmethod
+    def _succeeded_agents(store) -> set[str]:
+        """Agents that finished this run without an error.
+
+        Read back from the ledger rather than tracked in memory, because the
+        whole point is to survive a process that died. `agent_finished` carries
+        `error`, and an agent that errored produced nothing worth keeping -- a
+        rate-limited one most of all.
+        """
+        return {
+            e.agent
+            for e in store.ledger("agent_finished")
+            if e.agent and not e.detail.get("error")
+        }
 
     @staticmethod
     def _entry_since(store, kind: str, ticket_key: str, mark: int):

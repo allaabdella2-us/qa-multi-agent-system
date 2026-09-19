@@ -92,6 +92,52 @@ def _system_yaml(config_dir: Path | str | None) -> Path:
     return found or (ws.state_root / "config" / "system.yaml")
 
 
+#: Readiness problems that stop a run rather than warn about it.
+#:
+#: The distinction is whether proceeding does *damage* or merely loses a
+#: capability. A missing API spec means one agent has less to work with; a target
+#: root that does not exist, or that belongs to a larger git repository, means
+#: agents operate on something other than what the operator named -- and the
+#: second of those rewrote a developer's working tree mid-run while it was
+#: printed as a yellow warning and the run carried on.
+BLOCKING_READINESS = (
+    "does not exist",
+    "not a directory",
+    "not its own",          # target is inside a larger git checkout
+)
+
+
+def _quota_preflight() -> str | None:
+    """One cheap call, to find out now rather than thirteen agents from now.
+
+    An account session limit is not a code failure and the router handles it
+    correctly -- each agent escalates and the run carries on. But thirteen agents
+    walking into the same wall one at a time is forty minutes and a bill to learn
+    something one probe answers in three seconds, and the run that taught us this
+    produced exactly one working agent.
+
+    Returns the message to print and stop on, or None to proceed. Never raises:
+    a preflight that cannot run is not a reason to refuse a run.
+    """
+    import subprocess
+
+    binary = _claude_cli()
+    if binary is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [binary, "-p", "ok"],
+            capture_output=True, text=True, timeout=90, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    blob = f"{proc.stdout}\n{proc.stderr}"
+    for marker in ("session limit", "rate limit", "usage limit", "quota"):
+        if marker in blob.lower():
+            return blob.strip().splitlines()[-1][:300] if blob.strip() else marker
+    return None
+
+
 def _load_config_or_exit(config_dir: Path | str | None, target: str | None):
     """`load_config`, with a missing target reported rather than raised.
 
@@ -1408,7 +1454,7 @@ def run(
         )
     if cfg.profile:
         problems = cfg.profile.readiness()
-        blocking = [p for p in problems if "does not exist" in p or "not a directory" in p]
+        blocking = [p for p in problems if any(m in p for m in BLOCKING_READINESS)]
         if blocking:
             console.print(f"[red]target '{cfg.target}' is not usable:[/red]")
             for p in blocking:
@@ -1519,6 +1565,20 @@ def run(
             )
         elif kind == "stopped":
             console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
+
+    # Last thing before anything is dispatched, and skipped for --dry-run, which
+    # is meant to cost nothing at all.
+    if not dry_run:
+        limited = _quota_preflight()
+        if limited:
+            console.print(f"[red]the model is not accepting work right now:[/red] {limited}")
+            console.print(
+                "[dim]Every agent would fail the same way, one at a time. "
+                "Wait for the reset and run again -- and if a run is already part "
+                "way through, resume it with --run-id so the agents that "
+                "succeeded are not repeated.[/dim]"
+            )
+            raise typer.Exit(1)
 
     if run_id is not None:
         # `--run-id` means *resume*, and `RunStore` creates by default -- so a
