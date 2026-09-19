@@ -57,6 +57,8 @@ class OrderPage(BaseModel):
 
 
 class InvoiceOut(BaseModel):
+    order_reference: str = ""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int

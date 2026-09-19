@@ -45,6 +45,11 @@ CREATE TABLE order_items (
 
 CREATE INDEX order_items_order_id_idx ON order_items (order_id);
 
+-- One line per SKU per order. The application relies on this: create_order
+-- appends a row per submitted item and then sums quantity * unit_price, so a
+-- repeated SKU is counted twice and the order total silently doubles.
+CREATE INDEX order_items_order_sku_idx ON order_items (order_id, sku);
+
 CREATE TABLE invoices (
     id            SERIAL PRIMARY KEY,
     order_id      INTEGER NOT NULL REFERENCES orders (id) ON DELETE CASCADE,

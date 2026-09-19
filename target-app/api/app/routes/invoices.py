@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..auth import CurrentUser
 from ..db import get_db
 from ..models import Invoice, Order
-from ..schemas import InvoicePage
+from ..schemas import InvoiceOut, InvoicePage
 
 router = APIRouter(prefix="/v1/invoices", tags=["invoices"])
 
@@ -34,4 +34,14 @@ def list_invoices(
         stmt.order_by(Invoice.issued_at.desc(), Invoice.id.desc()).limit(limit).offset(offset)
     ).all()
 
-    return InvoicePage(items=list(rows), total=total, limit=limit, offset=offset)
+    # Each invoice carries its order's human-readable reference so the UI can
+    # show it without a second call.
+    items = [
+        InvoiceOut.model_validate(
+            {**invoice.__dict__, "order_reference": invoice.order.reference},
+            from_attributes=True,
+        )
+        for invoice in rows
+    ]
+
+    return InvoicePage(items=items, total=total, limit=limit, offset=offset)
