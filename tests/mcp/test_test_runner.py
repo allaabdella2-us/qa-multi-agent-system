@@ -8,6 +8,7 @@ the parser and the flake maths, not about this repo's own suite.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from support import CONFIG_SEARCH, PACKAGED_CONFIG
 
 from qaas.config import load_config
 from qaas.mcp.context import ToolContext, handlers
+from qaas.mcp import test_runner as tr
 from qaas.mcp.test_runner import MAX_FLAKE_RUNS, build_tools
 from qaas.store import RunStore, SystemMapStore
 
@@ -457,3 +459,104 @@ def _child_env_for_test(extra):
     from qaas.mcp.test_runner import _child_env
 
     return _child_env(extra)
+
+
+# -- which runner a project uses -------------------------------------------
+#
+# This server ran `python -m pytest` unconditionally, so on a TypeScript repo
+# with three vitest files it answered "No tests matched the default
+# collection". Everything that depends on running a test went with it:
+# REPRODUCER cannot commit a failing test the system can execute, VERIFIER
+# cannot verify a fix by running one, FIXER cannot check its own work.
+# Discovery reads source and works anywhere; proving and verifying was Python
+# only, which is the half that makes this more than a linter.
+
+
+def _package_json(root, **fields):
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "package.json").write_text(json.dumps(fields), encoding="utf-8")
+    return root
+
+
+def test_a_project_with_no_package_json_is_pytest(tmp_path):
+    """Every existing Python target must stay on exactly the path it was on."""
+    assert tr._detect_runner(tmp_path) == "pytest"
+
+
+def test_vitest_and_jest_are_detected_from_what_the_project_declares(tmp_path):
+    vite = _package_json(tmp_path / "a", devDependencies={"vitest": "^2.0.0"})
+    jest = _package_json(tmp_path / "b", devDependencies={"jest": "^29.0.0"})
+    assert tr._detect_runner(vite) == "vitest"
+    assert tr._detect_runner(jest) == "jest"
+
+
+def test_a_runner_named_only_in_a_script_still_counts(tmp_path):
+    """`npx vitest run` in scripts with no dependency entry is a real layout."""
+    root = _package_json(tmp_path / "c", scripts={"test": "vitest run"})
+    assert tr._detect_runner(root) == "vitest"
+
+
+def test_an_unreadable_package_json_falls_back_rather_than_raising(tmp_path):
+    root = tmp_path / "d"
+    root.mkdir()
+    (root / "package.json").write_text("{ not json", encoding="utf-8")
+    assert tr._detect_runner(root) == "pytest"
+
+
+def test_a_js_id_is_split_into_a_file_and_a_title(tmp_path):
+    """vitest and jest have no nodeid: a file narrows, `-t` matches the title."""
+    root = _package_json(tmp_path / "e", devDependencies={"vitest": "^2.0.0"})
+    assert tr._single_selectors(root, "src/lib/dates.test.ts::utcDayKey works") == [
+        "src/lib/dates.test.ts", "-t", "utcDayKey works",
+    ]
+    assert tr._single_selectors(root, "utcDayKey works") == ["-t", "utcDayKey works"]
+
+
+def test_a_pytest_nodeid_is_still_passed_through_whole(tmp_path):
+    assert tr._single_selectors(tmp_path, "tests/test_x.py::test_y") == [
+        "tests/test_x.py::test_y"
+    ]
+
+
+def test_the_jest_json_shape_becomes_the_same_rows_pytest_produces(tmp_path):
+    """vitest emits jest's shape, so one parser serves both."""
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({
+        "testResults": [{
+            "name": str(tmp_path / "src" / "money.test.ts"),
+            "assertionResults": [
+                {"fullName": "toMinor rounds half up", "status": "passed", "duration": 12},
+                {"fullName": "toMinor rejects NaN", "status": "failed", "duration": 3,
+                 "failureMessages": ["expected 1 to be 2"]},
+                {"fullName": "toMinor handles bigint", "status": "todo", "duration": None},
+            ],
+        }]
+    }), encoding="utf-8")
+
+    rows = tr._parse_js_report(report, tmp_path)
+    assert [r["outcome"] for r in rows] == ["passed", "failed", "skipped"]
+    assert rows[0]["nodeid"] == "src/money.test.ts::toMinor rounds half up"
+    assert rows[0]["duration_s"] == 0.012
+    assert "expected 1 to be 2" in rows[1]["message"]
+    # A missing duration must not crash the row it belongs to.
+    assert rows[2]["duration_s"] == 0.0
+
+
+def test_a_report_that_is_not_there_is_no_rows_rather_than_a_crash(tmp_path):
+    assert tr._parse_js_report(tmp_path / "absent.json", tmp_path) is None
+
+
+def test_the_js_runners_say_nothing_matched_in_prose(tmp_path):
+    """There is no distinct exit code: both exit 1 and write a sentence."""
+    said = tr._Completed(
+        argv=["npx"], returncode=1, stdout="No test files found, exiting with code 1",
+        stderr="", duration_s=0.1, timed_out=False, started=True,
+    )
+    assert tr._matched_nothing(said)
+
+
+def test_a_typescript_selector_is_recognised_as_a_path(tmp_path):
+    """The path-shape test was `.py` only, so a missing .ts became a -t filter."""
+    for name in ("src/x.test.ts", "src/x.test.tsx", "x.spec.js", "a/b.mjs"):
+        assert tr._looks_like_a_path(name), name
+    assert not tr._looks_like_a_path("rounds half up")

@@ -258,17 +258,44 @@ def _selector_refusal(ctx: ToolContext, cwd: Path, selector: str) -> str | None:
     if not resolved.exists() and _looks_like_a_path(selector):
         return (
             f"selector '{selector}' looks like a path but nothing exists at "
-            f"{resolved}. If you meant a keyword expression, drop the path "
-            "separator and the .py; if you meant a file, check the path against "
-            f"what is in {cwd}."
+            f"{resolved}. If you meant a keyword filter, drop the path "
+            "separator and the extension; if you meant a file, check the path "
+            f"against what is in {cwd}."
         )
     return None
 
 
+#: Test-file extensions across the runners this server knows about. A selector
+#: ending in one of these was written as a file, whatever language the project
+#: turns out to be in.
+_TEST_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
+
+
 def _looks_like_a_path(selector: str) -> bool:
-    """Was this selector written as a file, rather than as a -k expression?"""
+    """Was this selector written as a file, rather than as a keyword filter?"""
     head = selector.split("::", 1)[0]
-    return "::" in selector or "/" in head or "\\" in head or head.endswith(".py")
+    return (
+        "::" in selector
+        or "/" in head
+        or "\\" in head
+        or head.endswith(_TEST_SUFFIXES)
+    )
+
+
+def _single_selectors(cwd: Path, test_id: str) -> list[str]:
+    """One test's identity, in the argv shape its runner expects.
+
+    A pytest nodeid is `path::test` and pytest takes it whole. vitest and jest
+    have no nodeid: a file narrows the run and `-t` matches the full title, so
+    the same string has to be taken apart to mean the same thing.
+    """
+    runner = _detect_runner(cwd)
+    if runner not in _JS_RUNNERS:
+        return [test_id]
+    file, _, title = test_id.partition("::")
+    if title:
+        return [file, _KEYWORD_FLAG[runner], title]
+    return [_KEYWORD_FLAG[runner], test_id]
 
 
 def _selector_head(cwd: Path, selector: str) -> Path:
@@ -293,6 +320,141 @@ def _timeout(args: dict[str, Any]) -> tuple[int, str | None]:
             "longer than fifteen minutes is a finding in itself, not a longer wait."
         )
     return value, None
+
+
+# ---------------------------------------------------------------------------
+# Which runner this project uses
+# ---------------------------------------------------------------------------
+#
+# This server ran `python -m pytest` unconditionally. Pointed at a TypeScript
+# repository with three vitest files it answered "No tests matched the default
+# collection", and every tool that depends on running a test went with it:
+# REPRODUCER cannot commit a failing test the system can execute, VERIFIER
+# cannot verify a fix by running one, FIXER cannot check its own work.
+# Discovery reads source and works anywhere; proving and verifying was Python
+# only, which is the half that makes this more than a linter.
+#
+# vitest and jest both emit jest's JSON shape, so one parser serves both and
+# adding a third runner is a detection entry plus an argv builder.
+
+_JS_RUNNERS = ("vitest", "jest")
+
+#: How each runner spells "filter by test name". pytest takes an expression,
+#: the JS runners take a substring of the full title.
+_KEYWORD_FLAG = {"pytest": "-k", "vitest": "-t", "jest": "-t"}
+
+#: jest/vitest statuses -> the vocabulary the rest of this module speaks.
+_JS_OUTCOME = {
+    "passed": "passed", "failed": "failed", "pending": "skipped",
+    "skipped": "skipped", "todo": "skipped", "disabled": "skipped",
+}
+
+_JS_NO_TESTS_RE = re.compile(
+    r"no test (files |suites )?found|no tests found", re.IGNORECASE
+)
+
+
+def _detect_runner(cwd: Path) -> str:
+    """Which test runner this project uses. pytest unless it says otherwise.
+
+    Read from `package.json` rather than by globbing for `*.test.ts`, because a
+    repository holding both languages should still be decided by what it
+    declares. A project with no package.json is pytest, which keeps every
+    existing Python target on exactly the path it was on.
+    """
+    manifest = cwd / "package.json"
+    if not manifest.is_file():
+        return "pytest"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "pytest"
+    declared: set[str] = set()
+    for section in ("devDependencies", "dependencies"):
+        block = data.get(section)
+        if isinstance(block, dict):
+            declared |= set(block)
+    scripts = data.get("scripts")
+    script_text = " ".join(
+        v for v in (scripts or {}).values() if isinstance(v, str)
+    ) if isinstance(scripts, dict) else ""
+    for runner in _JS_RUNNERS:
+        if runner in declared or runner in script_text:
+            return runner
+    return "pytest"
+
+
+def _js_argv(runner: str, selectors: list[str], report_path: Path) -> list[str]:
+    """`npx --no-install` so the project's own pinned runner is what runs.
+
+    Without it npx will happily fetch a different major version from the
+    network mid-run and report against that instead.
+    """
+    if runner == "vitest":
+        argv = ["npx", "--no-install", "vitest", "run", "--reporter=json",
+                f"--outputFile={report_path}"]
+    else:
+        argv = ["npx", "--no-install", "jest", "--ci", "--json",
+                f"--outputFile={report_path}"]
+    return argv + selectors
+
+
+def _parse_js_report(path: Path, cwd: Path) -> list[dict[str, Any]] | None:
+    """Per-test rows from jest's JSON shape, which vitest also emits."""
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    files = report.get("testResults")
+    if not isinstance(files, list):
+        return None
+
+    rows: list[dict[str, Any]] = []
+    for result in files:
+        if not isinstance(result, dict):
+            continue
+        name = str(result.get("name") or "?")
+        try:
+            name = str(Path(name).relative_to(cwd))
+        except ValueError:
+            pass
+        for case in result.get("assertionResults") or []:
+            if not isinstance(case, dict):
+                continue
+            title = case.get("fullName") or case.get("title") or "?"
+            failures = [m for m in (case.get("failureMessages") or []) if m]
+            status = str(case.get("status", "unknown"))
+            rows.append(
+                {
+                    # `file::title` so a JS nodeid reads like a pytest one and
+                    # `_outcome_of`'s endswith match keeps working unchanged.
+                    "nodeid": f"{name}::{title}",
+                    "outcome": _JS_OUTCOME.get(status, status),
+                    "duration_s": round((case.get("duration") or 0) / 1000, 4),
+                    "message": _shorten("\n".join(failures)) if failures else None,
+                }
+            )
+    return rows
+
+
+async def _js_tests(
+    runner: str, cwd: Path, selectors: list[str], timeout_s: int
+) -> tuple[_Completed, list[dict[str, Any]], str]:
+    with tempfile.TemporaryDirectory(prefix="qaas-js-") as tmp:
+        report_path = Path(tmp) / "report.json"
+        proc = await _run_async(_js_argv(runner, selectors, report_path), cwd, timeout_s)
+        rows = _parse_js_report(report_path, cwd) or []
+    return proc, rows, f"{runner}-json"
+
+
+async def _run_tests(
+    cwd: Path, selectors: list[str], timeout_s: int
+) -> tuple[_Completed, list[dict[str, Any]], str]:
+    """Run this project's suite, whichever runner it uses."""
+    runner = _detect_runner(cwd)
+    if runner in _JS_RUNNERS:
+        return await _js_tests(runner, cwd, selectors, timeout_s)
+    return await _pytest(cwd, selectors, timeout_s)
 
 
 # ---------------------------------------------------------------------------
@@ -455,8 +617,11 @@ async def _pytest(cwd: Path, selectors: list[str], timeout_s: int) -> tuple[_Com
 
 
 def _matched_nothing(proc: _Completed) -> bool:
-    """Whether the selector picked no test at all, however pytest said so."""
+    """Whether the selector picked no test at all, however the runner said so."""
     if proc.returncode == _EXIT_NO_TESTS:
+        return True
+    # vitest and jest both exit 1 and say so in prose; there is no distinct code.
+    if proc.returncode != 0 and _JS_NO_TESTS_RE.search(proc.stdout + proc.stderr):
         return True
     return proc.returncode == _EXIT_USAGE_ERROR and bool(
         _NOT_FOUND_RE.search(proc.stdout + proc.stderr)
@@ -532,9 +697,12 @@ def build_tools(ctx: ToolContext) -> list:
             if refusal:
                 return err(refusal)
             head = _selector_head(cwd, selector)
-            selectors = [selector] if head.exists() else ["-k", selector]
+            selectors = (
+                [selector] if head.exists()
+                else [_KEYWORD_FLAG[_detect_runner(cwd)], selector]
+            )
 
-        proc, rows, parser = await _pytest(cwd, selectors, timeout_s)
+        proc, rows, parser = await _run_tests(cwd, selectors, timeout_s)
         if not proc.started:
             return err(proc.stderr)
         if _matched_nothing(proc) and not rows:
@@ -592,7 +760,7 @@ def build_tools(ctx: ToolContext) -> list:
         if refusal:
             return err(refusal)
 
-        proc, rows, parser = await _pytest(cwd, [test_id], timeout_s)
+        proc, rows, parser = await _run_tests(cwd, _single_selectors(cwd, test_id), timeout_s)
         if not proc.started:
             return err(proc.stderr)
         if _matched_nothing(proc):
@@ -601,8 +769,22 @@ def build_tools(ctx: ToolContext) -> list:
                 "'path/to/test_file.py::test_name'."
             )
 
-        outcome = _outcome_of(rows, test_id, proc)
         row = next((r for r in rows if r["nodeid"] == test_id or r["nodeid"].endswith(test_id)), None)
+        # `_outcome_of` falls back to the exit code when no row matches, which is
+        # right for pytest's terminal parser -- it can miss a row for a test that
+        # really ran -- and wrong for the JS runners. `-t` matching nothing marks
+        # every test skipped and exits 0, so a mistyped title came back "passed"
+        # with no test behind it. The JSON reporter always writes a row per test,
+        # so here a missing row means the id named nothing.
+        if row is None and _detect_runner(cwd) in _JS_RUNNERS:
+            titles = [r["nodeid"] for r in rows][:5]
+            return err(
+                f"'{test_id}' matched no test in {cwd}. This project runs "
+                f"{_detect_runner(cwd)}, where an id is 'path/to/file.test.ts::"
+                "full test title'."
+                + (f" Titles in range: {titles}" if titles else "")
+            )
+        outcome = _outcome_of(rows, test_id, proc)
         detail = _failure_detail(proc.stdout)
         structured = {
             "nodeid": test_id,
@@ -672,7 +854,9 @@ def build_tools(ctx: ToolContext) -> list:
                     "one flake investigation was reached. Judge the flake on these."
                 )
                 break
-            proc, rows, _ = await _pytest(cwd, [test_id], max(1, int(min(timeout_s, remaining))))
+            proc, rows, _ = await _run_tests(
+                cwd, _single_selectors(cwd, test_id), max(1, int(min(timeout_s, remaining)))
+            )
             if not proc.started:
                 return err(proc.stderr)
             if attempt == 0 and _matched_nothing(proc):
@@ -822,7 +1006,10 @@ def build_tools(ctx: ToolContext) -> list:
             if refusal:
                 return err(refusal)
             head = _selector_head(cwd, selector)
-            selectors = [selector] if head.exists() else ["-k", selector]
+            selectors = (
+                [selector] if head.exists()
+                else [_KEYWORD_FLAG[_detect_runner(cwd)], selector]
+            )
 
         with tempfile.TemporaryDirectory(prefix="qaas-coverage-") as tmp:
             data_file = Path(tmp) / ".coverage"
