@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from qaas import cli
+from tests.support import make_project, write_scratch_target
 
 REPO = Path(__file__).resolve().parents[1]
 CONFIG = str(REPO / "src" / "qaas" / "defaults" / "config")
@@ -66,6 +67,45 @@ def test_dry_run_renders_the_plan_without_calling_the_api(runner):
     assert result.exit_code == 0, result.output
     assert "MAPPER" in result.output
     assert "tools:" in result.output
+
+
+def test_a_rehearsal_is_not_refused_for_a_danger_it_cannot_reach(runner, tmp_path, monkeypatch):
+    """`--dry-run` writes nothing, so the write-damage gate must not stop it.
+
+    Every BLOCKING_READINESS entry is justified by damage -- a root that is not
+    there, or one inside a larger checkout an agent would branch. A rehearsal
+    does neither, and refusing it removes the one command that answers "what
+    would this run do" *before* the target has been made ready.
+
+    This is the bundled demo's own shape, which is why it reached CI: target-app
+    sits inside this repository on purpose, so on a fresh clone it has no `.git`
+    and trips "not its own". The check passed on the machine it was written on
+    only because that machine had since acquired a target-app/.git.
+    """
+    import subprocess
+
+    project = make_project(tmp_path)
+    inner = project / "app-under-test"
+    write_scratch_target(project / ".qaas" / "config", inner, name="corvid")
+    subprocess.run(["git", "init", "-q", str(project)], check=True)   # target is NOT its own repo
+    monkeypatch.setenv("QAAS_TARGET", "corvid")
+    monkeypatch.chdir(project)
+
+    rehearsal = runner.invoke(
+        cli.app,
+        ["run", "--mode", "pr-check", "--config", str(project / ".qaas" / "config"), "--dry-run"],
+    )
+    assert rehearsal.exit_code == 0, rehearsal.output
+    assert "not usable" not in rehearsal.output
+
+    # The protection itself is unchanged: a run that would really dispatch is
+    # still refused, because that is the one that can rewrite someone's tree.
+    real = runner.invoke(
+        cli.app,
+        ["run", "--mode", "pr-check", "--config", str(project / ".qaas" / "config")],
+    )
+    assert real.exit_code == 1, real.output
+    assert "not its own" in real.output
 
 
 def test_unknown_agent_is_rejected_before_anything_runs(runner):

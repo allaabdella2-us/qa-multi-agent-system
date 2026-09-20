@@ -1454,7 +1454,23 @@ def run(
         )
     if cfg.profile:
         problems = cfg.profile.readiness()
-        blocking = [p for p in problems if any(m in p for m in BLOCKING_READINESS)]
+        # A rehearsal writes nothing, and every entry in BLOCKING_READINESS is
+        # justified by damage: a root that is not there, or one that belongs to
+        # a larger checkout an agent would branch. `--dry-run` does neither, so
+        # refusing it reports a danger that cannot happen and takes away the
+        # one command that answers "what would this run do" *before* the target
+        # is made ready.
+        #
+        # The bundled demo is the case that proves it. `target-app` lives inside
+        # this repository on purpose -- the sdist carries it so a contributor
+        # can score against it -- so on any fresh clone it has no `.git` of its
+        # own and trips "not its own". Blocking unconditionally therefore broke
+        # `qaas run --dry-run` for the shipped configuration, and CI with it,
+        # while passing on the machine where the check was written because that
+        # machine had since acquired a target-app/.git.
+        blocking = [] if dry_run else [
+            p for p in problems if any(m in p for m in BLOCKING_READINESS)
+        ]
         if blocking:
             console.print(f"[red]target '{cfg.target}' is not usable:[/red]")
             for p in blocking:
