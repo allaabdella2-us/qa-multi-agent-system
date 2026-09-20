@@ -21,7 +21,7 @@ CONFIG = str(REPO / "src" / "qaas" / "defaults" / "config")
 EXPECTED_COMMANDS = {
     "init", "targets", "doctor", "validate",
     "runs", "show", "trace", "map", "run", "score", "sweep", "tracker-check",
-    "board", "dashboard",
+    "board", "dashboard", "escalations", "answer",
 }
 
 
@@ -521,3 +521,243 @@ def test_a_preflight_that_cannot_run_is_not_a_reason_to_refuse(monkeypatch):
 
     monkeypatch.setattr(cli, "_claude_cli", lambda: None)
     assert cli._quota_preflight() is None
+
+
+# -- answering an escalation -------------------------------------------------
+#
+# `_verify_loop` ends every path in a verdict or an escalation, escalation is a
+# designed terminal state, and no command could end one. The two cases that
+# forced this: CORVID-7, where REVIEWER escalated a correct one-line fix on a
+# product question ("applying it exposes a UI regression already filed as
+# another ticket; ship now or hold?") and answering it meant calling the tracker
+# adapter from a Python script; and QAAS-31, where REVIEWER escalated because
+# the fix lay outside FIXER's write_paths and correctly refused to
+# REQUEST_CHANGES, since demanding a change the author may not make deadlocks
+# the loop.
+#
+# Everything below runs against the committed default (`tracker: local`) and
+# touches no tracker at all: the decision lives in the run's own ledger, which
+# is the only shape that behaves identically under `local` -- where "drag a
+# card" means hand-editing JSON -- and under a real Jira board.
+
+def _escalated(tmp_path, *, reason="QAAS-1: REVIEWER escalated the fix",
+               agent="REVIEWER", ticket_key="QAAS-1", run_id="run-board"):
+    """A run holding a ticketed envelope, blocked on a human."""
+    from qaas.store import RunStore
+
+    config, root = _board_project(tmp_path, status="in_review")
+    store = RunStore(run_id, root=root, create=False)
+    detail = {"reason": reason}
+    if ticket_key is not None:
+        detail["ticket_key"] = ticket_key
+    store.log("escalation", agent=agent, **detail)
+    return config, root
+
+
+def _decisions(root, run_id="run-board"):
+    from qaas.store import RunStore
+
+    return [e.detail for e in RunStore(run_id, root=root, create=False).ledger("human_decision")]
+
+
+def test_escalations_lists_what_is_blocked(runner, tmp_path):
+    _, root = _escalated(tmp_path)
+    result = runner.invoke(cli.app, ["escalations", "--root", str(root)])
+    assert result.exit_code == 0, result.output
+    assert "REVIEWER escalated the fix" in result.output
+    assert "qaas answer QAAS-1" in result.output, "a queue that cannot be acted on is a report"
+
+
+def test_an_empty_queue_says_so(runner, tmp_path):
+    _board_project(tmp_path, status="in_review")
+    result = runner.invoke(cli.app, ["escalations", "--root", str(tmp_path / ".qaas")])
+    assert result.exit_code == 0, result.output
+    assert "nothing is waiting" in result.output
+
+
+def test_answering_records_a_decision_the_next_run_reads(runner, tmp_path):
+    """The whole point: the answer has to survive the process that took it."""
+    _, root = _escalated(tmp_path)
+    result = runner.invoke(
+        cli.app,
+        ["answer", "QAAS-1", "--decision", "proceed", "--root", str(root),
+         "--note", "Ship it; the UI regression is tracked as QAAS-2."],
+    )
+    assert result.exit_code == 0, result.output
+    recorded = _decisions(root)
+    assert len(recorded) == 1
+    assert recorded[0]["ticket_key"] == "QAAS-1"
+    assert recorded[0]["decision"] == "proceed"
+    assert "tracked as QAAS-2" in recorded[0]["note"]
+
+
+def test_the_answer_lands_in_the_run_the_next_fix_cycle_resumes(runner, tmp_path):
+    """`--ticket` and `--from-board` both resume the run holding the envelope.
+
+    Writing the answer anywhere else puts it in a ledger the next run never
+    opens, and the question is asked again with the answer sitting on disk.
+    """
+    from qaas.store import RunStore
+
+    _, root = _escalated(tmp_path)
+    assert cli._run_holding_tickets(root, {"QAAS-1"}) == "run-board"
+    runner.invoke(
+        cli.app,
+        ["answer", "QAAS-1", "-d", "hold", "-n", "a human makes this edit", "--root", str(root)],
+    )
+    entries = list(RunStore("run-board", root=root, create=False).ledger("human_decision"))
+    assert len(entries) == 1
+
+
+def test_an_answered_escalation_leaves_the_queue(runner, tmp_path):
+    _, root = _escalated(tmp_path)
+    runner.invoke(
+        cli.app, ["answer", "QAAS-1", "-d", "proceed", "-n", "ship it", "--root", str(root)]
+    )
+
+    result = runner.invoke(cli.app, ["escalations", "--root", str(root)])
+    assert "nothing is waiting" in result.output
+    seen = runner.invoke(cli.app, ["escalations", "--root", str(root), "--all"])
+    assert "answered" in seen.output and "ship it" in seen.output
+
+
+def test_escalating_again_after_an_answer_is_waiting_again(runner, tmp_path):
+    """The ledger is append-only, so position is the test.
+
+    Pairing an answer with "any escalation for this ticket" would let last
+    week's decision silently close a question asked after it.
+    """
+    from qaas.store import RunStore
+
+    _, root = _escalated(tmp_path)
+    runner.invoke(
+        cli.app, ["answer", "QAAS-1", "-d", "proceed", "-n", "ship it", "--root", str(root)]
+    )
+    RunStore("run-board", root=root, create=False).log(
+        "escalation", agent="VERIFIER", ticket_key="QAAS-1",
+        reason="QAAS-1: REGRESSED, the fix broke something else",
+    )
+
+    result = runner.invoke(cli.app, ["escalations", "--root", str(root)])
+    assert "REGRESSED" in result.output
+    assert "1 waiting" in result.output
+
+
+def test_an_answer_written_into_a_later_run_still_clears_the_queue(runner, tmp_path):
+    """The escalation and the answer can live in different ledgers.
+
+    A later run that refiles the same defect holds the newest envelope, so that
+    is the run the next fix cycle resumes and the run the answer is written to.
+    Pairing them inside one ledger would leave the original escalation showing
+    as blocked forever, with the answer sitting one file over.
+    """
+    from qaas.store import RunStore
+
+    _, root = _escalated(tmp_path)
+    later = RunStore("run-zzz-newer", root=root, create=True)
+    later.log("run_started", mode="fix-cycle", agents=["VERIFIER"], wall_clock_s=900)
+    envelope = RunStore("run-board", root=root, create=False).envelopes()[0]
+    later.put_envelope(envelope.model_copy(update={"run_id": "run-zzz-newer"}))
+
+    result = runner.invoke(
+        cli.app, ["answer", "QAAS-1", "-d", "proceed", "-n", "ship it", "--root", str(root)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "run-zzz-newer" in result.output, "the answer must land where the fix cycle looks"
+    assert not _decisions(root, "run-board")
+
+    queue = runner.invoke(cli.app, ["escalations", "--root", str(root)])
+    assert "nothing is waiting" in queue.output
+
+
+def test_answering_a_ticket_nothing_is_blocked_on_is_refused(runner, tmp_path):
+    """Answering ends an escalation. It is not a way to inject instructions
+    into a run nobody asked a question about."""
+    _, root = _escalated(tmp_path)
+    result = runner.invoke(
+        cli.app, ["answer", "QAAS-999", "-d", "hold", "-n", "no", "--root", str(root)]
+    )
+    assert result.exit_code == 1, result.output
+    assert "nothing is blocked on QAAS-999" in result.output
+    assert not _decisions(root)
+
+
+def test_a_decision_outside_the_vocabulary_is_refused(runner, tmp_path):
+    """`HumanDecision` is closed for the reason `LedgerKind` is: a misspelling
+    must fail where it is typed, not become a decision every run ignores."""
+    _, root = _escalated(tmp_path)
+    result = runner.invoke(
+        cli.app, ["answer", "QAAS-1", "-d", "wont_fix", "-n", "accepted risk", "--root", str(root)]
+    )
+    assert result.exit_code == 1, result.output
+    assert "proceed" in result.output and "hold" in result.output
+    assert not _decisions(root)
+
+
+def test_a_decision_is_matched_case_blind(runner, tmp_path):
+    """A person types what they read. `--from-board` matches a status the same
+    way and for the same reason."""
+    _, root = _escalated(tmp_path)
+    result = runner.invoke(
+        cli.app, ["answer", "QAAS-1", "-d", "PROCEED", "-n", "ship it", "--root", str(root)]
+    )
+    assert result.exit_code == 0, result.output
+    assert _decisions(root)[0]["decision"] == "proceed"
+
+
+def test_an_answer_with_no_reasoning_is_refused(runner, tmp_path):
+    """`record_review` refuses REQUEST_CHANGES without concerns because FIXER
+    gets them verbatim. An answer carrying nothing forward is the same retry
+    one level up: the next run dispatches FIXER with an identical prompt."""
+    _, root = _escalated(tmp_path)
+    result = runner.invoke(
+        cli.app, ["answer", "QAAS-1", "-d", "proceed", "-n", "   ", "--root", str(root)]
+    )
+    assert result.exit_code == 1, result.output
+    assert "no reasoning" in result.output
+    assert not _decisions(root)
+
+
+def test_the_latest_answer_replaces_the_one_before_it(runner, tmp_path):
+    """Releasing a hold is answering again; nothing else could do it."""
+    _, root = _escalated(tmp_path)
+    runner.invoke(
+        cli.app,
+        ["answer", "QAAS-1", "-d", "hold", "-n", "wait for QAAS-2", "--root", str(root)],
+    )
+    again = runner.invoke(
+        cli.app, ["answer", "QAAS-1", "-d", "proceed", "-n", "QAAS-2 landed", "--root", str(root)]
+    )
+    assert again.exit_code == 0, again.output
+    assert "already carries an answer" in again.output
+    assert [d["decision"] for d in _decisions(root)] == ["hold", "proceed"]
+
+
+def test_an_escalation_with_no_ticket_is_listed_but_not_answerable(runner, tmp_path):
+    """A capped fan-out and a failed agent escalate with no ticket. They are
+    real and worth seeing, and there is nothing to hand back to the fix loop."""
+    _, root = _escalated(
+        tmp_path, agent="REPRODUCER", ticket_key=None,
+        reason="REPRODUCER fan-out capped at 25 findings",
+    )
+    result = runner.invoke(cli.app, ["escalations", "--root", str(root)])
+    assert "fan-out capped" in result.output
+    assert "not answerable" in result.output
+    assert "qaas answer" not in result.output
+
+
+def test_the_ticket_is_recovered_from_a_ledger_written_before_the_field(runner, tmp_path):
+    """`ticket_key` is in none of the ledgers already on disk, and every verify
+    loop escalation leads with the key by construction. The reader recovers it;
+    the writer never depends on that."""
+    _, root = _escalated(tmp_path, ticket_key=None)
+    result = runner.invoke(cli.app, ["escalations", "--root", str(root)])
+    assert "qaas answer QAAS-1" in result.output
+
+
+def test_show_says_how_to_answer_what_it_prints(runner, tmp_path):
+    _, root = _escalated(tmp_path)
+    result = runner.invoke(cli.app, ["show", "run-board", "--root", str(root)])
+    assert result.exit_code == 0, result.output
+    assert "escalations" in result.output
+    assert "qaas answer" in result.output

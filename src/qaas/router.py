@@ -38,7 +38,7 @@ from qaas.target import agent_usable
 from qaas.mcp import defect_memory
 from qaas.mcp.context import ToolContext
 from qaas.runner import RunOutcome, run_agent
-from qaas.store import AgentResult, RunStore, SystemMapStore
+from qaas.store import AgentResult, HumanDecision, RunStore, SystemMapStore
 from qaas import tasks
 
 
@@ -192,6 +192,82 @@ def _review_feedback(entry, observed: str) -> str:
     for concern in concerns:
         parts.append(f"  - {concern}")
     return "\n".join(parts)
+
+
+def _join(*parts: str) -> str:
+    """The non-empty pieces of a prompt's carried-forward context, in order."""
+    return "\n\n".join(p.strip() for p in parts if p and p.strip())
+
+
+@dataclass(frozen=True)
+class HumanAnswer:
+    """A human's answer to an escalation, read back out of the ledger.
+
+    Escalation is a designed terminal state and until `qaas answer` there was no
+    command that could end one: a person had to call the tracker adapter from a
+    Python script. Two live cases forced it. CORVID-7 -- REVIEWER escalated a
+    correct one-line fix on a genuine product question ("applying it exposes a
+    UI regression already filed as another ticket; ship now or hold?"), which is
+    exactly what escalation is for and had no channel back. QAAS-31 -- REVIEWER
+    escalated because the fix lay outside FIXER's `write_paths` and correctly
+    refused to REQUEST_CHANGES, since demanding a change the author may not make
+    deadlocks the loop.
+
+    Typed data assembled in Python, like `_review_feedback` beside it: no new
+    tool, nothing an agent writes, and nothing a model has to be trusted to pass
+    on. The answer travels in the run's own ledger because the fix cycle
+    *resumes* the run holding the envelopes (`--ticket` and `--from-board` both
+    resolve to it), so the next run opens the same file.
+    """
+
+    ticket_key: str
+    decision: str
+    note: str
+    author: str = ""
+
+
+def _human_answer(store, ticket_key: str) -> HumanAnswer | None:
+    """The standing human decision on this ticket, or None.
+
+    Deliberately *not* scoped to a mark, unlike `_entry_since`. A verdict
+    belongs to the dispatch that recorded it; a human decision belongs to the
+    ticket and stands until a human replaces it. If it expired with the run that
+    received it, the next fix cycle would re-ask the question that was already
+    answered -- which is the whole failure this exists to end.
+
+    The latest answer wins: a person may answer twice, and the second answer is
+    the one that is true.
+    """
+    found: HumanAnswer | None = None
+    for entry in store.ledger("human_decision"):
+        if entry.detail.get("ticket_key") != ticket_key:
+            continue
+        found = HumanAnswer(
+            ticket_key=ticket_key,
+            decision=str(entry.detail.get("decision") or ""),
+            note=str(entry.detail.get("note") or ""),
+            author=str(entry.detail.get("author") or ""),
+        )
+    return found
+
+
+def _human_guidance(answer: HumanAnswer | None) -> str:
+    """The answer as prose the next agent reads, or "" when nobody has answered.
+
+    Rendered here rather than in `tasks.py` for the same reason
+    `_review_feedback` is: the router holds the typed ledger data and the task
+    builder only has to give it somewhere to land.
+    """
+    if answer is None or not answer.note.strip():
+        return ""
+    by = f" (recorded by {answer.author})" if answer.author else ""
+    return (
+        f"A human has answered the escalation on {answer.ticket_key}. Their "
+        f"decision is `{answer.decision}`{by}, and in their words:\n\n"
+        f"{answer.note.strip()}\n\n"
+        "That is the answer to the question that was escalated. Do not escalate "
+        "the same question again — if something else is in the way, say what."
+    )
 
 
 @dataclass
@@ -931,6 +1007,21 @@ class Router:
         max_reopens = self.config.thresholds.max_proof_reopens
         reopens = 0
 
+        # A human's answer is a filter on *work*, exactly the way `--from-board`
+        # is: it chooses which tickets this run touches, never the order they
+        # happen in and never who is dispatched. Read before VERIFIER rather
+        # than after, because a held ticket re-verified every night is the whole
+        # cost QAAS-31 was paying -- REVIEWER escalated a fix lying outside
+        # FIXER's `write_paths`, which is human work by construction, and
+        # nothing in the system could be told so.
+        answer = _human_answer(store, ticket)
+        if answer is not None and answer.decision == HumanDecision.HOLD:
+            store.log(
+                "skipped", agent="VERIFIER", ticket_key=ticket,
+                reason=f"{ticket}: held by a human — {answer.note}",
+            )
+            return
+
         # The envelope names the *repro* branch, which by construction carries a
         # failing test and no fix -- it is written before any fix exists. Sending
         # VERIFIER back there after a remediation round made this loop unable to
@@ -960,28 +1051,31 @@ class Router:
 
             if verdict is None:
                 self._escalate(report, store, "VERIFIER",
-                    f"{ticket}: VERIFIER returned no verdict; the ticket stays in review")
+                    f"{ticket}: VERIFIER returned no verdict; the ticket stays in review",
+                    ticket_key=ticket)
                 return
             if verdict == "VERIFIED":
                 store.log("verified", agent="VERIFIER", ticket_key=ticket, reopens=reopens)
                 return
             if verdict == "REGRESSED":
                 self._escalate(report, store, "VERIFIER",
-                    f"{ticket}: REGRESSED — the fix broke something else; blocking for a human")
+                    f"{ticket}: REGRESSED — the fix broke something else; blocking for a human",
+                    ticket_key=ticket)
                 return
 
             # NOT_FIXED from here.
             if reopens >= max_reopens:
                 self._escalate(report, store, "VERIFIER",
                     f"{ticket}: still NOT_FIXED after {reopens} reopen(s), the limit. "
-                    "Escalating rather than cycling further")
+                    "Escalating rather than cycling further", ticket_key=ticket)
                 return
 
             reopens += 1
             store.log("reopened", agent="VERIFIER", ticket_key=ticket, attempt=reopens)
             mark = len(list(store.ledger("vcs")))
             if not await self._remediate(
-                envelope, specs, store, budget, report, map_version, observed=observed
+                envelope, specs, store, budget, report, map_version,
+                observed=observed, answer=answer,
             ):
                 return
             # Keep the previous branch if this round wrote nothing: a re-verify
@@ -989,7 +1083,8 @@ class Router:
             fix_branch = self._branch_written_since(store, mark) or fix_branch
 
     async def _remediate(
-        self, envelope, specs, store, budget, report, map_version, *, observed: str = ""
+        self, envelope, specs, store, budget, report, map_version, *,
+        observed: str = "", answer: HumanAnswer | None = None,
     ) -> bool:
         """FIXER -> REVIEWER, bounded. Returns whether a fix is ready to re-verify.
 
@@ -1003,6 +1098,15 @@ class Router:
         carried them, so round 2 dispatched FIXER with the same two arguments and
         a byte-identical prompt. `max_mender_arbiter_round_trips: 2` bought a
         second attempt at the same coin flip and a second bill.
+
+        `answer` is the same shape one level up, across runs rather than across
+        round trips. A human answers an escalation, the next fix cycle reopens
+        the ticket, and if nothing carries the answer forward both agents reach
+        the same escalation from the same starting position -- CORVID-7 asked a
+        product question twice for exactly that reason. So the guidance is
+        re-joined onto `feedback` on *every* trip: `_review_feedback` replaces
+        the string, and a human's standing decision must outlive a round of
+        REVIEWER's concerns rather than be overwritten by it.
         """
         ticket = envelope.jira.key
         fixer, reviewer = specs.get("FIXER"), specs.get("REVIEWER")
@@ -1010,11 +1114,13 @@ class Router:
         if fixer is None:
             self._escalate(report, store, "VERIFIER",
                 f"{ticket}: NOT_FIXED and no FIXER in this run's roster. "
-                "Nothing here can produce a fix; a human takes it from here")
+                "Nothing here can produce a fix; a human takes it from here",
+                ticket_key=ticket)
             return False
 
         fixer = _with_protected_test(fixer, envelope)
-        feedback = observed
+        guidance = _human_guidance(answer)
+        feedback = _join(guidance, observed)
 
         for trip in range(1, self.config.thresholds.max_mender_arbiter_round_trips + 1):
             budget.check()
@@ -1025,25 +1131,31 @@ class Router:
 
             budget.check()
             review_mark = len(list(store.ledger("review")))
+            # REVIEWER is usually the agent that escalated, and it has no
+            # feedback slot of its own -- so without this the reviewer that
+            # raised the question re-raises it having never been told the
+            # answer, and the human answers the same escalation every run.
             await self._dispatch(reviewer, store, budget, report,
-                                 tasks.reviewer(ticket, envelope), map_version)
+                                 tasks.reviewer(ticket, envelope, guidance=guidance), map_version)
             entry = self._entry_since(store, "review", ticket, review_mark)
             review = entry.detail.get("decision") if entry else None
             if review == "APPROVE":
                 return True
             if review == "ESCALATE_TO_HUMAN":
-                self._escalate(report, store, "REVIEWER", f"{ticket}: REVIEWER escalated the fix")
+                self._escalate(report, store, "REVIEWER",
+                    f"{ticket}: REVIEWER escalated the fix", ticket_key=ticket)
                 return False
             if entry is None:
                 self._escalate(report, store, "REVIEWER",
-                    f"{ticket}: REVIEWER recorded no decision; the fix stays unreviewed")
+                    f"{ticket}: REVIEWER recorded no decision; the fix stays unreviewed",
+                    ticket_key=ticket)
                 return False
-            feedback = _review_feedback(entry, observed)
+            feedback = _join(guidance, _review_feedback(entry, observed))
             store.log("review_round_trip", agent="REVIEWER", ticket_key=ticket, trip=trip)
 
         self._escalate(report, store, "REVIEWER",
             f"{ticket}: {self.config.thresholds.max_mender_arbiter_round_trips} "
-            "FIXER/REVIEWER round trips without approval; escalating")
+            "FIXER/REVIEWER round trips without approval; escalating", ticket_key=ticket)
         return False
 
     @staticmethod
@@ -1101,9 +1213,25 @@ class Router:
         ]
         return entries[-1] if entries else None
 
-    def _escalate(self, report, store, agent: str, note: str) -> None:
+    def _escalate(
+        self, report, store, agent: str, note: str, *, ticket_key: str | None = None
+    ) -> None:
+        """Record that this needs a human, and say which ticket if there is one.
+
+        `ticket_key` is what `qaas escalations` keys on and what `qaas answer`
+        writes back against. It could be recovered from the reason -- every
+        escalation raised in the verify loop leads with `f"{ticket}: ..."` --
+        and the reader still does that for the ledgers already on disk. Prose is
+        not a field, though: the moment one of these notes is reworded the
+        parser stops finding tickets and the queue quietly empties.
+        """
         report.escalations.append(note)
-        store.log("escalation", agent=agent, reason=note)
+        # Written only when there is one: `ticket_key: null` on every fan-out
+        # and agent-failure escalation is noise in a file people read by eye.
+        detail = {"reason": note}
+        if ticket_key:
+            detail["ticket_key"] = ticket_key
+        store.log("escalation", agent=agent, **detail)
         self._emit("escalation", agent=agent, reason=note)
 
     # -- dispatch ---------------------------------------------------------

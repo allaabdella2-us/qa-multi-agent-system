@@ -218,6 +218,14 @@ not escalating costs the whole run.
 VERIFIER's verdict is a **typed ledger entry** written through a tool
 (`record_verdict`), never parsed out of the agent's prose.
 
+Every `escalate` above is a designed ending, and `qaas answer` is how one ends.
+It appends a single `human_decision` line to the run's ledger — from a process
+with no agent in it, touching no tracker — and dispatches nothing; `qaas
+escalations` is the queue that line clears. `proceed` carries the human's note
+into the next fix cycle's FIXER *and* REVIEWER, assembled in Python by
+`_human_guidance` exactly as `_review_feedback` assembles REVIEWER's concerns.
+`hold` is read at the top of `_verify_loop`, before VERIFIER costs anything.
+
 ---
 
 ## 6. Data: what actually moves between agents

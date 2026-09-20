@@ -46,6 +46,7 @@ DETAIL_FIELDS: dict[LedgerKind, tuple[str, ...]] = {
     LedgerKind.REVIEW_ROUND_TRIP: ("ticket_key", "trip"),
     LedgerKind.ESCALATION: ("reason",),
     LedgerKind.QUOTA_EXHAUSTED: ("reason", "unfiled_findings", "resume"),
+    LedgerKind.HUMAN_DECISION: ("ticket_key", "decision", "note", "author"),
     LedgerKind.SKIPPED: ("reason",),
     LedgerKind.VCS: ("action", "branch", "path", "sha"),
     LedgerKind.ENV: ("action", "services", "role", "fixture"),

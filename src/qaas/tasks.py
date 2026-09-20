@@ -511,15 +511,27 @@ Work on a `fix/*` branch. Open the pull request as a draft with a rollback note.
 Never merge — merge is a human decision."""
 
 
-def reviewer(ticket_key: str, envelope: DefectEnvelope | None = None) -> str:
-    """The adversarial review task. REVIEWER is Phase 3."""
+def reviewer(
+    ticket_key: str, envelope: DefectEnvelope | None = None, *, guidance: str = ""
+) -> str:
+    """The adversarial review task. REVIEWER is Phase 3.
+
+    `guidance` is a human's answer to an escalation, assembled by the router out
+    of typed ledger data the way `feedback` is for FIXER. REVIEWER is usually
+    the agent that escalated, and it had no slot at all for an answer -- so the
+    reviewer that raised the question re-raised it on the next run having never
+    been told, and a person answered CORVID-7 once for every run that touched
+    it. It leads the task rather than trailing it: a reviewer that reads "this
+    was escalated and here is the decision" first reads the diff differently.
+    """
     context = ""
     if envelope:
         context = (
             f"\n\nThe defect it claims to fix: {envelope.title}\n"
             f"The test that defines success: {envelope.reproduction.failing_test or '(none recorded)'}\n"
         )
-    return f"""Review the fix for {ticket_key} as an adversarial reviewer.{context}
+    answered = f"\n{guidance.strip()}" if guidance.strip() else ""
+    return f"""Review the fix for {ticket_key} as an adversarial reviewer.{context}{answered}
 
 Does the change address the root cause or only the symptom? Is the diff minimal?
 Does it break a contract, a schema, or a public API? Does it introduce a security

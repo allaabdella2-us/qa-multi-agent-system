@@ -26,7 +26,7 @@ that outdates this file usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (BROWSER, GUIDE) runs
 
-pytest                                   # 1034 tests, no API calls, no network
+pytest                                   # 1104 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
@@ -41,6 +41,8 @@ qaas run --mode pr-check --dry-run       # renders each agent's options, no API 
 qaas run --mode nightly --only API       # real run, costs money
 qaas run --repo <path-or-url>            # clone, profile and run against anything
 qaas run --mode fix-cycle --from-board "Ready for Fix"   # the board picks the work
+qaas escalations                         # what is blocked on a human, across runs
+qaas answer <TICKET> --decision proceed|hold --note "..."   # end one escalation
 qaas runs / qaas show <run-id> / qaas map
 qaas trace <run-id> [--follow] [--quiet] [--agent NAME] [--kind KIND] [--json]
 qaas dashboard [<run-id>]                # the ledger and the config, in a browser
@@ -187,6 +189,39 @@ so `Guardrail._protected_path` always returned `False`.
 `_with_protected_test` deep-copies the spec per invocation and names that
 ticket's test: per-invocation because which test is protected depends on which
 ticket is being fixed, deep-copied because the roster is shared across the run.
+
+**Escalation is a designed ending, and it now has an answer.** `qaas escalations`
+lists what is blocked across runs; `qaas answer <TICKET> --decision proceed|hold
+--note "..."` ends one. Four properties are the design:
+
+- **It records; it never dispatches.** One `human_decision` line in the run's
+  ledger, appended by a process with no agent in it — the same discipline as
+  `router._record_outcomes` and `cli._persist_score`. ROUTER still schedules
+  everything out of the ledger under the same governor and loop breakers. Like
+  `--from-board`, a human chooses the *work* and never the order.
+- **The answer reaches the agents that asked.** `_human_answer` reads the line
+  back, `_human_guidance` renders it in Python out of typed fields, and it is
+  joined onto FIXER's existing `feedback` and into a new `guidance` slot on
+  `tasks.reviewer`. REVIEWER is usually the agent that escalated and had
+  nowhere to receive an answer, so it re-raised the same question every run —
+  the "a loop that carries nothing forward is a retry" bug, one level up and
+  across runs. The guidance is re-joined on *every* round trip, because
+  `_review_feedback` replaces the string.
+- **`hold` is read before VERIFIER**, not inside the fix loop: a ticket a human
+  has parked must not cost a dispatch to discover that. `proceed` is standing
+  guidance until it is replaced; the latest answer wins, and an escalation
+  raised *after* an answer is waiting again (the reader pairs them by position,
+  which is what append-only buys).
+- **Two decisions, and no third.** `wont_fix` was cut because the router cannot
+  tell it from `hold`. Both are bug-derived: CORVID-7 (REVIEWER escalated a
+  correct fix on a product question — ship now or hold?) needs `proceed` with a
+  note; QAAS-31 (the fix lies outside FIXER's `write_paths`) needs `hold`, and
+  emphatically **not** a decision that widens the §8.1 matrix until an agent
+  can reach it. Nothing an answer can say grants a path, a tool or a server.
+
+It touches no tracker, which is how it works identically under the committed
+`tracker: local` — where "drag a card" means hand-editing JSON — and under Jira,
+whose Bug workflow may not offer the house status vocabulary at all.
 
 ### Budget and time
 
@@ -679,7 +714,7 @@ and one clobbered result file.
 - `memory.db` — the cross-run defect memory.
 - `scores/<run-id>.json` — each scoring, persisted.
 
-The ledger's `kind` is a closed set (`store.LedgerKind`, 29 members) — **add a
+The ledger's `kind` is a closed set (`store.LedgerKind`, 30 members) — **add a
 member, never repurpose one**: the router reads `verdict`, `review` and `vcs`
 back for control flow, so these are a wire format, not labels. `store.ledger()`
 skips and counts lines it cannot parse; a run killed mid-write leaves a truncated

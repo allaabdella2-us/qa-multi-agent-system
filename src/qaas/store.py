@@ -89,11 +89,45 @@ class LedgerKind(StrEnum):
     REOPENED = "reopened"
     REVIEW = "review"
     REVIEW_ROUND_TRIP = "review_round_trip"
+    #: A human's answer to an escalation. Added rather than folded into
+    #: `review`: the router reads it back for control flow (whether a ticket is
+    #: worked at all, and what FIXER and REVIEWER are told), so it is a wire
+    #: format, and `review` means "an agent judged a fix" -- a different fact
+    #: with a different author. Written only by `qaas answer`, from a process
+    #: with no agent in it; no `write_paths` and no MCP tool reach it.
+    HUMAN_DECISION = "human_decision"
 
     # side effects on the world outside the run
     VCS = "vcs"
     ENV = "env"
     DRY_RUN = "dry_run"
+
+
+class HumanDecision(StrEnum):
+    """What a human may answer an escalation with.
+
+    Closed for the reason `LedgerKind` is closed: the router reads these back
+    and acts on them, so a misspelling must fail where it is typed rather than
+    become a decision nothing recognises and every run silently ignores.
+
+    Two members, and the third was deliberately dropped. `wont_fix` was drafted
+    and cut because the router cannot tell it from `hold` -- both stop the
+    ticket being worked, and a vocabulary carrying two words the reader cannot
+    distinguish teaches the next run nothing while asking the human to choose
+    between them. "We are not fixing this" is a `hold` whose note says so, and
+    the note is the part that survives.
+    """
+
+    #: Carry on. The note is the answer, and it reaches FIXER and REVIEWER
+    #: verbatim on the next fix cycle -- CORVID-7, where REVIEWER escalated a
+    #: correct fix on a product question ("applying it exposes a UI regression
+    #: filed as another ticket; ship now or hold?") and nothing could answer.
+    PROCEED = "proceed"
+    #: Stop working this ticket. The next fix cycle skips it before VERIFIER
+    #: costs anything -- QAAS-31, where REVIEWER escalated because the fix lies
+    #: outside FIXER's `write_paths`, which makes it human work by construction.
+    #: Answering `proceed` later replaces it; the latest answer stands.
+    HOLD = "hold"
 
 
 class LedgerEntry(BaseModel):
