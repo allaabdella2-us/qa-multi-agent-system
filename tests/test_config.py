@@ -380,3 +380,111 @@ def test_the_docs_agree_with_the_suite_about_its_own_size():
             f"{name} claims {stated} tests and there are {actual} -- the claim has "
             "fallen behind by more than 10%"
         )
+
+
+# -- an agent's paths belong to the target, not to the demo -----------------
+#
+# `write_paths` are target-relative globs and the shipped roster's were
+# target-app's own directories: FIXER carried `[api/app, web/src, qa/repro]`.
+# Against a real repository whose application lives under
+# `build-battle/merchant-console/src`, two of those three matched no file and
+# the survivor was `qa/repro` -- REPRODUCER's sandbox. FIXER ran, could reach no
+# product code, committed nothing that changed the defect, and reported success.
+# REVIEWER caught it by reading the diff; nothing else in the system would have.
+
+
+def _project_with_layout(tmp_path, name, **layout):
+    """A scratch config whose target declares a particular layout."""
+    from support import make_project
+
+    root = make_project(tmp_path)
+    app = tmp_path / "app"
+    app.mkdir(exist_ok=True)
+    targets = root / ".qaas" / "config" / "targets"
+    targets.mkdir(parents=True, exist_ok=True)
+    body = [f"name: {name}", f"root: {app}", "description: scratch",
+            "default_branch: main", "layout:"]
+    for section, paths in layout.items():
+        body.append(f"  {section}: [{', '.join(paths)}]")
+    body += ["environment:", "  mode: none", "auth:", "  mode: none"]
+    (targets / f"{name}.yaml").write_text("\n".join(body) + "\n", encoding="utf-8")
+    return root / ".qaas" / "config"
+
+
+def test_layout_tokens_resolve_to_this_target_s_own_directories(tmp_path):
+    config = _project_with_layout(
+        tmp_path, "widget", backend=["server/src"], frontend=["ui/src"]
+    )
+    cfg = load_config(config, target="widget")
+    paths = cfg.agents["FIXER"].policy.write_paths
+
+    assert "server/src" in paths and "ui/src" in paths
+    assert "$backend" not in paths and "$frontend" not in paths
+    # Literal entries beside the tokens are untouched.
+    assert "qa/repro" in paths
+
+
+def test_one_agent_file_serves_two_differently_shaped_repositories(tmp_path):
+    """The whole point: agent config is global, so it cannot name directories.
+
+    Editing FIXER for one repository used to mis-configure every other, and
+    `qaas doctor` reported the damage in both directions at once.
+    """
+    a = _project_with_layout(tmp_path / "a", "alpha", backend=["services/api"])
+    b = _project_with_layout(tmp_path / "b", "beta", frontend=["web/app"])
+
+    assert "services/api" in load_config(a, target="alpha").agents["FIXER"].policy.write_paths
+    assert "web/app" in load_config(b, target="beta").agents["FIXER"].policy.write_paths
+
+
+def test_a_section_the_profile_leaves_empty_grants_nothing(tmp_path):
+    """Expanding an empty section to the repository root would hand over the tree.
+
+    An agent that may write nowhere is a state `qaas doctor` reports and a human
+    fixes. It is not a reason to widen the §8.1 matrix by accident.
+    """
+    config = _project_with_layout(tmp_path, "backendless", backend=["server/src"])
+    paths = load_config(config, target="backendless").agents["FIXER"].policy.write_paths
+
+    assert "server/src" in paths
+    assert "." not in paths and "" not in paths
+    assert not any(p.startswith("$") for p in paths)
+
+
+def test_an_unknown_token_is_left_alone_rather_than_failing_the_load(tmp_path):
+    """It becomes a glob matching nothing, which doctor reports.
+
+    Better than refusing to load: the file may belong to someone else, and a
+    typo in it should not take the whole CLI down.
+    """
+    from qaas.config import expand_layout_tokens
+
+    class _Layout:
+        backend = ["server/src"]
+
+    assert expand_layout_tokens(["$backend", "$nonsense"], _Layout()) == [
+        "server/src", "$nonsense",
+    ]
+
+
+def test_a_per_target_agent_file_shadows_the_shared_one(tmp_path):
+    """Paths vary by layout token; a model or a turn cap needs a real overlay."""
+    config = _project_with_layout(tmp_path, "widget", backend=["server/src"])
+    overlay = config / "agents" / "widget"
+    overlay.mkdir(parents=True)
+    spec = yaml.safe_load((config / "agents" / "fixer.yaml").read_text())
+    spec["max_turns"] = 7
+    (overlay / "fixer.yaml").write_text(yaml.safe_dump(spec), encoding="utf-8")
+
+    assert load_config(config, target="widget").agents["FIXER"].max_turns == 7
+
+
+def test_an_overlay_for_another_target_is_not_applied(tmp_path):
+    config = _project_with_layout(tmp_path, "widget", backend=["server/src"])
+    overlay = config / "agents" / "somebody-else"
+    overlay.mkdir(parents=True)
+    spec = yaml.safe_load((config / "agents" / "fixer.yaml").read_text())
+    spec["max_turns"] = 7
+    (overlay / "fixer.yaml").write_text(yaml.safe_dump(spec), encoding="utf-8")
+
+    assert load_config(config, target="widget").agents["FIXER"].max_turns != 7

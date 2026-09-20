@@ -342,6 +342,80 @@ def _apply_overrides(raw: dict[str, Any], dirs: Sequence[Path]) -> None:
         raw["thresholds"] = current
 
 
+#: Layout sections an agent's paths may name instead of hard-coding a directory.
+#:
+#: `write_paths`, `protected_paths` and `forbidden_paths` are target-relative
+#: globs, and the shipped roster's were the bundled demo's directories:
+#: FIXER carried `[api/app, web/src, qa/repro]`. Pointed at a real repository
+#: whose application lives under `build-battle/merchant-console/src`, two of
+#: those three matched no file and the survivor was `qa/repro` -- REPRODUCER's
+#: sandbox. FIXER ran, could reach no product code, committed nothing that
+#: changed the defect, and reported success. REVIEWER caught it by reading the
+#: diff; nothing else would have.
+#:
+#: The profile already answers "where is the code" for every other consumer, so
+#: an agent should be able to say *which kind* of code it may touch and let the
+#: target say where that is. `$backend` is portable in a way `api/app` can
+#: never be.
+LAYOUT_TOKENS = ("backend", "frontend", "tests", "migrations", "docs")
+
+#: Policy fields whose entries may name a layout section.
+_PATH_FIELDS = ("write_paths", "protected_paths", "forbidden_paths")
+
+
+def expand_layout_tokens(paths: Sequence[str], layout: Any) -> list[str]:
+    """Replace `$section` with what the target profile says that section is.
+
+    A token the profile leaves empty expands to **nothing** rather than to the
+    repository root. An agent whose only write path is `$frontend` against a
+    backend-only project may write nowhere, which is correct and is what
+    `qaas doctor` reports; expanding to `.` would hand it the whole tree.
+
+    An unknown token is left alone. It is then an ordinary glob that matches
+    nothing, which the same doctor check reports -- and that is a better
+    outcome than a load failure for a typo in a file the user may not own.
+    """
+    out: list[str] = []
+    for entry in paths:
+        if not entry.startswith("$"):
+            out.append(entry)
+            continue
+        section = entry[1:]
+        if section not in LAYOUT_TOKENS:
+            out.append(entry)
+            continue
+        for path in getattr(layout, section, None) or []:
+            if path not in out:
+                out.append(path)
+    return out
+
+
+def _resolve_agent_paths(config: "SystemConfig") -> "SystemConfig":
+    """Expand layout tokens in every agent's policy, once the target is known.
+
+    Runs after the profile is attached, because until then there is no layout
+    to expand against.
+    """
+    if config.profile is None:
+        return config
+    layout = config.profile.layout
+    agents = {}
+    for name, spec in config.agents.items():
+        policy = spec.policy
+        updates = {
+            field: expand_layout_tokens(getattr(policy, field), layout)
+            for field in _PATH_FIELDS
+            if any(p.startswith("$") for p in getattr(policy, field))
+        }
+        if not updates:
+            agents[name] = spec
+            continue
+        agents[name] = spec.model_copy(
+            update={"policy": policy.model_copy(update=updates)}
+        )
+    return config.model_copy(update={"agents": agents})
+
+
 def load_config(
     config_dir: Path | str | None = None,
     *,
@@ -434,10 +508,31 @@ def load_config(
 
     # Agents layer by filename. Walking the search paths in reverse means the
     # highest-precedence directory writes last and therefore wins.
+    #
+    # `agents/<target>/<agent>.yaml` is a further layer on top, active only
+    # while that target is the one being run. Agent config is otherwise global:
+    # one `fixer.yaml` serves every profile, so a project with two repositories
+    # of different shapes could not configure FIXER for both -- editing it for
+    # one silently mis-configured the other, and `qaas doctor` said so in both
+    # directions. Layout tokens (`$backend`) fix that for *paths*, which was the
+    # case that bit; a model, a turn cap or a diff budget still cannot vary by
+    # target without this.
+    #
+    # Keyed on the target named explicitly or in system.yaml, not on the
+    # single-profile guess made further down: an overlay that switched itself on
+    # because there happened to be one profile on disk would be a configuration
+    # nobody wrote.
     by_stem: dict[str, Path] = {}
     for d in reversed(dirs):
         for path in sorted((d / "agents").glob("*.yaml")):
             by_stem[path.stem] = path
+    named_target = raw.get("target")
+    if named_target:
+        for d in reversed(dirs):
+            overlay = d / "agents" / str(named_target)
+            if overlay.is_dir():
+                for path in sorted(overlay.glob("*.yaml")):
+                    by_stem[path.stem] = path
 
     agents: dict[str, Any] = {}
     for path in by_stem.values():
@@ -517,7 +612,7 @@ def load_config(
             )
         profile = load_target(chosen, profiles[chosen].parent)
         config = config.model_copy(update={"target": chosen, "profile": profile})
-    return config
+    return _resolve_agent_paths(config)
 
 
 def target_files(dirs: Sequence[Path]) -> dict[str, Path]:

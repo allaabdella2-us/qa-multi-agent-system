@@ -19,7 +19,15 @@ policy:
   # the qaas project: these used to read `target-app/api/app`, which only ever
   # resolved because the demo happened to live inside this checkout. Still set
   # per target -- a different application keeps its source somewhere else.
-  write_paths: [api/app, web/src, qa/repro]
+  # Named by what they are, not by where the demo app happens to keep them.
+  # These were `[api/app, web/src, qa/repro]` -- target-app's own directories,
+  # shipped as the default for every target. Against a repository whose code
+  # lives under `build-battle/merchant-console/src` the first two matched no
+  # file and FIXER was left with `qa/repro`, REPRODUCER's sandbox: it ran,
+  # reached no product code, changed nothing, and reported success.
+  # `$backend`/`$frontend` come from the target profile's `layout`, which every
+  # other consumer already trusts to say where the code is.
+  write_paths: [$backend, $frontend, qa/repro]
   branch_patterns: ["fix/*"]
   may_open_pr: true
   may_transition_tickets: true
