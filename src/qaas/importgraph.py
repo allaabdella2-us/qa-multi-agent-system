@@ -597,6 +597,57 @@ def _compiler_options(path: Path, seen: set[str]) -> dict:
     return options
 
 
+def _strip_comments(text: str) -> str:
+    r"""Remove comments without reading inside string literals.
+
+    A regex cannot do this, and the failure was not theoretical. `"@/*"` is the
+    path alias every Next.js project ships, so `/\*.*?\*/` matched the `/*`
+    *inside that string* and ran to the `*/` inside `"**/*.ts"` four lines
+    later, deleting `compilerOptions.paths` along the way. The tsconfig then
+    parsed to `{}`, every `@/` import in the repository resolved to nothing, and
+    it was silent -- an unreadable config is "no aliases" by design, so the
+    graph simply came back thin. Found against the real console: 34 edges with
+    `src/data/metrics.ts` importing `@/lib/dates` and no edge to show for it.
+
+    Doing it properly also lifts a restriction the regex needed: line comments
+    were matched only at the start of a line, to avoid eating the `//` in a URL.
+    Inside a scanner that knows what a string is, a trailing `// note` after an
+    import is safe to remove and is the more common shape.
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    quote: str | None = None
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:      # an escaped quote does not close
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "\"'`":
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n:
+            if text[i + 1] == "*":
+                end = text.find("*/", i + 2)
+                i = n if end == -1 else end + 2
+                continue
+            if text[i + 1] == "/":
+                end = text.find("\n", i)
+                i = n if end == -1 else end   # keep the newline; line count matters
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _strip_jsonc(text: str) -> str:
     """JSON with comments and trailing commas -- which is what a tsconfig is.
 
@@ -604,8 +655,7 @@ def _strip_jsonc(text: str) -> str:
     resolve `@/`, which is most of a modern TS repository's imports. Cheap and
     syntactic: the alternative is a JSON5 dependency for one file.
     """
-    without_comments = _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
-    return re.sub(r",(\s*[}\]])", r"\1", without_comments)
+    return re.sub(r",(\s*[}\]])", r"\1", _strip_comments(text))
 
 
 def _table_for(rel: str, tables: list[_Aliases]) -> _Aliases | None:
@@ -630,7 +680,7 @@ def _js_targets(
 
 
 def _js_specifiers(text: str) -> list[str]:
-    body = _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
+    body = _strip_comments(text)
     found: list[str] = []
     for pattern in (_JS_FROM_RE, _JS_CALL_RE, _JS_BARE_RE):
         found.extend(match.group(1) for match in pattern.finditer(body))

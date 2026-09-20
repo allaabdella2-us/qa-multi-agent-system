@@ -480,3 +480,61 @@ def test_an_empty_graph_is_falsey_but_a_populated_one_is_not(tmp_path):
     assert not ImportGraph(root=tmp_path)
     write(tmp_path, "a.py", "X = 1\n")
     assert build(tmp_path)
+
+
+# -- comments are not found with a regex ------------------------------------
+
+
+def test_the_alias_next_js_actually_ships_survives_comment_stripping(tmp_path):
+    """`"@/*"` contains `/*`, and a regex stripper read it as a comment opener.
+
+    `/\\*.*?\\*/` matched the `/*` inside that string and ran to the `*/` inside
+    `"**/*.ts"` four lines below, taking `compilerOptions.paths` with it. The
+    tsconfig then parsed to `{}` and every `@/` import in the repository
+    resolved to nothing -- silently, since an unreadable config is "no aliases"
+    by design. Against the real Next.js console this was 34 edges where there
+    are 134: `src/data/metrics.ts` imports `@/lib/dates` and had no edge for it.
+
+    This is verbatim the shape `create-next-app` generates.
+    """
+    write(tmp_path, "tsconfig.json", """{
+  "compilerOptions": {
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}
+""")
+    write(tmp_path, "src/lib/dates.ts", "export const utcDayKey = (s: string) => s.slice(0, 10)\n")
+    write(tmp_path, "src/data/metrics.ts", 'import { utcDayKey } from "@/lib/dates"\n')
+
+    graph = build(tmp_path)
+    assert "src/lib/dates.ts" in graph.imports["src/data/metrics.ts"]
+
+
+def test_a_comment_marker_inside_a_string_is_not_a_comment(tmp_path):
+    """The same flaw in source: a string may hold `/*` or `//` legitimately."""
+    write(tmp_path, "src/a.ts", "export const A = 1\n")
+    write(tmp_path, "src/b.ts", (
+        'const glob = "/*"\n'
+        'const url = "https://example.test/x"\n'
+        'import { A } from "./a"   // trailing note about A\n'
+        'export const B = A\n'
+    ))
+
+    graph = build(tmp_path)
+    assert "src/a.ts" in graph.imports["src/b.ts"]
+
+
+def test_a_real_comment_is_still_removed(tmp_path):
+    """Stripping has to keep working, or a commented-out import becomes an edge."""
+    write(tmp_path, "src/a.ts", "export const A = 1\n")
+    write(tmp_path, "src/c.ts", "export const C = 1\n")
+    write(tmp_path, "src/d.ts", (
+        '/* import { C } from "./c" */\n'
+        '// import { C } from "./c"\n'
+        'import { A } from "./a"\n'
+    ))
+
+    graph = build(tmp_path)
+    assert graph.imports["src/d.ts"] == {"src/a.ts"}
