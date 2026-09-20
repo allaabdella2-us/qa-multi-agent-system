@@ -14,7 +14,7 @@ from support import CONFIG_SEARCH
 
 from qaas.router import Budget, BudgetExceeded, Router
 from qaas.config import load_config
-from qaas.envelope import DefectEnvelope, Domain, Severity
+from qaas.envelope import DefectEnvelope, Domain, ReproStatus, Severity
 from qaas.runner import RunOutcome
 from qaas.store import AgentResult, RunStore
 
@@ -673,6 +673,55 @@ async def test_the_skip_says_how_many_and_which_knob(cfg, tmp_path, fake_agents)
 
     assert any(e.detail.get("count") == 4 for e in skips)
     assert any("reproduce_min_severity" in (e.detail.get("reason") or "") for e in skips)
+
+
+async def test_naming_a_ticket_reproduces_that_one_and_not_its_eight_neighbours(
+    cfg, tmp_path, fake_agents
+):
+    """`--ticket` means the same thing in reproduce as it does in verify.
+
+    It scoped verify and not this, so "take one ticket end to end" opened a
+    fresh frontier-model context for every unreproduced finding in the run and
+    reproduced the other eight on the way to the one that was asked for. On a
+    real run that is the difference between one context and nine.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 3, "severity": Severity.BLOCKER}
+
+    first = await make_conductor(cfg, tmp_path).run("nightly")
+    store = RunStore(first.run_id, root=tmp_path, create=False)
+
+    # Stamp the keys the tracker would have written, and put the findings back
+    # to unattempted so the second pass has something to reproduce.
+    keys = []
+    for i, envelope in enumerate(store.envelopes(), start=1):
+        envelope.jira.key = f"PROJ-{i}"
+        envelope.reproduction.status = ReproStatus.UNATTEMPTED
+        store.put_envelope(envelope)
+        keys.append(envelope.jira.key)
+    assert len(keys) >= 2, "this test needs more than one finding to be about anything"
+
+    calls.clear()
+    router = Router(cfg, target_root=REPO, root=tmp_path, tickets={keys[0]})
+    await router.run("nightly", run_id=first.run_id)
+
+    assert sum(1 for n, _ in calls if n == "REPRODUCER") == 1
+
+
+async def test_a_ticket_no_envelope_carries_does_not_silence_the_phase(cfg, tmp_path, fake_agents):
+    """On a first pass nothing is filed yet.
+
+    An empty scope there has to mean "reproduce everything", not "reproduce
+    nothing" -- the keys simply do not exist until TRIAGE has run.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 2, "severity": Severity.BLOCKER}
+
+    router = Router(cfg, target_root=REPO, root=tmp_path, tickets={"NOBODY-1"})
+    await router.run("nightly")
+    assert sum(1 for n, _ in calls if n == "REPRODUCER") == 2
 
 
 async def test_severe_findings_are_still_reproduced_one_context_each(cfg, tmp_path, fake_agents):

@@ -669,6 +669,25 @@ class Router:
             return
 
         drafts = [e for e in store.envelopes() if e.reproduction.status.value == "unattempted"]
+
+        # `--ticket` scoped verify and not this, so "take one ticket end to end"
+        # opened a fresh frontier-model context for every unreproduced finding
+        # in the run and reproduced the other eight on the way to the one that
+        # was asked for. The flag means the same thing in both phases: work
+        # these tickets. Applied only where the keys exist -- on a first pass
+        # nothing is filed yet, and an empty result there would mean "reproduce
+        # nothing" rather than "reproduce everything".
+        if self.tickets:
+            scoped = [e for e in drafts if e.jira.key in self.tickets]
+            if scoped:
+                skipped = len(drafts) - len(scoped)
+                drafts = scoped
+                if skipped:
+                    store.log(
+                        "skipped", agent="REPRODUCER",
+                        reason=f"{skipped} finding(s) outside {sorted(self.tickets)}",
+                    )
+
         if not drafts:
             store.log("skipped", agent="REPRODUCER", reason="no findings to reproduce")
             return
