@@ -20,6 +20,20 @@ look at this finding" and "run it again at 4:20pm" are opposite instructions —
 carrying the count of findings still unfiled and the exact command that resumes
 the run. Resume itself is unchanged: the agents that succeeded are already
 skipped, and the envelopes that never got a ticket are already picked up.
+### The import graph reads TypeScript and JavaScript
+
+`test_runner` learned to run vitest and jest, and the graph behind
+`affected_tests` was still Python-only — so a TS target's suite ran and its
+*selection* fell back to comparing filenames, which is the half that makes this
+more than a guess. Verified against a real Next.js console: tests ran, the graph
+was empty. It now scans TS/JS import syntax (static, re-export, dynamic
+`import()`, `require`) and resolves it the way the language does — extensionless
+specifiers, `./dir` to `./dir/index.*`, an ESM `./y.js` back to the `y.ts` it was
+emitted from, and `tsconfig.json` `paths`/`baseUrl` aliases, without which most
+imports in a modern TS repository resolve to nothing. Still parse-only: no
+dependency, no `node`, no `tsc`. A repository holding both languages gets one
+graph covering both, and what the graph could not read is named in the answer
+rather than averaged into "no tests are affected".
 
 ### Test selection is derived now, not guessed
 

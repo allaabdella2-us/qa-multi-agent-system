@@ -481,16 +481,28 @@ graph sees it in two hops, and the result reports the distance.
 
 Three properties, all load-bearing:
 
-- **Parse-only.** `ast.parse` on text that is never imported and never executed.
-  The target is someone else's repository, and running its module-level code
-  inside this process is not a thing to do for a test ranking.
-- **Python-only, and it says so.** A Go or TypeScript target yields an empty
-  graph, `affected_tests` falls back to the filename heuristic, and the answer
-  names which method produced it. "No tests are affected" and "I cannot read this
+- **Parse-only.** `ast.parse` on text that is never imported and never executed,
+  and for TS/JS a scanner over import syntax. The target is someone else's
+  repository, and running its module-level code inside this process is not a
+  thing to do for a test ranking — which rules out `node`, a bundler and `tsc`
+  as firmly as it rules out `import`.
+- **Two languages, one graph.** Python resolves through a table of dotted module
+  names; TS/JS resolves through the filesystem plus `tsconfig.json`'s
+  `paths`/`baseUrl`, without which `@/lib/dates` — most of the first-party
+  imports in a modern TS repository — resolves to nothing. The ordinary target
+  is a Python API beside a TS front end, so it builds one graph over both rather
+  than picking a winner. TS/JS was added because `test_runner` learned to *run*
+  vitest and jest while the graph still could not read a word of them: their
+  suites ran and their selection silently fell back to filenames.
+- **It says what it could not read.** A Go or Ruby target yields an empty graph,
+  `affected_tests` falls back to the filename heuristic, and the answer names
+  both which method produced it and which languages were walked past
+  (`ImportGraph.unreadable`). "No tests are affected" and "I cannot read this
   language" are different answers.
-- **Never raises.** A syntax error, an unreadable file, a symlink loop — all
-  skipped and counted. A ranking that crashes the verify phase is worse than one
-  that is merely incomplete.
+- **Never raises.** A syntax error, an unreadable file, a symlink loop, a
+  `tsconfig.json` with comments and trailing commas in it — all skipped and
+  counted. A ranking that crashes the verify phase is worse than one that is
+  merely incomplete.
 
 Hidden directories are skipped wholesale. Found by running it against qaas
 itself: `.claude/worktrees/` held two stale checkouts of the whole repository, so

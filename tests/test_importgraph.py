@@ -9,6 +9,7 @@ nothing for a Go repository is worse than the guess it replaced.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -129,17 +130,31 @@ def test_a_third_party_import_produces_no_edge(tmp_path):
 # -- the limits, stated ------------------------------------------------------
 
 
-def test_a_repository_with_no_python_yields_an_empty_graph(tmp_path):
+def test_a_language_this_cannot_read_yields_an_empty_graph(tmp_path):
     """Empty and falsey, which is the signal `affected_tests` falls back on.
 
-    Returning "no tests are affected" for a Go or TypeScript target would be a
-    confident wrong answer where the heuristic gave a useful vague one.
+    Returning "no tests are affected" for a Go target would be a confident wrong
+    answer where the heuristic gave a useful vague one. TypeScript used to be in
+    this test beside Go and is not any more -- see the test below it.
     """
     write(tmp_path, "main.go", "package main\n")
-    write(tmp_path, "web/app.tsx", "export const App = () => null;\n")
+    write(tmp_path, "lib/thing.rb", "module Thing\nend\n")
     graph = build(tmp_path)
     assert not graph
     assert graph.affected_tests(["main.go"]) == []
+
+
+def test_what_it_could_not_read_is_named_rather_than_averaged_away(tmp_path):
+    """"Nothing imports that" and "I cannot read this language" are different
+    answers, and the caller has to be able to pass the difference on."""
+    write(tmp_path, "main.go", "package main\n")
+    write(tmp_path, "cmd/serve.go", "package main\n")
+    graph = build(tmp_path)
+    assert graph.unreadable == {".go": 2}
+    assert ".go" in graph.unreadable_note
+    assert build(tmp_path / "cmd").unreadable_note is not None
+    write(tmp_path, "pkg/only.py", "X = 1\n")
+    assert build(tmp_path).unreadable_note  # a mixed repo still says so
 
 
 def test_a_file_that_does_not_parse_is_skipped_and_counted(tmp_path):
@@ -191,6 +206,242 @@ def test_the_module_cap_is_reported_rather_than_silently_applied(tmp_path):
     graph = build(tmp_path, max_modules=3)
     assert graph.truncated
     assert len(graph.imports) == 3
+
+
+# -- TypeScript and JavaScript ----------------------------------------------
+#
+# The graph was Python-only while `test_runner` had already learned to run
+# vitest and jest, so a TS target's suite ran and its *selection* fell back to
+# filenames -- which is the half that makes this more than a guess. Verified
+# against a real Next.js console: tests ran, the graph was empty.
+
+
+TSCONFIG = """
+{
+  // Next.js writes this file with comments in it, which json.loads refuses.
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+    },
+  },
+}
+"""
+
+
+@pytest.fixture
+def ts_repo(tmp_path: Path) -> Path:
+    """A Next-shaped app with a three-layer chain, spelled the way one really is.
+
+        src/lib/dates.ts  <-  src/lib/orders.ts  <-  src/app/page.tsx
+                                                 <-  src/lib/orders.test.ts
+
+    `orders.ts` reaches `dates.ts` through the `@/` alias, which is the thing
+    that has to work: without `tsconfig.json` most imports in a modern TS
+    repository resolve to nothing and the graph is all leaves.
+    """
+    write(tmp_path, "tsconfig.json", TSCONFIG)
+    write(tmp_path, "package.json", '{"name": "app"}\n')
+    write(tmp_path, "src/lib/dates.ts", "export const startOfDay = (d: Date) => d;\n")
+    write(
+        tmp_path,
+        "src/lib/orders.ts",
+        'import { startOfDay } from "@/lib/dates";\n\nexport const total = () => startOfDay(new Date());\n',
+    )
+    write(tmp_path, "src/app/page.tsx", 'import { total } from "@/lib/orders";\n\nexport default () => total();\n')
+    write(
+        tmp_path,
+        "src/lib/orders.test.ts",
+        'import { describe, it } from "vitest";\nimport { total } from "./orders";\n\ndescribe("total", () => it("works", () => total()));\n',
+    )
+    write(tmp_path, "src/lib/unrelated.test.ts", 'import { it } from "vitest";\n\nit("nothing", () => {});\n')
+    return tmp_path
+
+
+def test_a_typescript_test_two_hops_away_is_found(ts_repo):
+    """The motivating case, in the other language.
+
+    Nothing about the name `orders.test.ts` resembles `dates.ts`, and the hop
+    between them goes through a tsconfig path alias.
+    """
+    rows = graph_rows(build(ts_repo).affected_tests(["src/lib/dates.ts"]))
+    assert rows == {"src/lib/orders.test.ts": 2}
+    assert "src/lib/unrelated.test.ts" not in rows
+
+
+def test_a_tsconfig_alias_is_what_makes_the_rest_resolve(ts_repo):
+    graph = build(ts_repo)
+    assert graph.imports["src/lib/orders.ts"] == {"src/lib/dates.ts"}
+    assert graph.imports["src/app/page.tsx"] == {"src/lib/orders.ts"}
+
+
+def test_a_tsconfig_full_of_comments_and_trailing_commas_is_still_read(ts_repo):
+    """A tsconfig is JSON-with-comments, which `json.loads` refuses outright --
+    and refusing to read it means refusing to resolve `@/`, which is most of the
+    first-party imports in the repository."""
+    with pytest.raises(ValueError):
+        json.loads(TSCONFIG)
+    assert build(ts_repo).imports["src/lib/orders.ts"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        'import { money } from "./helpers";',
+        'import money from "./helpers";',
+        'import * as helpers from "./helpers";',
+        'import type { Money } from "./helpers";',
+        'import {\n  money,\n  other,\n} from "./helpers";',
+        'export { money } from "./helpers";',
+        'export * from "./helpers";',
+        'const m = await import("./helpers");',
+        'const m = require("./helpers");',
+        'import "./helpers";',
+        'import { money } from "./helpers.js";',
+        'import { money } from "../lib/helpers";',
+    ],
+)
+def test_every_spelling_of_a_js_import_resolves(tmp_path, statement):
+    """Including `./helpers.js` for `helpers.ts`: ESM requires the extension and
+    TypeScript requires it to be the *emitted* one, so the path as written
+    exists nowhere in the source tree."""
+    write(tmp_path, "lib/helpers.ts", "export const money = 1;\n")
+    write(tmp_path, "lib/orders.ts", statement + "\n")
+    assert "lib/helpers.ts" in build(tmp_path).imports["lib/orders.ts"], statement
+
+
+@pytest.mark.parametrize(
+    "layout, expected",
+    [
+        ({"lib/helpers.ts": ""}, "lib/helpers.ts"),
+        ({"lib/helpers.tsx": ""}, "lib/helpers.tsx"),
+        ({"lib/helpers.js": ""}, "lib/helpers.js"),
+        ({"lib/helpers/index.ts": ""}, "lib/helpers/index.ts"),
+        ({"lib/helpers/index.jsx": ""}, "lib/helpers/index.jsx"),
+        # A file wins over a directory of the same name, as node resolves it.
+        ({"lib/helpers.ts": "", "lib/helpers/index.ts": ""}, "lib/helpers.ts"),
+    ],
+)
+def test_an_extensionless_specifier_finds_the_file_that_exists(tmp_path, layout, expected):
+    for rel, text in layout.items():
+        write(tmp_path, rel, text)
+    write(tmp_path, "lib/orders.ts", 'import x from "./helpers";\n')
+    assert build(tmp_path).imports["lib/orders.ts"] == {expected}
+
+
+def test_a_bare_package_specifier_produces_no_edge(tmp_path):
+    """`react` and `next/link` are not in the repository, so nothing about them
+    can break a test that is."""
+    write(tmp_path, "tsconfig.json", '{"compilerOptions": {"baseUrl": "."}}')
+    write(tmp_path, "src/next/link.ts", "export default 1;\n")
+    write(
+        tmp_path,
+        "src/app/page.tsx",
+        'import React from "react";\nimport Link from "next/link";\nimport "tailwindcss/tailwind.css";\n',
+    )
+    assert build(tmp_path).imports["src/app/page.tsx"] == set()
+
+
+def test_a_baseurl_without_paths_still_resolves_a_repo_relative_import(tmp_path):
+    write(tmp_path, "tsconfig.json", '{"compilerOptions": {"baseUrl": "src"}}')
+    write(tmp_path, "src/lib/dates.ts", "export const d = 1;\n")
+    write(tmp_path, "src/app/page.tsx", 'import { d } from "lib/dates";\n')
+    assert build(tmp_path).imports["src/app/page.tsx"] == {"src/lib/dates.ts"}
+
+
+def test_an_extended_tsconfig_carries_its_aliases_down(tmp_path):
+    """Monorepos really do keep the aliases in a shared base config."""
+    write(tmp_path, "tsconfig.base.json", '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}')
+    write(tmp_path, "tsconfig.json", '{"extends": "./tsconfig.base.json"}')
+    write(tmp_path, "src/lib/dates.ts", "export const d = 1;\n")
+    write(tmp_path, "src/app/page.tsx", 'import { d } from "@/lib/dates";\n')
+    assert build(tmp_path).imports["src/app/page.tsx"] == {"src/lib/dates.ts"}
+
+
+def test_vites_split_tsconfig_is_read_rather_than_shadowed(tmp_path):
+    """Vite's template puts `references` in `tsconfig.json` and the aliases in
+    `tsconfig.app.json`. Reading only the plain name found a config with nothing
+    in it, and a config with nothing in it must not shadow the one beside it."""
+    write(tmp_path, "tsconfig.json", '{"references": [{"path": "./tsconfig.app.json"}]}')
+    write(tmp_path, "tsconfig.app.json", '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}}')
+    write(tmp_path, "src/lib/dates.ts", "export const d = 1;\n")
+    write(tmp_path, "src/page.tsx", 'import { d } from "@/lib/dates";\n')
+    assert build(tmp_path).imports["src/page.tsx"] == {"src/lib/dates.ts"}
+
+
+def test_the_nearest_tsconfig_wins_in_a_monorepo(tmp_path):
+    """Two apps, each with its own `@/` meaning its own `src`. One table for the
+    whole repository would send both of them to whichever was walked first."""
+    for app in ("web", "admin"):
+        write(tmp_path, f"apps/{app}/tsconfig.json", '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}')
+        write(tmp_path, f"apps/{app}/src/lib/dates.ts", "export const d = 1;\n")
+        write(tmp_path, f"apps/{app}/src/page.tsx", 'import { d } from "@/lib/dates";\n')
+    graph = build(tmp_path)
+    assert graph.imports["apps/web/src/page.tsx"] == {"apps/web/src/lib/dates.ts"}
+    assert graph.imports["apps/admin/src/page.tsx"] == {"apps/admin/src/lib/dates.ts"}
+
+
+def test_a_commented_out_import_is_not_an_edge(tmp_path):
+    """Not a tokeniser, so this is best-effort -- but a commented-out import at
+    the start of its line is the realistic false edge and is cheap to drop."""
+    write(tmp_path, "lib/helpers.ts", "export const money = 1;\n")
+    write(tmp_path, "lib/gone.ts", "export const gone = 1;\n")
+    write(
+        tmp_path,
+        "lib/orders.ts",
+        '// import { gone } from "./gone";\n/* import { gone } from "./gone"; */\nimport { money } from "./helpers";\n',
+    )
+    assert build(tmp_path).imports["lib/orders.ts"] == {"lib/helpers.ts"}
+
+
+def test_a_specifier_that_climbs_out_of_the_repository_reaches_nothing(tmp_path):
+    write(tmp_path, "lib/orders.ts", 'import x from "../../../etc/passwd";\n')
+    assert build(tmp_path).imports["lib/orders.ts"] == set()
+
+
+def test_node_modules_is_not_walked_for_javascript_either(tmp_path):
+    """A Node repository's `node_modules` is tens of thousands of files, and not
+    one of them is what changed."""
+    write(tmp_path, "lib/helpers.ts", "export const money = 1;\n")
+    write(tmp_path, "lib/helpers.test.ts", 'import { money } from "./helpers";\n')
+    write(tmp_path, "node_modules/dep/index.js", 'require("../../lib/helpers");\n')
+    write(tmp_path, ".next/server/page.js", 'require("../../lib/helpers");\n')
+    assert graph_rows(build(tmp_path).affected_tests(["lib/helpers.ts"])) == {
+        "lib/helpers.test.ts": 1
+    }
+
+
+def test_one_graph_covers_both_languages(tmp_path):
+    """The ordinary shape is a Python API beside a TS front end, and a change in
+    either half has consumers in its own. Picking a winner would blind one."""
+    write(tmp_path, "api/app/db.py", "X = 1\n")
+    write(tmp_path, "api/tests/test_db.py", "from api.app.db import X\n")
+    write(tmp_path, "web/src/lib/dates.ts", "export const d = 1;\n")
+    write(tmp_path, "web/src/lib/dates.test.ts", 'import { d } from "./dates";\n')
+    graph = build(tmp_path)
+    assert graph_rows(graph.affected_tests(["api/app/db.py"])) == {"api/tests/test_db.py": 1}
+    assert graph_rows(graph.affected_tests(["web/src/lib/dates.ts"])) == {
+        "web/src/lib/dates.test.ts": 1
+    }
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("orders.test.ts", True),
+        ("orders.spec.tsx", True),
+        ("orders.test.mjs", True),
+        ("test.ts", True),
+        ("orders.ts", False),
+        ("testing.ts", False),
+        # pytest's rule applied to a .ts file found exactly nothing, because
+        # `test_orders.ts` is a convention nobody follows.
+        ("__tests__/orders.ts", True),
+        ("src/__tests__/nested/orders.tsx", True),
+    ],
+)
+def test_js_test_discovery_matches_vitest_and_jest(name, expected):
+    assert is_test_file(Path(name)) is expected
 
 
 # -- how a caller spells a path ---------------------------------------------
