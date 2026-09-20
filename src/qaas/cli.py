@@ -620,6 +620,32 @@ def doctor(
     if blocked:
         console.print(f"agents that cannot: [yellow]{', '.join(blocked)}[/yellow]")
 
+    root = profile.root_path()
+    # Reported per pattern, not per agent. Checking only for an agent with
+    # *nothing* present missed the case that cost a real run: FIXER's
+    # `[api/app, web/src, qa/repro]` against a repository whose code lives under
+    # `build-battle/merchant-console/src` had one surviving path -- `qa/repro`,
+    # REPRODUCER's sandbox, which exists precisely because a reproduction was
+    # just written there. So FIXER looked equipped, could reach no product code,
+    # and "succeeded" having changed none.
+    gaps = []
+    for name, spec in sorted(cfg.agents.items()):
+        if not spec.policy.write_paths:
+            continue
+        present, missing = _write_paths_that_exist(spec, root)
+        if missing:
+            gaps.append((name, missing, present))
+    if gaps:
+        console.print("\n[yellow]write paths that match nothing here:[/yellow]")
+        for name, missing, present in gaps:
+            left = ", ".join(present) if present else "nothing"
+            console.print(f"  - {name}: {', '.join(missing)} — leaving {left}")
+        console.print(
+            "[dim]write_paths are target-relative, and the shipped ones describe the "
+            "bundled demo app. Unless they name this repository's own layout, a fix "
+            "run reaches no product code. Override in config/agents/<agent>.yaml.[/dim]"
+        )
+
     problems = profile.readiness()
     if problems:
         console.print("\n[red]not ready:[/red]")
@@ -627,6 +653,32 @@ def doctor(
             console.print(f"  - {p}")
         raise typer.Exit(1)
     console.print("\n[green]ready[/green]")
+
+
+def _write_paths_that_exist(spec, target_root: Path) -> tuple[list[str], list[str]]:
+    """Which of an agent's write_paths actually match something in this target.
+
+    `write_paths` are target-relative globs, and the shipped roster's were the
+    bundled demo's layout: `[api/app, web/src, qa/repro]`. Pointed at a real
+    repository whose application lives under `build-battle/merchant-console/src`,
+    two of FIXER's three matched no file, leaving `qa/repro` -- REPRODUCER's
+    sandbox -- as the only place it could write. FIXER then "succeeded" having
+    changed no product code, and the only reason anyone found out was that
+    REVIEWER read the diff and said so, after the run had been paid for.
+
+    Reported rather than enforced: a path that does not exist yet is legitimate
+    (an agent may create the first file under it), so this is what `qaas doctor`
+    says out loud, not something that refuses a run.
+    """
+    present: list[str] = []
+    missing: list[str] = []
+    for pattern in spec.policy.write_paths:
+        literal = target_root / pattern
+        if literal.exists() or any(target_root.glob(pattern)):
+            present.append(pattern)
+        else:
+            missing.append(pattern)
+    return present, missing
 
 
 def _agent_usable(spec, caps: dict[str, bool]) -> bool:
