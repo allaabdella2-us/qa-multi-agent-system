@@ -240,7 +240,35 @@ def _selector_refusal(ctx: ToolContext, cwd: Path, selector: str) -> str | None:
             f"selector '{selector}' resolves to {resolved}, outside the repository "
             f"({root}). Tests are run from inside the checkout, never beside it."
         )
+    # A path-shaped selector that does not exist used to fall through to
+    # `["-k", selector]`, because the caller below decides path-vs-keyword on
+    # `head.exists()` alone. pytest then collected the *whole* suite and
+    # filtered it by a keyword nobody meant as one. That is silent when the
+    # suite is clean -- `_matched_nothing` catches it -- and actively
+    # misleading when it is not: a suite with collection errors yields rows, so
+    # the run is reported as a success, and the identical result comes back for
+    # a real file and for a path that was never there. VERIFIER found this by
+    # running a control path against a target whose suite had six collection
+    # errors and getting the same "6 tests: 6 error" both times, which is the
+    # one observation that makes a test run worthless as evidence.
+    #
+    # A `-k` expression is prose ("cancel and not slow"); a path has a
+    # separator, a .py, or a nodeid's `::`. When it looks like a path and is
+    # not one, say so rather than guessing a different meaning for it.
+    if not resolved.exists() and _looks_like_a_path(selector):
+        return (
+            f"selector '{selector}' looks like a path but nothing exists at "
+            f"{resolved}. If you meant a keyword expression, drop the path "
+            "separator and the .py; if you meant a file, check the path against "
+            f"what is in {cwd}."
+        )
     return None
+
+
+def _looks_like_a_path(selector: str) -> bool:
+    """Was this selector written as a file, rather than as a -k expression?"""
+    head = selector.split("::", 1)[0]
+    return "::" in selector or "/" in head or "\\" in head or head.endswith(".py")
 
 
 def _selector_head(cwd: Path, selector: str) -> Path:

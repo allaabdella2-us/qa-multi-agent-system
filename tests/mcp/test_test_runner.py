@@ -136,6 +136,29 @@ async def test_run_suite_accepts_a_k_expression(tools):
     assert not any("test_bad" in n for n in nodeids)
 
 
+async def test_a_path_that_is_not_there_is_not_quietly_a_keyword(tools):
+    """A missing file must be said, not reinterpreted.
+
+    path-vs-keyword was decided on `head.exists()` alone, so a path-shaped
+    selector that was not there fell through to `["-k", selector]` and pytest
+    collected the *whole* suite filtered by a keyword nobody meant as one.
+    `_matched_nothing` hides that only while the suite is clean; a suite with
+    collection errors still yields rows, so the run comes back a success and
+    the result for a real file and for a path that never existed are identical.
+    VERIFIER hit exactly that -- "6 tests: 6 error" for both a repro test and a
+    control path -- and correctly threw the run out as evidence.
+    """
+    result = await tools["run_suite"]({"selector": "tests/test_does_not_exist.py"})
+    assert result["is_error"], "a missing path must be an error, not a -k expression"
+    assert "looks like a path" in result["content"][0]["text"]
+
+
+async def test_a_keyword_expression_is_still_a_keyword_expression(tools):
+    """The refusal keys on path *shape*, so prose must pass through untouched."""
+    result = await tools["run_suite"]({"selector": "ok or nothing"})
+    assert not result.get("is_error"), result["content"][0]["text"]
+
+
 async def test_run_suite_refuses_a_cwd_outside_the_repo(tools, ctx):
     result = await tools["run_suite"]({"cwd": "../.."})
     assert result["isError"]
