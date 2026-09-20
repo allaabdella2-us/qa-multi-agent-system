@@ -830,6 +830,144 @@ async def test_a_second_fix_attempt_is_told_what_the_first_got_wrong(cfg, tmp_pa
     assert "REVIEWER" in fixer_tasks[1]
 
 
+# -- a human answers an escalation ------------------------------------------
+#
+# Escalation is a designed terminal state and nothing could end one. CORVID-7 --
+# REVIEWER escalated a correct one-line fix on a product question ("applying it
+# exposes a UI regression already filed as another ticket; ship now or hold?")
+# and the answer had to be typed into a Python script calling the tracker
+# adapter. QAAS-31 -- REVIEWER escalated because the fix lay outside FIXER's
+# write_paths, correctly refusing to REQUEST_CHANGES, since demanding a change
+# the author may not make deadlocks the loop.
+#
+# `qaas answer` appends one `human_decision` line. These tests are about what
+# the router does with it: it schedules nothing new, and the answer reaches the
+# two agents that would otherwise ask the same question again.
+
+
+def _loop_behaviour(behaviour, *, ticket="CORVID-1"):
+    """A run that files one ticket and then fails to verify it."""
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 1}
+
+    def file_the_ticket(ctx, spec):
+        envelope = ctx.store.envelopes()[0]
+        ctx.store.put_envelope(
+            envelope.model_copy(update={"jira": envelope.jira.model_copy(update={"key": ticket})})
+        )
+
+    behaviour["TRIAGE"] = {"hook": file_the_ticket}
+    behaviour["VERIFIER"] = {"hook": lambda ctx, spec: ctx.store.log(
+        "verdict", agent="VERIFIER", ticket_key=ticket, verdict="NOT_FIXED",
+        observed="the original test still fails",
+    )}
+    behaviour["REVIEWER"] = {"review": "ESCALATE_TO_HUMAN"}
+
+
+async def test_a_human_answer_reaches_both_agents_that_asked(cfg, tmp_path, fake_agents):
+    """CORVID-7's shape: answered once, and every later run has to know.
+
+    FIXER already had a slot (`feedback`); REVIEWER had none at all -- so the
+    reviewer that raised the question re-raised it on the next run having never
+    been told the answer, and a person answered the same escalation once per
+    run. Both are assembled in Python out of the typed ledger line, the way
+    `_review_feedback` is: no new tool, nothing an agent writes.
+    """
+    calls, behaviour = fake_agents
+    _loop_behaviour(behaviour)
+    report = await make_conductor(cfg, tmp_path).run("full-loop")
+    assert any("REVIEWER escalated" in e for e in report.escalations)
+
+    # What `qaas answer` writes, from a process with no agent in it.
+    store = RunStore(report.run_id, tmp_path, create=False)
+    store.log(
+        "human_decision", ticket_key="CORVID-1", decision="proceed",
+        note="Ship it; the UI regression is already filed as CORVID-9.",
+        author="a human",
+    )
+
+    calls.clear()
+    behaviour["API"] = {}
+    await make_conductor(cfg, tmp_path).run("full-loop", run_id=report.run_id)
+
+    fixer = [task for name, task in calls if name == "FIXER"]
+    reviewer = [task for name, task in calls if name == "REVIEWER"]
+    assert fixer and reviewer, "the loop did not reopen the ticket"
+    assert "already filed as CORVID-9" in fixer[0]
+    assert "already filed as CORVID-9" in reviewer[0]
+
+
+async def test_a_held_ticket_is_not_verified_again(cfg, tmp_path, fake_agents):
+    """QAAS-31's shape: the fix is human work, so the run must stop touching it.
+
+    Gated before VERIFIER rather than inside the fix loop, because a held ticket
+    re-verified every night is the cost the escalation was already imposing. It
+    is a filter on *work*, exactly like `--from-board`: which tickets this run
+    touches, never the order or the dispatch.
+    """
+    calls, behaviour = fake_agents
+    _loop_behaviour(behaviour)
+    report = await make_conductor(cfg, tmp_path).run("full-loop")
+
+    store = RunStore(report.run_id, tmp_path, create=False)
+    store.log(
+        "human_decision", ticket_key="CORVID-1", decision="hold",
+        note="the fix is outside FIXER's write_paths; I will make it by hand",
+        author="a human",
+    )
+
+    calls.clear()
+    behaviour["API"] = {}
+    second = await make_conductor(cfg, tmp_path).run("full-loop", run_id=report.run_id)
+
+    assert "VERIFIER" not in {name for name, _ in calls}, "a held ticket cost a dispatch"
+    assert "FIXER" not in {name for name, _ in calls}
+    assert not second.escalations, "a ticket a human has parked is not still blocked"
+    skipped = [e for e in store.ledger("skipped") if e.detail.get("ticket_key") == "CORVID-1"]
+    assert skipped and "held by a human" in skipped[-1].detail["reason"]
+
+
+def test_the_latest_answer_is_the_one_that_stands(tmp_path):
+    """A decision belongs to the ticket and stands until a human replaces it.
+
+    Deliberately not scoped to a mark, unlike `_entry_since`: if it expired with
+    the run that received it, the next fix cycle would re-ask the question that
+    was already answered.
+    """
+    from qaas.router import _human_answer
+
+    store = RunStore.new(root=tmp_path)
+    assert _human_answer(store, "CORVID-1") is None
+    store.log("human_decision", ticket_key="CORVID-1", decision="hold", note="wait")
+    store.log("human_decision", ticket_key="CORVID-2", decision="proceed", note="other ticket")
+    store.log("human_decision", ticket_key="CORVID-1", decision="proceed", note="released")
+
+    answer = _human_answer(store, "CORVID-1")
+    assert answer is not None and answer.decision == "proceed" and answer.note == "released"
+
+
+async def test_an_escalation_names_the_ticket_it_blocks(cfg, tmp_path, fake_agents):
+    """`qaas escalations` keys on this field.
+
+    It can be recovered from the reason -- every verify-loop escalation leads
+    with `f"{ticket}: ..."` -- and the reader still does that for the ledgers
+    written before the field existed. Prose is not a field, though: reword one
+    note and the queue quietly empties.
+    """
+    _, behaviour = fake_agents
+    _loop_behaviour(behaviour)
+    report = await make_conductor(cfg, tmp_path).run("full-loop")
+
+    store = RunStore(report.run_id, tmp_path, create=False)
+    blocked = [e for e in store.ledger("escalation") if e.detail.get("ticket_key")]
+    assert blocked and blocked[-1].detail["ticket_key"] == "CORVID-1"
+    # And a fan-out or agent-failure escalation carries no key rather than a
+    # null one: a file people read by eye should not be full of `ticket_key:
+    # null`.
+    assert all("ticket_key" in e.detail or "CORVID-1" not in str(e.detail.get("reason"))
+               for e in store.ledger("escalation"))
+
+
 def test_fixer_may_not_rewrite_the_test_that_defines_success(cfg):
     """§10's symptom-fix guard had nothing behind it.
 

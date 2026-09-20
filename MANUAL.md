@@ -272,6 +272,7 @@ qaas trace <run-id> [--agent A] [--kind K] [--follow] [--quiet] [--json]
 qaas dashboard [<run-id>]                # the same run, in a browser
 qaas map [--version V]                   # the system map MAPPER built
 qaas board [--no-create]                 # this target's Jira board
+qaas escalations [--all]                 # what is blocked on a human
 ```
 
 `qaas trace` is the one to reach for when you want to know *why* something
@@ -543,6 +544,61 @@ Notes worth having:
 - **The local tracker only knows the house statuses** (`open`, `in_progress`,
   `in_review`, `resolved`, `closed`, `wont_fix`, `duplicate`). Custom column
   names need a real Jira.
+
+### Answering an escalation
+
+`ESCALATE_TO_HUMAN` is a *designed* ending, not a failure — and for a while it
+was an ending with no door out of it. Two commands close that:
+
+```bash
+qaas escalations                         # what is blocked on you, across runs
+qaas answer QAAS-31 --decision hold --note "I will make this edit by hand"
+```
+
+```console
+$ qaas escalations
+blocked  run-20260912T121805-b2c052  REVIEWER
+  CORVID-7: REVIEWER escalated the fix
+  qaas answer CORVID-7 --decision proceed --note "..."
+blocked  run-20260912T121805-b2c052  REPRODUCER
+  REPRODUCER fan-out capped at 25 findings
+  no ticket — not answerable; this one is yours to act on
+
+1 waiting, 0 answered
+```
+
+There are two decisions and no third:
+
+- **`proceed`** — carry on, and here is the answer. The next fix cycle hands
+  your note to FIXER *and* to REVIEWER, verbatim. This is the CORVID-7 case:
+  REVIEWER escalated a correct one-line fix because applying it exposed a UI
+  regression already filed as another ticket, and "ship now or hold?" is a
+  product call no agent should make.
+- **`hold`** — stop working this ticket. The next fix cycle skips it before
+  VERIFIER costs anything. This is the QAAS-31 case: the fix lay outside
+  FIXER's `write_paths`, so it is human work by construction, and REVIEWER was
+  right to escalate rather than demand a change the author cannot make.
+
+"Won't fix" is a `hold` whose note says so. A third word the system could not
+tell from the second would only be a choice you had to make for nothing.
+
+Notes worth having:
+
+- **`--note` is required, and must say something.** An answer that carries
+  nothing forward is a retry: the next run would dispatch FIXER with a
+  byte-identical prompt and reach the identical escalation.
+- **It works the same on both trackers.** The decision is a line in the run's
+  ledger and touches neither backend, so it behaves identically under the
+  committed default (`tracker: local`, where "drag a card" means editing JSON)
+  and under a real Jira board.
+- **It dispatches nothing.** `qaas answer` appends one line and exits. ROUTER
+  still schedules every agent out of the ledger under the same budget governor
+  and the same loop breakers — the same shape as `--from-board`, where a human
+  chooses the *work* and never the order.
+- **The latest answer stands.** Releasing a `hold` is answering again with
+  `proceed`; `qaas escalations --all` shows what was answered and by whom.
+- **Escalating again after an answer puts it back in the queue.** A run that
+  raises a *new* question about the same ticket is waiting on you again.
 
 ---
 

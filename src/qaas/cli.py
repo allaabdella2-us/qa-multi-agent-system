@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,9 @@ KIND_STYLE = {
     "regression": "red", "reopened": "red",
     "envelope": "magenta", "reproduction": "magenta", "ticket": "magenta",
     "verdict": "green", "verified": "green", "review": "green",
+    # A human answering an escalation is the one line in the trail nobody in
+    # the run wrote. It reads as an ending, which is what it is.
+    "human_decision": "bold green",
 }
 
 #: Where skills are found, in precedence order. This used to be
@@ -1186,6 +1191,12 @@ def show(run_id: str, root: Path = Root) -> None:
         console.print(f"\n[bold red]escalations ({len(summary.escalations)})[/bold red]")
         for reason in summary.escalations:
             console.print(f"  {reason}")
+        # Printing a blocked ticket without saying how to unblock it is how a
+        # person ends up calling the tracker adapter from a Python script.
+        console.print(
+            '  [dim]answer one: qaas answer <TICKET> --decision proceed '
+            '--note "..."[/dim]'
+        )
 
     denials = [e for e in entries if e.kind == "denial"]
     if denials:
@@ -1194,6 +1205,275 @@ def show(run_id: str, root: Path = Root) -> None:
             console.print(f"  {d.agent}: {d.detail.get('tool')} — {d.detail.get('reason')}")
 
     console.print(f"\n[dim]{len(entries)} ledger entries — qaas trace {run_id}[/dim]")
+
+
+# -- answering an escalation -------------------------------------------------
+#
+# `_verify_loop` ends every path in either a verdict or an escalation, and
+# escalation is a *designed* terminal state -- but nothing could end one. Two
+# live cases: CORVID-7, where REVIEWER escalated a correct one-line fix on a
+# real product question ("applying it exposes a UI regression already filed as
+# another ticket; ship now or hold?") and the only way to answer was to call the
+# tracker adapter from a Python script; and QAAS-31, where REVIEWER escalated
+# because the fix lay outside FIXER's `write_paths` and correctly refused to
+# REQUEST_CHANGES, since demanding a change the author may not make deadlocks
+# the loop.
+#
+# Three things this is deliberately NOT.
+#
+# It is not a second control path. `qaas answer` dispatches nothing and starts
+# nothing; it appends one line to a ledger. ROUTER still schedules every agent
+# out of that ledger, under the same budget governor and the same §8.3 loop
+# breakers. The shape is `--from-board`'s: a human chooses the *work*, never the
+# order it happens in.
+#
+# It is not a tracker feature. The decision lives in the run's own ledger and
+# touches neither backend, which is the only way it works identically under the
+# committed default (`tracker: local`, tickets as JSON on disk, where "drag a
+# card" means hand-editing JSON) and under Jira -- whose Bug workflow may not
+# even offer the house status vocabulary `qaas tracker-check` reports on.
+#
+# It is not a write path. Nothing here widens what an agent may touch: an answer
+# can stop work or hand FIXER a sentence, and there is no decision that grants
+# a path, a tool or a server. QAAS-31's honest answer is `hold` -- a human makes
+# that edit -- and not "widen the matrix until an agent can".
+
+
+@dataclass
+class _Blocked:
+    """One escalation, with the human decision that answered it, if any."""
+
+    run_id: str
+    at: datetime
+    agent: str | None
+    ticket: str | None
+    reason: str
+    answer: dict[str, Any] | None = None
+
+
+#: An escalation raised in the verify loop leads with `f"{ticket}: ..."`, and
+#: `ticket_key` is only in the ledger line for runs recorded since it was added
+#: -- which is none of the ledgers already on disk. Recovered from the prose for
+#: those, on the read side only: the writer never depends on this.
+_TICKET_IN_REASON = re.compile(r"^([A-Z][A-Z0-9]*-\d+)\s*:")
+
+
+def _blocked_in_run(store) -> tuple[list[_Blocked], list[tuple[datetime, str, dict]]]:
+    """One run's escalations, and the human decisions recorded in it.
+
+    Returned separately rather than already paired, because the two can land in
+    different ledgers: an answer is written into the run the next fix cycle
+    *resumes* (the newest run holding that envelope), which need not be the run
+    that raised the escalation.
+    """
+    from qaas.store import LedgerKind
+
+    rows: list[_Blocked] = []
+    decisions: list[tuple[datetime, str, dict]] = []
+    for entry in trace_mod.read_ledger(store):
+        if entry.kind == LedgerKind.ESCALATION:
+            reason = str(entry.detail.get("reason") or "")
+            ticket = entry.detail.get("ticket_key")
+            if not ticket:
+                found = _TICKET_IN_REASON.match(reason.strip())
+                ticket = found.group(1) if found else None
+            rows.append(
+                _Blocked(
+                    run_id=store.run_id, at=entry.at, agent=entry.agent,
+                    ticket=str(ticket) if ticket else None, reason=reason,
+                )
+            )
+        elif entry.kind == LedgerKind.HUMAN_DECISION:
+            key = str(entry.detail.get("ticket_key") or "")
+            if key:
+                decisions.append((entry.at, key, entry.detail))
+    return rows, decisions
+
+
+def _blocked(root: Path, *, run_id: str | None, limit: int) -> list[_Blocked]:
+    """Escalations across the recent runs, newest run first, each with its answer.
+
+    An escalation is answered by the *first* decision on its ticket recorded
+    **after** it, and by nothing recorded before it. Ordering is the whole test:
+    a run that escalates again after an answer is asking a new question, and it
+    has to reappear as waiting rather than be closed by last week's decision.
+
+    Bounded by `--limit` because this opens and folds a whole ledger per run,
+    and a ledger runs to tens of thousands of lines. A half-written run is
+    skipped rather than fatal, the way `_run_holding_tickets` skips one: the
+    queue must still render when one run died mid-write.
+    """
+    from qaas.store import RunStore, list_runs
+
+    candidates = [run_id] if run_id else list_runs(root)[: max(1, limit)]
+    rows: list[_Blocked] = []
+    decisions: list[tuple[datetime, str, dict]] = []
+    for candidate in candidates:
+        store = RunStore(candidate, root=root, create=False)
+        if not store.ledger_path.exists():
+            continue
+        try:
+            found, answered = _blocked_in_run(store)
+        except Exception:
+            continue
+        rows.extend(found)
+        decisions.extend(answered)
+
+    decisions.sort(key=lambda d: d[0])
+    for row in rows:
+        if not row.ticket:
+            continue
+        row.answer = next(
+            (detail for at, key, detail in decisions if key == row.ticket and at >= row.at),
+            None,
+        )
+    return rows
+
+
+@app.command()
+def escalations(
+    run_id: str = typer.Option(None, "--run", help="One run, rather than the recent ones."),
+    limit: int = typer.Option(20, "--limit", help="How many recent runs to read."),
+    all_: bool = typer.Option(False, "--all", help="Include escalations already answered."),
+    root: Path = Root,
+) -> None:
+    """What is blocked on a human, across runs."""
+    rows = _blocked(root, run_id=run_id, limit=limit)
+    waiting = [r for r in rows if r.answer is None]
+    answered = [r for r in rows if r.answer is not None]
+
+    shown = rows if all_ else waiting
+    if not shown:
+        # "Nothing is waiting" and "there are no escalations" are the same
+        # answer to the question this command asks, and a queue that says
+        # nothing when it is empty reads as a queue that failed to load.
+        console.print("[green]nothing is waiting on you[/green]")
+        if answered:
+            console.print(f"[dim]{len(answered)} answered — --all to see them[/dim]")
+        return
+
+    for row in shown:
+        if row.answer is None:
+            console.print(f"[bold red]blocked[/bold red]  [dim]{row.run_id}[/dim]  {row.agent or '?'}")
+        else:
+            console.print(f"[green]answered[/green]  [dim]{row.run_id}[/dim]  {row.agent or '?'}")
+        console.print(f"  {row.reason}")
+        if row.answer is not None:
+            by = row.answer.get("author")
+            console.print(
+                f"  [green]{row.answer.get('decision')}[/green]"
+                f"{f' by {by}' if by else ''} — {row.answer.get('note')}"
+            )
+        elif row.ticket:
+            console.print(
+                f'  [dim]qaas answer {row.ticket} --decision proceed --note "..."[/dim]'
+            )
+        else:
+            # A fan-out cap or a failed agent escalates with no ticket. It is
+            # real and worth seeing, and there is nothing to hand back to the
+            # fix loop -- saying so beats offering a command that cannot work.
+            console.print("  [dim]no ticket — not answerable; this one is yours to act on[/dim]")
+
+    hint = " — --all to see them" if answered and not all_ else ""
+    console.print(f"\n[dim]{len(waiting)} waiting, {len(answered)} answered{hint}[/dim]")
+
+
+@app.command()
+def answer(
+    ticket: str = typer.Argument(..., help="The ticket the escalation names."),
+    decision: str = typer.Option(
+        ..., "--decision", "-d",
+        help="proceed (carry on, with this note) or hold (stop working it).",
+    ),
+    note: str = typer.Option(
+        ..., "--note", "-n",
+        help="Why. FIXER and REVIEWER are handed this verbatim on the next run.",
+    ),
+    run_id: str = typer.Option(None, "--run", help="Write into this run, rather than the resolved one."),
+    limit: int = typer.Option(20, "--limit", help="How many recent runs to search."),
+    root: Path = Root,
+) -> None:
+    """Answer an escalation. Records a decision; dispatches nothing."""
+    from qaas.store import HumanDecision, RunStore
+
+    # Case-blind for the reason `--from-board` matches a status case-blind: a
+    # person types what they read, and `PROCEED` off the screen of `qaas show`
+    # must not be a different word from `proceed`.
+    chosen = decision.strip().lower()
+    if chosen not in {d.value for d in HumanDecision}:
+        console.print(
+            f"[red]'{decision}' is not a decision.[/red] "
+            f"Choose one of: {', '.join(d.value for d in HumanDecision)}."
+        )
+        raise typer.Exit(1)
+    if not note.strip():
+        # The same rule `record_review` applies to REQUEST_CHANGES, and for the
+        # same reason: an answer that carries nothing forward is a retry. The
+        # next run would dispatch FIXER with a byte-identical prompt and reach
+        # the identical escalation.
+        console.print("[red]an answer with no reasoning is not an answer.[/red] Say why.")
+        raise typer.Exit(1)
+
+    wanted = ticket.strip().upper()
+    rows = [r for r in _blocked(root, run_id=None, limit=limit) if (r.ticket or "").upper() == wanted]
+    if not rows:
+        console.print(
+            f"[red]nothing is blocked on {wanted}[/red] in the last {limit} runs under {root}. "
+            "qaas escalations lists what is."
+        )
+        raise typer.Exit(1)
+    # By time, not by list position: `_blocked` returns newest *run* first and
+    # oldest entry first within each run, so neither end of the list is the
+    # question being answered.
+    latest = max(rows, key=lambda r: r.at)
+    open_rows = [r for r in rows if r.answer is None]
+    if not open_rows:
+        # Not an error: answering twice is how a `hold` is later released.
+        console.print(f"[dim]{wanted} already carries an answer; this one replaces it.[/dim]")
+
+    # The answer has to land in the ledger the next fix cycle will *open*, and
+    # that is the run `--ticket`/`--from-board` resolve to -- the newest run
+    # holding this envelope, which the fix cycle resumes. Writing it into
+    # whichever run happened to escalate would put it in a file the next run
+    # never reads, and the question would be asked again with the answer
+    # sitting on disk.
+    target = run_id or _run_holding_tickets(root, {wanted}) or latest.run_id
+    store = RunStore(target, root, create=False)
+    if not store.ledger_path.exists():
+        console.print(f"[red]no run '{target}' under {root}.[/red]")
+        raise typer.Exit(1)
+
+    store.log(
+        "human_decision",
+        ticket_key=wanted,
+        decision=chosen,
+        note=note.strip(),
+        author=_whoami(),
+        # What was answered, so the trail reads on its own. The reader pairs
+        # escalations with answers by position, not by this.
+        escalation=latest.reason,
+    )
+    console.print(f"[green]recorded[/green] {wanted}: {chosen} [dim]-> {target}[/dim]")
+    if chosen == HumanDecision.PROCEED:
+        console.print(
+            "  [dim]the next fix cycle hands this to FIXER and REVIEWER verbatim:[/dim]\n"
+            f"  qaas run --mode fix-cycle --ticket {wanted}"
+        )
+    else:
+        console.print(
+            f"  [dim]the next fix cycle skips {wanted} before VERIFIER costs anything. "
+            "Answer it `proceed` to release it.[/dim]"
+        )
+
+
+def _whoami() -> str:
+    """Who recorded a decision. An audit trail with no author is half a trail."""
+    import getpass
+
+    try:
+        return getpass.getuser()
+    except Exception:
+        return ""       # no password database (a container, a CI runner)
 
 
 def _follow(store, *, agent: str | None, kinds, as_json: bool, quiet: bool = False) -> None:
