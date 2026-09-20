@@ -426,6 +426,35 @@ defects:
     keywords: ["websocket", "token", "expiry", "revalidate", "revoke", "stream", "session"]
     phase: 1
 
+  - id: API-10
+    domain: api
+    class: bug
+    severity: blocker
+    title: Cancelling an order hard-deletes it, cascading away its invoices
+    fixed_in: "d8add44"
+    location:
+      service: orders-api
+      endpoint: DELETE /v1/orders/{order_id}
+      paths: [api/app/routes/orders.py:104, api/migrations/001_init.sql:50]
+    detail: >
+      `delete_order` issued a real DELETE. `invoices.order_id` and
+      `order_items.order_id` are both ON DELETE CASCADE, so cancelling an order
+      destroyed its invoices -- financial records no endpoint in this service
+      can recreate -- while `orders.status` already carried 'cancelled', which
+      is the representation the endpoint's own name implies.
+
+      This entry was never seeded. Agents found it against a ledger that did
+      not contain it, so the scorer charged the find as a false positive: the
+      same corpus-incompleteness that made DBA look broken when it was reading
+      an empty surface. It is recorded now because a defect that was really
+      there and really reported has to be in the answer key, and retired in the
+      same breath because the fix has landed. `fixed_in` keeps it matchable --
+      so reporting it is not an error -- while taking it out of the recall
+      denominator.
+    keywords: ["cancel", "delete", "cascade", "invoice", "soft delete", "status"]
+    phase: 1
+
+
 # Things that look like defects and are not. A finding that matches one of these
 # is a false positive and is scored as such.
 not_defects:

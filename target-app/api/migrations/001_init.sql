@@ -26,9 +26,23 @@ CREATE TABLE orders (
                  CHECK (status IN ('draft', 'placed', 'paid', 'refunded', 'cancelled')),
     total_cents  INTEGER NOT NULL DEFAULT 0 CHECK (total_cents >= 0),
     currency     CHAR(3) NOT NULL DEFAULT 'USD',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (org_id, reference)
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- A reference identifies an *active* order within an organisation, which is
+-- what this constraint always meant and not what it used to say.
+--
+-- Cancelling an order used to DELETE the row, and that released the reference
+-- as a side effect nobody had written down. Cancelling by status keeps the row
+-- (QAAS-19: the row's invoices are ON DELETE CASCADE and no endpoint can
+-- recreate them), so a table-level UNIQUE would hold the reference forever and
+-- re-raising a cancelled PO number -- an ordinary thing to do -- would fail on
+-- a duplicate key. Scoping the uniqueness to non-cancelled rows preserves the
+-- rule for every order that is still live and releases the reference on
+-- cancellation exactly as the delete did.
+CREATE UNIQUE INDEX orders_org_id_reference_active_key
+    ON orders (org_id, reference)
+    WHERE status <> 'cancelled';
 
 CREATE INDEX orders_org_id_idx ON orders (org_id);
 CREATE INDEX orders_org_id_status_idx ON orders (org_id, status);

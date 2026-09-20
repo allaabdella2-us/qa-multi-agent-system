@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Response
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..auth import CurrentUser
@@ -107,8 +107,19 @@ def delete_order(
     user: CurrentUser,
     db: Annotated[Session, Depends(get_db)],
 ) -> dict[str, str]:
-    db.execute(delete(Order).where(Order.id == order_id, Order.org_id == user.org_id))
-    db.commit()
+    # Cancelling is a status transition, not a row deletion. Both of this
+    # table's children are declared ON DELETE CASCADE -- invoices.order_id and
+    # order_items.order_id (migrations/001_init.sql:50 and :39) -- so removing
+    # the row destroys the order's invoices, financial records no endpoint in
+    # this service can recreate. orders.status already carries 'cancelled'
+    # (001_init.sql:25-26), which is the representation this endpoint's own
+    # name implies. See QAAS-19.
+    order = db.scalars(
+        select(Order).where(Order.id == order_id, Order.org_id == user.org_id)
+    ).one_or_none()
+    if order is not None:
+        order.status = "cancelled"
+        db.commit()
     return {}
 
 
