@@ -181,6 +181,60 @@ def test_run_repo_is_idempotent_and_reuses_the_profile(runner, tmp_path, monkeyp
     assert "hand-corrected" in written.read_text()
 
 
+def test_a_clone_of_a_different_fork_is_not_reused_for_this_url(runner, tmp_path, monkeypatch):
+    """The clone directory is named by the repository's *basename*.
+
+    Every fork of `claude-code-training` therefore wants one path. Reuse was
+    decided by `root.exists()` alone and the identity that matters -- the
+    remote -- was never read, so passing one fork's URL printed "using existing
+    clone" and pointed the whole roster at a different person's code. The path
+    check in `_provision_target` cannot catch it: both sides resolve to that
+    same directory, which is precisely the thing that is wrong.
+
+    Found on the first run against a real repository, which is the argument for
+    running against one.
+    """
+    import subprocess
+
+    clones = tmp_path / "clones"
+    theirs = clones / "shared-name"
+    _fake_repo(theirs)
+    subprocess.run(["git", "init", "-q", str(theirs)], check=True)
+    subprocess.run(["git", "-C", str(theirs), "remote", "add", "origin",
+                    "https://github.com/someone-else/shared-name.git"], check=True)
+
+    config = tmp_path / "cfg"
+    config.mkdir()
+    (config / "system.yaml").write_text((Path(CONFIG) / "system.yaml").read_text())
+    (config / "agents").symlink_to(Path(CONFIG) / "agents")
+    _scratch_target(config, tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        cli.app,
+        ["run", "--mode", "pr-check", "--config", str(config), "--clone-to", str(clones),
+         "--repo", "https://github.com/me/shared-name.git", "--dry-run"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "is a clone of" in result.output
+    assert "someone-else" in result.output
+
+
+def test_the_same_repository_over_a_different_protocol_still_reuses():
+    """Refusing every protocol switch would be its own bug.
+
+    One repository is reachable as https and ssh, with and without `.git`, a
+    trailing slash, or embedded credentials. None of those is a different
+    repository.
+    """
+    same = cli._same_remote
+    assert same("https://github.com/me/app.git", "https://github.com/me/app")
+    assert same("https://github.com/me/app/", "https://github.com/me/app.git")
+    assert same("git@github.com:me/app.git", "https://github.com/me/app")
+    assert same("https://token@github.com/me/app.git", "https://github.com/me/app")
+    assert not same("https://github.com/me/app", "https://github.com/you/app")
+
+
 def test_run_repo_and_target_together_are_refused(runner, tmp_path):
     result = runner.invoke(
         cli.app,

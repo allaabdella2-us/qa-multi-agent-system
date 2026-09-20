@@ -235,6 +235,37 @@ def _redact_url(url: str) -> str:
     return urllib.parse.urlunsplit(parts._replace(netloc=host))
 
 
+def _origin_url(root: Path) -> str | None:
+    """The `origin` of an existing clone, or None if it has none to report."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return done.stdout.strip() or None if done.returncode == 0 else None
+
+
+def _same_remote(a: str, b: str) -> bool:
+    """Do two remote urls name the same repository?
+
+    Compared on host and path, because the same repository is reachable as
+    https and ssh, with and without `.git`, with and without a trailing slash,
+    and with credentials embedded. None of those differences mean a different
+    repository, and treating them as one would refuse a legitimate reuse every
+    time someone switched protocol.
+    """
+    def norm(url: str) -> str:
+        url = re.sub(r"\.git$", "", url.strip().rstrip("/"))
+        url = re.sub(r"^git@([^:/]+):", r"\1/", url)      # scp-style ssh
+        url = re.sub(r"^[a-zA-Z][\w+.-]*://", "", url)     # scheme
+        url = re.sub(r"^[^/@]*@", "", url)                 # embedded credentials
+        return url.lower()
+
+    return norm(a) == norm(b)
+
+
 def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str | None]:
     """A repo argument -> (local directory, origin url or None), cloning a URL.
 
@@ -253,6 +284,25 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
     slug = _slug(re.sub(r"\.git$", "", repo.rstrip("/").split("/")[-1]))
     root = _clone_root(clone_to) / slug
     if root.exists():
+        # The directory is named by the repository's *basename*, so every fork
+        # of `claude-code-training` wants this same path. Reuse used to be
+        # decided by `root.exists()` alone, and the identity that actually
+        # matters -- the remote -- was never read. Passing one fork's URL then
+        # printed "using existing clone" and ran the whole roster against a
+        # different person's code, with the profile's own `repo_url` recording
+        # the contradiction and nobody comparing it.
+        #
+        # The path check in `_provision_target` cannot catch this: both sides
+        # resolve to this same directory, which is the thing that is wrong.
+        actual = _origin_url(root)
+        if actual and not _same_remote(actual, repo):
+            console.print(
+                f"[red]{root} is a clone of {_redact_url(actual)}[/red], not of "
+                f"{_redact_url(repo)}. Two repositories share the basename "
+                f"'{slug}'. Pass --clone-to to put this one somewhere else, or "
+                "remove that directory to re-clone."
+            )
+            raise typer.Exit(1)
         console.print(f"[dim]using existing clone at {root}[/dim]")
         return root, repo
 
