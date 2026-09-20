@@ -13,7 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from qaas import cli
-from tests.support import make_project, write_scratch_target
+from support import make_project, write_scratch_target
 
 REPO = Path(__file__).resolve().parents[1]
 CONFIG = str(REPO / "src" / "qaas" / "defaults" / "config")
