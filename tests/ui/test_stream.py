@@ -21,9 +21,18 @@ from .conftest import SPECS, build_run, local_client
 
 FAST = 0.01
 
+#: How long to wait for an event before calling it absent.
+#:
+#: It bounds *failure* only: when the watcher is working the event arrives in
+#: milliseconds, so a generous value costs a passing run nothing and a tight one
+#: buys nothing either. At 5s `test_the_phase_rail_advances_while_an_agent_is_running`
+#: failed on a loaded CI runner -- on 3.13 while 3.12 passed, and 5/5 locally --
+#: which is a starved poll thread, not a broken rail.
+EVENT_TIMEOUT = 30.0
+
 
 async def next_event(
-    client: asyncio.Queue, event: str, timeout: float = 5.0, collect: list | None = None
+    client: asyncio.Queue, event: str, timeout: float = EVENT_TIMEOUT, collect: list | None = None
 ) -> dict:
     """The next message of one kind, ignoring the rest.
 
@@ -164,7 +173,7 @@ async def test_cost_rides_along_on_the_patch(tmp_path: Path) -> None:
     # which is why the header's cost only moves when an agent finishes.
     store.put_result(AgentResult(agent="REPRODUCER", cost_usd=1.5, num_turns=9))
     patch = None
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(EVENT_TIMEOUT):
         while patch is None or patch["cost_usd"] <= before:
             message = await client.get()
             if message["event"] == "patch":
