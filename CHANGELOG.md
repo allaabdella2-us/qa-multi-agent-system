@@ -2,6 +2,21 @@
 
 ## 0.0.2
 
+### The import graph reads TypeScript and JavaScript
+
+`test_runner` learned to run vitest and jest, and the graph behind
+`affected_tests` was still Python-only — so a TS target's suite ran and its
+*selection* fell back to comparing filenames, which is the half that makes this
+more than a guess. Verified against a real Next.js console: tests ran, the graph
+was empty. It now scans TS/JS import syntax (static, re-export, dynamic
+`import()`, `require`) and resolves it the way the language does — extensionless
+specifiers, `./dir` to `./dir/index.*`, an ESM `./y.js` back to the `y.ts` it was
+emitted from, and `tsconfig.json` `paths`/`baseUrl` aliases, without which most
+imports in a modern TS repository resolve to nothing. Still parse-only: no
+dependency, no `node`, no `tsc`. A repository holding both languages gets one
+graph covering both, and what the graph could not read is named in the answer
+rather than averaged into "no tests are affected".
+
 ### Test selection is derived now, not guessed
 
 `affected_tests` ranked tests by filename similarity, so a test reaching the

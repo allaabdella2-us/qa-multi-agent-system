@@ -932,7 +932,11 @@ def build_tools(ctx: ToolContext) -> list:
         # "a fix inside a shared helper breaks its consumers, not itself" -- and
         # `_score_tests` scores it zero, because it compares filenames and the
         # consumer's filename has nothing to do with the changed one.
-        derived = await asyncio.to_thread(_graph_tests, cwd, paths)
+        derived, unreadable = await asyncio.to_thread(_graph_tests, cwd, paths)
+        # What the graph could not read travels with both answers. "Nothing
+        # imports the changed file" and "I cannot read this language" are
+        # different facts and the second one is only knowable here.
+        tail = f"\n{unreadable}" if unreadable else ""
         if derived:
             return ok(
                 "Covering tests by import graph, nearest first: "
@@ -942,32 +946,36 @@ def build_tools(ctx: ToolContext) -> list:
                 "module. This is derived from the source, not guessed from "
                 "filenames — but it is an *import* graph, so a test that exercises "
                 "the code through a fixture, a plugin or an HTTP call does not "
-                "appear here. Run the full suite before concluding nothing broke.",
+                "appear here. Run the full suite before concluding nothing broke."
+                + tail,
                 affected=derived[:25],
                 heuristic=False,
                 method="import-graph",
+                unreadable=unreadable,
             )
 
         scored = await asyncio.to_thread(_score_tests, cwd, paths, candidates)
         if not scored:
             return ok(
                 "No test file looks related to those paths. That is itself worth reporting: "
-                "the change may be untested.",
+                "the change may be untested." + tail,
                 affected=[],
                 heuristic=True,
                 method="filename-heuristic",
+                unreadable=unreadable,
             )
         return ok(
             "Likely covering tests, best first: "
             + ", ".join(item["test_file"] for item in scored[:10])
             + ".\nThis is the filename heuristic, not the import graph: either the "
-            "changed paths are not Python, or nothing in this repository imports "
-            "them. Treat the ranking as a place to start, and run the full suite "
-            "before concluding nothing broke.",
+            "changed paths are not Python, TypeScript or JavaScript, or nothing in "
+            "this repository imports them. Treat the ranking as a place to start, "
+            "and run the full suite before concluding nothing broke." + tail,
             affected=scored[:25],
             heuristic=True,
             method="filename-heuristic",
             searched=len(candidates),
+            unreadable=unreadable,
         )
 
     @tool(
@@ -1067,38 +1075,39 @@ def build_tools(ctx: ToolContext) -> list:
 # affected_tests heuristic
 # ---------------------------------------------------------------------------
 
-_SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox", ".mypy_cache", ".qaas"}
-
-
 def _collect_test_files(root: Path) -> list[Path]:
-    found: list[Path] = []
-    for path in root.rglob("*.py"):
-        if any(part in _SKIP_DIRS for part in path.parts):
-            continue
-        if path.name.startswith("test_") or path.name.endswith("_test.py"):
-            found.append(path)
-    return found
+    """Every file the project's runner would collect, in any language it uses.
+
+    Two things were wrong with the `rglob("*.py")` this replaces. It was Python
+    only, so on a vitest project `affected_tests` answered "No test files found"
+    before it ranked anything -- and `rglob` *filters* after descending, so it
+    read its way through `node_modules` to do it. The graph's walker prunes.
+    """
+    return [p for p in importgraph.source_files(root) if importgraph.is_test_file(p)]
 
 
-def _graph_tests(root: Path, changed: list[str]) -> list[dict[str, Any]]:
-    """Covering tests from the import graph, or [] if it cannot answer.
+def _graph_tests(root: Path, changed: list[str]) -> tuple[list[dict[str, Any]], str | None]:
+    """Covering tests from the import graph, plus what the graph could not read.
 
     Empty is the honest answer in three cases and the caller must fall back in
-    all of them: the target is not Python, the changed paths are not Python, or
-    nothing in the repository imports them. Distinguishing "no tests are
-    affected" from "I cannot see this language" matters enough that the tool
-    reports which method produced the ranking.
+    all of them: the target is in a language this cannot parse, the changed
+    paths are, or nothing in the repository imports them. Distinguishing "no
+    tests are affected" from "I cannot see this language" matters enough that
+    the tool reports which method produced the ranking *and* which languages
+    were walked past -- the second half is why this returns a note rather than
+    only rows.
 
     Never raises -- the fallback exists precisely so a ranking failure is never
     a verification failure.
     """
     try:
         graph = importgraph.build(root)
+        note = graph.unreadable_note
         if not graph:
-            return []
+            return [], note
         rows = graph.affected_tests(changed)
     except Exception:  # noqa: BLE001 — a ranking is never worth failing a phase for
-        return []
+        return [], None
     return [
         {
             "test_file": r["test_file"],
@@ -1110,7 +1119,22 @@ def _graph_tests(root: Path, changed: list[str]) -> list[dict[str, Any]]:
             ),
         }
         for r in rows
-    ]
+    ], note
+
+
+def _conventional_names(stem: str) -> set[str]:
+    """What a test of `<stem>` is called, per the conventions people follow.
+
+    pytest's is `test_x.py`/`x_test.py`; vitest's and jest's is `x.test.ts` and
+    `x.spec.tsx`. Naming the second set matters because the heuristic is the
+    *fallback*, and the fallback is what a JS target gets whenever the graph
+    cannot reach the change.
+    """
+    return {f"test_{stem}.py", f"{stem}_test.py"} | {
+        f"{stem}.{kind}{ext}"
+        for kind in ("test", "spec")
+        for ext in importgraph.JS_SUFFIXES
+    }
 
 
 def _score_tests(root: Path, changed: list[str], candidates: list[Path]) -> list[dict[str, Any]]:
@@ -1142,7 +1166,7 @@ def _score_tests(root: Path, changed: list[str], candidates: list[Path]) -> list
             score = 0
             why: list[str] = []
             name = candidate.name
-            if name in {f"test_{stem}.py", f"{stem}_test.py"}:
+            if name in _conventional_names(stem):
                 score += 100
                 why.append(f"name matches {source.name}")
             elif stem and stem in name:

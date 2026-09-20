@@ -350,6 +350,88 @@ async def test_a_test_two_hops_away_is_found_at_all(tools, project):
     assert "tests/test_calc.py" not in [g["test_file"] for g in guessed]
 
 
+TS_CONFIG = """
+{
+  // Next.js writes a tsconfig with comments in it.
+  "compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["./src/*"]}},
+}
+"""
+
+
+@pytest.fixture
+def ts_project(tmp_path: Path) -> Path:
+    """A vitest project shaped like a real Next app, aliases and all.
+
+    No node and no npm: `affected_tests` never starts a subprocess, it reads.
+    """
+    root = tmp_path / "ts"
+    (root / "src" / "lib").mkdir(parents=True)
+    (root / "package.json").write_text(json.dumps({"devDependencies": {"vitest": "^1"}}))
+    (root / "tsconfig.json").write_text(TS_CONFIG)
+    (root / "src" / "lib" / "dates.ts").write_text("export const startOfDay = (d: Date) => d;\n")
+    (root / "src" / "lib" / "orders.ts").write_text(
+        'import { startOfDay } from "@/lib/dates";\nexport const total = () => startOfDay(new Date());\n'
+    )
+    (root / "src" / "lib" / "orders.test.ts").write_text(
+        'import { it } from "vitest";\nimport { total } from "./orders";\nit("totals", () => total());\n'
+    )
+    (root / "src" / "lib" / "unrelated.test.ts").write_text(
+        'import { it } from "vitest";\nit("nothing", () => {});\n'
+    )
+    return root
+
+
+@pytest.fixture
+def ts_tools(ts_project: Path, tmp_path: Path) -> dict:
+    config = load_config(search=CONFIG_SEARCH)
+    root = tmp_path / ".qaas-ts"
+    return handlers(
+        build_tools(
+            ToolContext(
+                store=RunStore("ts-run", root=root),
+                maps=SystemMapStore(root),
+                config=config,
+                agent=config.agents["REPRODUCER"],
+                target_root=ts_project,
+            )
+        )
+    )
+
+
+async def test_affected_tests_is_derived_for_typescript_too(ts_tools):
+    """The gap this closes: the runner already ran vitest and jest, and the
+    *graph* was still Python-only -- so a TS target's suite ran and its
+    selection fell back to filenames, which is the half that makes this more
+    than a guess. `orders.test.ts` reaches `dates.ts` through `@/lib/orders`.
+    """
+    result = await ts_tools["affected_tests"]({"paths": ["src/lib/dates.ts"]})
+    body = result["structuredContent"]
+    assert body["method"] == "import-graph", body
+    assert body["heuristic"] is False
+    reached = {a["test_file"]: a["distance"] for a in body["affected"]}
+    assert reached == {"src/lib/orders.test.ts": 2}
+
+
+async def test_js_test_files_are_collected_at_all(ts_tools, ts_project):
+    """`_collect_test_files` globbed `*.py`, so on a vitest project this tool
+    answered "No test files found" before it ranked anything."""
+    from qaas.mcp.test_runner import _collect_test_files
+
+    names = {p.name for p in _collect_test_files(ts_project)}
+    assert names == {"orders.test.ts", "unrelated.test.ts"}
+    assert not (await ts_tools["affected_tests"]({"paths": ["src/lib/dates.ts"]})).get("isError")
+
+
+async def test_a_language_the_graph_cannot_read_is_named_not_averaged_away(tools, project):
+    """"Nothing imports that" and "I cannot read this language" are different
+    answers, and only this side of the call knows which one it gave."""
+    (project / "pkg" / "calc.go").write_text("package pkg\n")
+    result = await tools["affected_tests"]({"paths": ["pkg/calc.go"]})
+    body = result["structuredContent"]
+    assert ".go" in (body["unreadable"] or "")
+    assert ".go" in result["content"][0]["text"]
+
+
 async def test_affected_tests_needs_paths(tools):
     assert (await tools["affected_tests"]({"paths": []}))["isError"]
 
