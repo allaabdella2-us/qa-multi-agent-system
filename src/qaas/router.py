@@ -46,6 +46,51 @@ class BudgetExceeded(RuntimeError):
     """The run hit its spend or wall-clock cap. Not an error — a control working."""
 
 
+class QuotaExhausted(RuntimeError):
+    """The provider stopped accepting work. Not a failure of the agent that hit it.
+
+    Deliberately NOT a `BudgetExceeded`, though it is the same shape of control
+    condition. `run()` catches `BudgetExceeded` around the finding phases and
+    then files and reports against the full cap, which is right when the wall
+    was our own clock and wrong when it was the provider's: TRIAGE would be
+    dispatched into the same wall, fail, and take VERIFIER and REPORTER with it.
+    A separate type is what lets the two stops end the run differently.
+    """
+
+
+#: What a provider's refusal-to-serve looks like in the error text that reaches
+#: us. Matched case-blind against whatever the SDK surfaced -- `ResultError:
+#: ... You've hit your session limit · resets 4:20pm` is the shape that cost the
+#: run this exists for. Deliberately a small list of phrases rather than a regex
+#: over status codes: the text is what every layer (SDK exception, result
+#: subtype, CLI stderr) has in common, and a marker that is merely absent costs
+#: one agent, while a marker that is too eager would stop a healthy run.
+#:
+#: A bare "429" was tried here and removed: `_dispatch`'s own timeout error
+#: reads `exceeded the run's remaining wall clock (429s)`, so a run could stop
+#: itself on quota because of how many seconds were left on its clock.
+QUOTA_MARKERS = (
+    "session limit",
+    "rate limit",
+    "usage limit",
+    "quota",
+    "too many requests",
+)
+
+
+def is_quota_error(text: str | None) -> bool:
+    """Is this error the provider declining to serve, rather than a defect?
+
+    One implementation, two callers: `_dispatch` reads an agent's error text and
+    `cli._quota_preflight` reads the probe's output. They were about to be two
+    lists of the same phrases, which is the shape of a rule that drifts.
+    """
+    if not text:
+        return False
+    lowered = str(text).lower()
+    return any(marker in lowered for marker in QUOTA_MARKERS)
+
+
 def target_revision(root: Path | str | None) -> dict[str, Any]:
     """What commit of the target this run is looking at, for `run_started`.
 
@@ -156,6 +201,16 @@ class RunReport:
     outcomes: list[RunOutcome] = field(default_factory=list)
     escalations: list[str] = field(default_factory=list)
     stopped_early: str | None = None
+    #: The run stopped because the provider stopped serving, not because
+    #: anything here was wrong. Separate from `stopped_early` (which is prose
+    #: for a human) so the CLI and the dashboard can act on the fact.
+    quota_exhausted: bool = False
+    #: The exact command that picks this run back up. Written by the router
+    #: because the router is the only thing that knows the mode and the run id
+    #: at the moment the run dies -- and because the one run that made this
+    #: necessary ended with 34 findings on disk, no tickets, and nothing on
+    #: screen saying they were recoverable.
+    resume_command: str | None = None
 
     @property
     def cost_usd(self) -> float:
@@ -174,6 +229,8 @@ class RunReport:
             "cost_usd": round(self.cost_usd, 4),
             "escalations": self.escalations,
             "stopped_early": self.stopped_early,
+            "quota_exhausted": self.quota_exhausted,
+            "resume": self.resume_command,
         }
 
 
@@ -328,6 +385,9 @@ class Router:
         self._emit("run_started", run_id=store.run_id, mode=mode, agents=sorted(specs))
 
         map_version = self.maps.latest_version()
+        #: Set by whichever phase hit the wall. Filing, verifying and reporting
+        #: are skipped when it is set -- see `_stop_on_quota`.
+        quota: QuotaExhausted | None = None
         try:
             # The finding phases run against the reserved clock, so that running
             # out of time means "stop looking" rather than "throw away what was
@@ -337,6 +397,8 @@ class Router:
             await self._phase_discover(specs, store, budget, report, mode, map_version)
             await self._phase_synthesise(specs, store, budget, report, mode, map_version)
             await self._phase_reproduce(specs, store, budget, report, map_version)
+        except QuotaExhausted as exc:
+            quota = exc
         except BudgetExceeded as exc:
             report.stopped_early = str(exc)
             report.escalations.append(str(exc))
@@ -344,12 +406,21 @@ class Router:
             self._emit("stopped", reason=str(exc))
 
         try:
+            # The reserve exists so that a run which stops early still files what
+            # it found -- and it reserves *clock*, which buys nothing when the
+            # wall is the provider's. There is no point dispatching TRIAGE into
+            # the limit that just killed discovery; in the run this comes from
+            # it did exactly that, and took ten REPRODUCER invocations with it.
+            if quota is not None:
+                raise quota
             if run_mode.files_tickets:
                 await self._phase_file(specs, store, budget, report, map_version)
             else:
                 store.log("skipped", reason="mode does not file tickets", mode=mode)
             await self._phase_verify(specs, store, budget, report, map_version)
             await self._phase_report(specs, store, budget, report, mode, map_version)
+        except QuotaExhausted as exc:
+            quota = exc
         except BudgetExceeded as exc:
             report.stopped_early = str(exc)
             report.escalations.append(str(exc))
@@ -369,10 +440,59 @@ class Router:
             store.log("escalation", reason=note)
             self._emit("stopped", reason=note)
 
+        if quota is not None:
+            self._stop_on_quota(store, report, mode, quota)
+
         self._record_outcomes(store, mode)
         store.log("run_finished", **report.summary())
         self._emit("run_finished", **report.summary())
         return report
+
+    def _stop_on_quota(
+        self, store: RunStore, report: RunReport, mode: str, exc: QuotaExhausted
+    ) -> None:
+        """End a quota-stopped run in a state someone can pick back up.
+
+        Written once, at the end, from the router -- one line and one sentence,
+        not one per agent that happened to be in flight. The run this exists for
+        (`run-20260919T152757-4c8c37`: 8 agents, 2h45m, $56.58, 34 findings)
+        ended with eleven identical escalations, zero tickets, and nothing
+        anywhere saying the findings were still on disk and still filable. They
+        were filed by hand, hours later.
+
+        Nothing here is a second resume mechanism. `_succeeded_agents` already
+        skips agents that finished cleanly, `_phase_reproduce` already re-selects
+        only `unattempted` findings and `_phase_file` already skips envelopes
+        that carry a ticket -- so resuming this run id genuinely starts at the
+        filing phase. What was missing was the sentence telling the operator
+        that, at the moment they can act on it.
+
+        Counting is best-effort: a store that cannot be read must not turn a
+        recoverable stop into a crash.
+        """
+        try:
+            unfiled = [e for e in store.envelopes() if not e.jira.key]
+        except OSError:
+            unfiled = []
+
+        resume = f"qaas run --mode {mode} --run-id {store.run_id}"
+        note = (
+            f"stopped on provider quota: {exc}. "
+            f"{len(unfiled)} finding(s) are on disk and unfiled; the agents that "
+            f"already succeeded will not be re-run. Resume with: {resume}"
+        )
+        report.quota_exhausted = True
+        report.resume_command = resume
+        report.stopped_early = note
+        report.escalations.append(note)
+        store.log(
+            "quota_exhausted",
+            reason=str(exc),
+            unfiled_findings=len(unfiled),
+            resume=resume,
+            mode=mode,
+        )
+        self._emit("stopped", reason=note)
 
     def _record_outcomes(self, store: RunStore, mode: str) -> None:
         """Write what this run learned into the memory that outlives it.
@@ -1001,7 +1121,11 @@ class Router:
             return
         sem = asyncio.Semaphore(max(1, concurrency))
         in_flight = min(max(1, concurrency), len(jobs))
-        stopped: list[str] = []
+        #: Why the rest of the jobs were never started. `BudgetExceeded` from
+        #: the pre-dispatch check, `QuotaExhausted` from a dispatch that found
+        #: the provider had stopped serving -- both mean "start nothing else",
+        #: and both are re-raised to the phase that called us.
+        stopped: list[BaseException] = []
 
         async def one(spec: AgentSpec, task: str) -> None:
             async with sem:
@@ -1010,15 +1134,23 @@ class Router:
                 try:
                     budget.check(reserve=reserve)
                 except BudgetExceeded as exc:
-                    stopped.append(str(exc))
+                    stopped.append(exc)
                     return
-                await self._dispatch(
-                    spec, store, budget, report, task, map_version, slots=in_flight
-                )
+                try:
+                    await self._dispatch(
+                        spec, store, budget, report, task, map_version, slots=in_flight
+                    )
+                except QuotaExhausted as exc:
+                    # Caught here rather than let out of `gather`: without
+                    # `return_exceptions` the first exception propagates while
+                    # the siblings keep running, so the phase would unwind while
+                    # agents were still being dispatched into the same wall. The
+                    # `stopped` gate above is what stops the queued ones.
+                    stopped.append(exc)
 
         await asyncio.gather(*(one(spec, task) for spec, task in jobs))
         if stopped:
-            raise BudgetExceeded(stopped[0])
+            raise stopped[0]
 
     async def _dispatch(
         self, spec, store, budget, report, task, map_version, *, slots: int = 1
@@ -1053,6 +1185,24 @@ class Router:
         budget.spend(outcome.result.cost_usd)
         report.outcomes.append(outcome)
         if not outcome.ok:
+            # A provider quota is not a defect in this agent and must not be
+            # escalated as one. `run-20260919T152757-4c8c37` wrote eleven
+            # `escalation` lines that all said "REPRODUCER failed: ResultError:
+            # ... You've hit your session limit", which is a human-readable way
+            # of recording the same fact ten times and acting on it zero.
+            #
+            # Raised rather than returned: the caller has to stop dispatching,
+            # and a return value would have to be checked at nine call sites
+            # that currently ignore the outcome. `run()` turns it into one
+            # `quota_exhausted` line and a resume command.
+            #
+            # No ledger line is written here. `agent_finished` already carries
+            # this agent's `error`, and the single `quota_exhausted` line
+            # `run()` writes names the agent in its reason -- one line per fact
+            # is the whole point of the change.
+            if is_quota_error(outcome.result.error):
+                self._emit("quota_exhausted", agent=spec.name, reason=outcome.result.error)
+                raise QuotaExhausted(f"{spec.name}: {outcome.result.error}")
             note = f"{spec.name} failed: {outcome.result.error or outcome.result.subtype}"
             report.escalations.append(note)
             store.log("escalation", agent=spec.name, reason=note)

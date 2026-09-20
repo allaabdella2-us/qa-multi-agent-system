@@ -31,7 +31,7 @@ DETAIL_WIDTH = 110
 #: legible before anyone teaches this table about it.
 DETAIL_FIELDS: dict[LedgerKind, tuple[str, ...]] = {
     LedgerKind.RUN_STARTED: ("mode", "agents", "budget_usd", "target_sha", "target_dirty"),
-    LedgerKind.RUN_FINISHED: ("agents_run", "cost_usd", "failed", "stopped_early"),
+    LedgerKind.RUN_FINISHED: ("agents_run", "cost_usd", "failed", "stopped_early", "resume"),
     LedgerKind.AGENT_STARTED: ("model", "task_chars", "task_preview"),
     LedgerKind.AGENT_FINISHED: ("subtype", "cost_usd", "num_turns", "envelopes", "error"),
     LedgerKind.TOOL_CALL: ("tool", "allowed"),
@@ -45,6 +45,7 @@ DETAIL_FIELDS: dict[LedgerKind, tuple[str, ...]] = {
     LedgerKind.REOPENED: ("ticket_key", "attempt"),
     LedgerKind.REVIEW_ROUND_TRIP: ("ticket_key", "trip"),
     LedgerKind.ESCALATION: ("reason",),
+    LedgerKind.QUOTA_EXHAUSTED: ("reason", "unfiled_findings", "resume"),
     LedgerKind.SKIPPED: ("reason",),
     LedgerKind.VCS: ("action", "branch", "path", "sha"),
     LedgerKind.ENV: ("action", "services", "role", "fixture"),

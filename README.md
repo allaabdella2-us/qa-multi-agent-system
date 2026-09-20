@@ -319,7 +319,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest -q                              # 989 tests, offline, free, no API key
+pytest -q                              # 1034 tests, offline, free, no API key
 qaas validate                          # config, prompts and allowlists cohere
 qaas run --mode pr-check --dry-run     # every agent's options assemble
 ```

@@ -26,7 +26,7 @@ that outdates this file usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (BROWSER, GUIDE) runs
 
-pytest                                   # 989 tests, no API calls, no network
+pytest                                   # 1034 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
@@ -217,6 +217,26 @@ run against the full cap.
 `run()` also catches non-`BudgetExceeded` exceptions and still writes
 `run_finished`. Without that, a ledger held an opening line with no closing one,
 which every reader treats as "still running", forever.
+
+**A provider quota is the third wall, and it is not `BudgetExceeded`.**
+`is_quota_error` classifies an agent's error text (one phrase list, shared with
+`cli._quota_preflight`); `_dispatch` raises `QuotaExhausted` instead of
+escalating; `_gather` stops starting queued work; and `run()` skips file, verify
+and report rather than dispatching TRIAGE into the limit that just killed
+discovery — the reserve holds back *clock*, which buys nothing when the wall is
+the provider's. It ends with **one** `quota_exhausted` ledger line (a new
+`LedgerKind`, because "a human must look at this finding" and "run it again at
+4:20pm" are opposite instructions) carrying the unfiled-finding count and the
+exact resume command, which is also `report.resume_command` and the
+`stopped_early` sentence. Resume is the existing mechanism and deliberately not
+a new one: `_succeeded_agents` skips what finished, `_phase_file` skips
+envelopes that already carry a ticket. From `run-20260919T152757-4c8c37` — 8
+agents, 2h45m, $56.58, 34 findings, then TRIAGE and ten REPRODUCERs dying
+seconds apart on the same session limit: eleven identical escalations, zero
+tickets, and the findings filed by hand hours later.
+
+A bare `429` is deliberately *not* one of the markers: `_dispatch`'s own timeout
+error reads `exceeded the run's remaining wall clock (429s)`.
 
 ### The DefectEnvelope is the only inter-agent type
 
@@ -647,7 +667,7 @@ and one clobbered result file.
 - `memory.db` — the cross-run defect memory.
 - `scores/<run-id>.json` — each scoring, persisted.
 
-The ledger's `kind` is a closed set (`store.LedgerKind`, 28 members) — **add a
+The ledger's `kind` is a closed set (`store.LedgerKind`, 29 members) — **add a
 member, never repurpose one**: the router reads `verdict`, `review` and `vcs`
 back for control flow, so these are a wire format, not labels. `store.ledger()`
 skips and counts lines it cannot parse; a run killed mid-write leaves a truncated

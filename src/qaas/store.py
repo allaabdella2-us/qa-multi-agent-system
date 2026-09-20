@@ -31,7 +31,7 @@ def _utcnow() -> datetime:
 class LedgerKind(StrEnum):
     """Every kind of line the ledger may contain.
 
-    This was a bare `str` whose comment named 7 of the 28 kinds actually
+    This was a bare `str` whose comment named 7 of the 29 kinds actually
     written, which left the ledger unreadable by anything but grep: nothing
     could enumerate what a run might contain, and a typo at a `store.log()`
     call site invented a 29th kind that no reader would ever look for. It is a
@@ -51,6 +51,15 @@ class LedgerKind(StrEnum):
     RUN_FINISHED = "run_finished"
     SKIPPED = "skipped"
     ESCALATION = "escalation"
+    #: The provider stopped accepting work -- a session/usage quota, not a
+    #: failure of any agent. Its own kind rather than another `escalation`,
+    #: because the two mean opposite things to whoever reads the ledger back:
+    #: an escalation says "a human must look at this finding", and this says
+    #: "nothing was wrong, run it again when the quota resets". Repurposing
+    #: `escalation` would also bury it -- the run that taught us this
+    #: (`run-20260919T152757-4c8c37`, $56.58) wrote eleven of them, one per
+    #: agent that walked into the same wall, and none of them said the word.
+    QUOTA_EXHAUSTED = "quota_exhausted"
 
     # agent lifecycle (runner, store)
     AGENT_STARTED = "agent_started"

@@ -2,6 +2,25 @@
 
 ## 0.0.2
 
+### A run survives the provider running out of quota
+
+`run-20260919T152757-4c8c37`: 8 agents, 2h45m, $56.58, 34 findings, discovery
+complete — and then TRIAGE and ten REPRODUCER invocations died within seconds of
+each other on "You've hit your session limit · resets 4:20pm". Eleven identical
+escalations, zero tickets, and findings that were filed by hand hours later. The
+budget governor knew about dollars and wall clock and nothing about a provider
+that has stopped serving, and the reserve holds back *clock*, which buys nothing
+against that wall.
+
+`is_quota_error` classifies it, `_dispatch` raises `QuotaExhausted` rather than
+escalating, `_gather` stops starting queued work, and `run()` skips filing and
+verification instead of dispatching them into the same limit. The run ends with
+one `quota_exhausted` ledger line — a new `LedgerKind`, because "a human must
+look at this finding" and "run it again at 4:20pm" are opposite instructions —
+carrying the count of findings still unfiled and the exact command that resumes
+the run. Resume itself is unchanged: the agents that succeeded are already
+skipped, and the envelopes that never got a ticket are already picked up.
+
 ### Test selection is derived now, not guessed
 
 `affected_tests` ranked tests by filename similarity, so a test reaching the
