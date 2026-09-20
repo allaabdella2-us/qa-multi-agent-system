@@ -992,3 +992,130 @@ async def test_an_agent_that_errored_is_retried_on_resume(cfg, tmp_path, fake_ag
     await make_conductor(cfg, tmp_path).run("pr-check", run_id=report.run_id)
 
     assert "API" in {name for name, _ in calls}, "the failed agent was not retried"
+
+
+# -- the provider stops serving ---------------------------------------------
+#
+# Measured, not hypothetical. `run-20260919T152757-4c8c37` on the demo app: 8
+# agents, 2h45m, $56.58, 34 findings, discovery complete -- and then TRIAGE and
+# ten REPRODUCER invocations all died within seconds of each other on "You've
+# hit your session limit · resets 4:20pm". Eleven escalations, zero tickets. The
+# findings survived on disk and were filed by hand, hours later. These pin the
+# three things that were missing: recognising it, not repeating it, and saying
+# that the run can be picked back up.
+
+QUOTA_ERROR = (
+    "ResultError: Claude Code returned an error result: "
+    "You've hit your session limit · resets 4:20pm"
+)
+
+
+def test_a_quota_refusal_is_told_apart_from_a_failure():
+    from qaas.router import is_quota_error
+
+    assert is_quota_error(QUOTA_ERROR)
+    assert is_quota_error("HTTP 429: Too Many Requests")
+    assert is_quota_error("usage limit reached")
+    assert not is_quota_error(None)
+    assert not is_quota_error("AssertionError: expected 200, got 500")
+
+
+def test_the_runs_own_timeout_is_not_mistaken_for_a_quota():
+    """`_dispatch` writes `exceeded the run's remaining wall clock (429s)`.
+
+    A bare "429" in the marker list made that text quota-shaped, so a run could
+    stop itself on "the provider is refusing" because of how many seconds were
+    left on its own clock.
+    """
+    from qaas.router import is_quota_error
+
+    assert not is_quota_error("exceeded the run's remaining wall clock (429s)")
+
+
+async def test_quota_stops_the_run_before_the_next_phase(cfg, tmp_path, fake_agents):
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"subtype": "failure", "error": QUOTA_ERROR}
+
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+    names = [n for n, _ in calls]
+
+    assert names == ["MAPPER"], "the rest of the roster walked into the same wall"
+    assert report.quota_exhausted
+    assert report.stopped_early and "quota" in report.stopped_early
+
+
+async def test_only_one_line_says_it_not_one_per_agent(cfg, tmp_path, fake_agents):
+    """Eleven escalations saying the same thing is a fact recorded and not acted on."""
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 3}
+    behaviour["REPRODUCER"] = {"subtype": "failure", "error": QUOTA_ERROR}
+
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+    names = [n for n, _ in calls]
+    store = RunStore(report.run_id, tmp_path, create=False)
+
+    assert names.count("REPRODUCER") == 1, "the second finding bought the same answer again"
+    assert "TRIAGE" not in names, "filing was dispatched into the limit that stopped reproduction"
+    assert "REPORTER" not in names
+    quota = list(store.ledger("quota_exhausted"))
+    assert len(quota) == 1
+    assert quota[0].detail["unfiled_findings"] == 3
+    # Not an escalation: an escalation means a human must look at a *finding*.
+    assert not [
+        e for e in store.ledger("escalation")
+        if "session limit" in str(e.detail.get("reason", ""))
+    ]
+
+
+async def test_a_quota_stop_still_closes_the_ledger(cfg, tmp_path, fake_agents):
+    """A run with `run_started` and no `run_finished` reads as "still running", forever."""
+    _, behaviour = fake_agents
+    behaviour["MAPPER"] = {"subtype": "failure", "error": QUOTA_ERROR}
+
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+    store = RunStore(report.run_id, tmp_path, create=False)
+
+    finished = list(store.ledger("run_finished"))
+    assert len(finished) == 1
+    assert finished[0].detail["quota_exhausted"] is True
+    assert finished[0].detail["resume"] == report.resume_command
+
+
+async def test_the_summary_names_the_command_that_picks_it_back_up(cfg, tmp_path, fake_agents):
+    _, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 2}
+    behaviour["REPRODUCER"] = {"subtype": "failure", "error": QUOTA_ERROR}
+
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+
+    assert report.resume_command == f"qaas run --mode nightly --run-id {report.run_id}"
+    assert "2 finding(s)" in report.stopped_early
+    assert report.summary()["resume"] == report.resume_command
+
+
+async def test_resuming_a_quota_stopped_run_reaches_the_filing_phase(cfg, tmp_path, fake_agents):
+    """The property worth all of this: the findings become tickets on the retry.
+
+    No second resume mechanism -- `_succeeded_agents` already skips what
+    finished and `_phase_file` already picks up envelopes carrying no ticket.
+    This asserts the two halves meet.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 2}
+    behaviour["REPRODUCER"] = {"subtype": "failure", "error": QUOTA_ERROR}
+
+    report = await make_conductor(cfg, tmp_path).run("nightly")
+    assert report.quota_exhausted
+
+    calls.clear()
+    behaviour["REPRODUCER"] = {}
+    resumed = await make_conductor(cfg, tmp_path).run("nightly", run_id=report.run_id)
+    names = [n for n, _ in calls]
+
+    assert "MAPPER" not in names, "a resumed run paid to re-map"
+    assert "API" not in names, "discovery that succeeded was asked again"
+    assert "TRIAGE" in names, "the filing phase never ran; the findings stay on disk"
+    assert not resumed.quota_exhausted

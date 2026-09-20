@@ -255,6 +255,12 @@ qaas run --mode <mode> [options]
   --ticket KEY           restrict a fix-cycle to these tickets (repeatable)
 ```
 
+If the model stops accepting work part way through — a session or usage limit —
+the run stops there rather than marching the rest of the roster into the same
+wall. The summary says so (`quota_exhausted`), counts the findings that are on
+disk and unfiled, and prints the command that picks the run back up. Resuming
+skips the agents that already succeeded and starts at the filing phase.
+
 ```bash
 qaas run --mode pr-check --dry-run                    # free
 qaas run --mode nightly                               # the usual sweep

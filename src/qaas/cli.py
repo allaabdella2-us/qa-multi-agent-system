@@ -29,6 +29,7 @@ KIND_STYLE = {
     "denial": "yellow", "stop_blocked": "yellow", "contract_unmet": "yellow",
     "skipped": "dim", "tool_call": "dim", "dry_run": "dim",
     "escalation": "red", "agent_error": "red", "tool_error": "red",
+    "quota_exhausted": "yellow",
     "regression": "red", "reopened": "red",
     "envelope": "magenta", "reproduction": "magenta", "ticket": "magenta",
     "verdict": "green", "verified": "green", "review": "green",
@@ -110,16 +111,18 @@ BLOCKING_READINESS = (
 def _quota_preflight() -> str | None:
     """One cheap call, to find out now rather than thirteen agents from now.
 
-    An account session limit is not a code failure and the router handles it
-    correctly -- each agent escalates and the run carries on. But thirteen agents
-    walking into the same wall one at a time is forty minutes and a bill to learn
-    something one probe answers in three seconds, and the run that taught us this
-    produced exactly one working agent.
+    An account session limit is not a code failure. The router recognises one
+    mid-run now (`router.QuotaExhausted`) and stops rather than dispatching the
+    rest of the roster into it -- but a probe that costs three seconds still
+    beats finding out after the first agent, and this one runs before any money
+    is spent at all.
 
     Returns the message to print and stop on, or None to proceed. Never raises:
     a preflight that cannot run is not a reason to refuse a run.
     """
     import subprocess
+
+    from qaas.router import is_quota_error
 
     binary = _claude_cli()
     if binary is None:
@@ -132,10 +135,12 @@ def _quota_preflight() -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     blob = f"{proc.stdout}\n{proc.stderr}"
-    for marker in ("session limit", "rate limit", "usage limit", "quota"):
-        if marker in blob.lower():
-            return blob.strip().splitlines()[-1][:300] if blob.strip() else marker
-    return None
+    # One implementation of "is this the provider declining to serve", shared
+    # with the router. This used to be its own copy of the phrase list, which is
+    # how a preflight and a mid-run check come to disagree about the same wall.
+    if not is_quota_error(blob):
+        return None
+    return blob.strip().splitlines()[-1][:300] if blob.strip() else "quota exhausted"
 
 
 def _load_config_or_exit(config_dir: Path | str | None, target: str | None):
@@ -1726,6 +1731,17 @@ def run(
 
     console.print()
     console.print_json(data=report.summary())
+    if report.quota_exhausted and report.resume_command:
+        # Above the trace/dashboard/board lines and in colour, because this is
+        # the one line that is *actionable*: the findings are on disk and the
+        # filing phase has not run. The run that motivated this printed eleven
+        # escalations and nothing that said so.
+        console.print(
+            f"\n[yellow]the model stopped accepting work; this run is resumable.[/yellow]"
+            f"\n[bold]resume when the quota resets:[/bold] {report.resume_command}"
+            f"\n[dim]Agents that already succeeded are skipped, findings already on "
+            f"disk are not re-found, and filing picks up where it stopped.[/dim]"
+        )
     console.print(f"\n[dim]watch it back:[/dim] qaas trace {report.run_id}")
     if dash_url:
         console.print(f"[dim]dashboard:[/dim] {dash_url}#{report.run_id}")

@@ -162,6 +162,8 @@ not get is a committed failing test. `is_fileable` never asked for one.
 router._dispatch(spec, task)
         │
         ├── Budget.check()          raises BudgetExceeded → a control working, not an error
+        │                           a quota refusal in the result raises QuotaExhausted →
+        │                           stop dispatching, end resumable, one ledger line
         │
         ▼
  runner.run_agent(spec, ctx, task)
