@@ -148,9 +148,15 @@ fix-cycle:  [VERIFIER, FIXER, REVIEWER]
 full-loop:  all sixteen
 ```
 
-Note the shape: **REPRODUCER runs once per finding at or above
-`thresholds.reproduce_min_severity`** (default `major`), in a fresh context each
-time. So cost scales with how much was found, not with how many agents exist —
+Note the shape: **REPRODUCER runs once per ticket entering a fix cycle**, in a
+fresh context each time, dispatched by `_verify_loop` rather than by a phase of
+its own. It used to run over every finding above
+`thresholds.reproduce_min_severity` (default `major`) before filing, and a real
+run made twenty failing tests of which three were ever executed — ~$56 of a $76
+run, and the wall clock the fix loop then ran out of. A roster carrying
+REPRODUCER without VERIFIER (`pr-check`, `nightly`) still reproduces eagerly,
+because there the committed test is the deliverable rather than an input. Cost
+still scales with how much was found rather than with how many agents exist —
 which is why the floor exists. A nightly run that found 85 mostly-minor issues
 queued 85 contexts and spent $45 without filing anything. Below the floor a
 finding is still filed, on the evidence discovery already produced; what it does

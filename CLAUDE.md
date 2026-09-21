@@ -99,8 +99,13 @@ or you will be looking at the demo app's runs.
 ### Phase pipeline (`router.py`)
 
 ```
-map    -> discover     -> synthesise  -> reproduce  -> file   -> verify   -> report
-MAPPER    API/BROWSER/…  SYNTHESIZER     REPRODUCER    TRIAGE    VERIFIER    REPORTER
+map    -> discover     -> synthesise  -> file   -> verify ------------------> report
+MAPPER    API/BROWSER/…  SYNTHESIZER     TRIAGE    REPRODUCER -> VERIFIER       REPORTER
+                                                   (per ticket, in the loop)
+
+A roster with no VERIFIER -- `pr-check`, `nightly` -- reproduces as its own
+phase between synthesise and file instead, because there the committed failing
+test is the deliverable rather than an input.
 ```
 
 The phases exist because the dependencies are real: discovery cannot start
@@ -141,14 +146,27 @@ invocations are separate contexts but not separate sandboxes: both hold `vcs`
 and `env_control` against the same `target_root`, so they branch, commit and
 reset the same working tree and the same compose stack.
 
-Because that cost scales with findings, `_phase_reproduce` gates on
-`thresholds.reproduce_min_severity` (default `major`). A nightly run that found
-85 mostly-minor issues opened 85 frontier-model contexts and spent $45 filing
-nothing. A finding below the floor is still **filed** — `is_fileable` wants
-evidence, confidence and "not `not_reproducible`", and `unattempted` passes all
-three — it just does not earn a committed failing test. The gate cannot move
-`qaas score`, because the scorecard reads envelopes and REPRODUCER emits none;
-that is what makes it a pure cost lever rather than a calibration change.
+**Reproduction is scheduled by whoever will consume the test.** It was a phase
+of its own over every finding above the floor, and a real full-loop run made
+twenty committed failing tests of which **three** were ever executed: seven
+findings became tickets, three of those reached a fix cycle, and the other
+seventeen cost ~$56 of a $76 run and were opened by nothing. Worse, they spent
+the wall clock the fix loop then ran out of — 87% of a three-hour cap preparing
+work, twenty minutes doing it. So where the roster has a fix loop,
+`_verify_loop` reproduces the ticket it is about to work on, one at a time, via
+`_reproduce_for`; a ticket that never reaches remediation never buys a context.
+Where it does not (`pr-check`, `nightly` carry REPRODUCER without VERIFIER) the
+eager phase still runs, because the test is the deliverable there and there is
+no fix loop for it to starve.
+
+`reproduce_min_severity` (default `major`) still decides whether a ticket earns
+a committed test — not whether it earns a fix. Below the floor VERIFIER falls
+back to exercising the running application, which it already does and already
+says so when it does. A finding below the floor is still **filed** —
+`is_fileable` wants evidence, confidence and "not `not_reproducible`", and
+`unattempted` passes all three. The gate cannot move `qaas score`, because the
+scorecard reads envelopes and REPRODUCER emits none; that is what makes it a
+pure cost lever rather than a calibration change.
 
 ### The verify loop
 

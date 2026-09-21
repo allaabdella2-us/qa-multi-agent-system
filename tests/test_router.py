@@ -603,6 +603,86 @@ async def test_an_agent_the_target_cannot_support_is_not_dispatched(cfg, tmp_pat
     assert "API" in ran, "static analysis agents must still run"
 
 
+def _files_tickets(ctx, spec):
+    """A fake TRIAGE that stamps ticket keys, so the verify phase has work."""
+    for i, envelope in enumerate(ctx.store.envelopes(), start=1):
+        if not envelope.jira.key:
+            envelope.jira.key = f"PROJ-{i}"
+            ctx.store.put_envelope(envelope)
+
+
+async def test_only_the_tickets_that_reach_remediation_pay_for_a_test(
+    cfg, tmp_path, fake_agents
+):
+    """Reproduction is scheduled by whoever will consume the test.
+
+    It ran as a phase over every finding above the floor, and on a real run that
+    meant twenty contexts producing twenty committed failing tests of which
+    three were ever executed -- ~$56 of a $76 run, and 87% of a three-hour cap
+    spent preparing work, leaving twenty minutes to do it.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 4, "severity": Severity.BLOCKER}
+
+    # Only two of the four findings become tickets, so only two are worth a test.
+    def _file_two(ctx, spec):
+        for i, envelope in enumerate(ctx.store.envelopes()[:2], start=1):
+            envelope.jira.key = f"PROJ-{i}"
+            ctx.store.put_envelope(envelope)
+
+    behaviour["TRIAGE"] = {"hook": _file_two}
+
+    await make_conductor(cfg, tmp_path).run("full-loop")
+    assert sum(1 for n, _ in calls if n == "REPRODUCER") == 2, (
+        "a finding that never reaches a fix cycle must not buy a context"
+    )
+
+
+async def test_reproduction_happens_before_the_ticket_is_verified(cfg, tmp_path, fake_agents):
+    """Order matters: VERIFIER reads the repro branch off the envelope."""
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 1, "severity": Severity.BLOCKER}
+    behaviour["TRIAGE"] = {"hook": _files_tickets}
+
+    await make_conductor(cfg, tmp_path).run("full-loop")
+    order = [n for n, _ in calls]
+    assert order.index("REPRODUCER") < order.index("VERIFIER")
+
+
+async def test_a_roster_with_no_fix_loop_still_reproduces_eagerly(cfg, tmp_path, fake_agents):
+    """`pr-check` and `nightly` carry REPRODUCER without VERIFIER.
+
+    There the committed failing test is the deliverable rather than an input,
+    and there is no fix loop for it to starve. Making reproduction lazy in
+    *every* roster would have silently stopped those modes producing the thing
+    they exist to hand a human.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 3, "severity": Severity.BLOCKER}
+
+    await make_conductor(cfg, tmp_path).run("nightly")
+    assert "VERIFIER" not in {s.name for s in cfg.enabled_agents("nightly")}
+    assert sum(1 for n, _ in calls if n == "REPRODUCER") == 3
+
+
+async def test_a_finding_below_the_floor_still_gets_its_fix_cycle(cfg, tmp_path, fake_agents):
+    """The floor decides whether a ticket earns a committed test, not whether
+    it earns a fix. VERIFIER falls back to exercising the running application,
+    which it already does and already says so when it does."""
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 1, "severity": Severity.MINOR}
+    behaviour["TRIAGE"] = {"hook": _files_tickets}
+
+    await make_conductor(cfg, tmp_path).run("full-loop")
+    names = [n for n, _ in calls]
+    assert "REPRODUCER" not in names, "minor is below the floor"
+    assert "VERIFIER" in names, "but it is still a ticket, and still gets verified"
+
+
 async def test_every_shipped_agent_is_actually_dispatchable(cfg, tmp_path, fake_agents):
     """No agent may validate, assemble, and then silently do nothing.
 
@@ -626,12 +706,26 @@ async def test_every_shipped_agent_is_actually_dispatchable(cfg, tmp_path, fake_
     # mean this test has to supply something joinable to prove dispatch.
     behaviour["API"] = {"emit": 2}
 
+    # TRIAGE has to actually file, because REPRODUCER is no longer dispatched by
+    # a phase of its own in a roster that has a fix loop -- `_verify_loop`
+    # reproduces the ticket it is about to work on, so nothing reaches
+    # REPRODUCER until something carries a ticket key. Without this the test
+    # failed for a fixture reason while the real pipeline was fine, which is the
+    # opposite of what it is for.
+    def _file_them(ctx, spec):
+        for i, envelope in enumerate(ctx.store.envelopes(), start=1):
+            if not envelope.jira.key:
+                envelope.jira.key = f"PROJ-{i}"
+                ctx.store.put_envelope(envelope)
+
+    behaviour["TRIAGE"] = {"hook": _file_them}
+
     await make_conductor(cfg, tmp_path).run("full-loop")
     dispatched = {name for name, _ in calls}
 
-    # Remediation agents only run on a NOT_FIXED verdict, which this run has no
-    # way to produce; they are covered by the fix-loop tests instead.
-    expected = {s.name for s in cfg.enabled_agents("full-loop")} - {"FIXER", "REVIEWER", "VERIFIER"}
+    # FIXER and REVIEWER need a NOT_FIXED verdict, which the fake VERIFIER has
+    # no way to record; they are covered by the fix-loop tests instead.
+    expected = {s.name for s in cfg.enabled_agents("full-loop")} - {"FIXER", "REVIEWER"}
     missing = sorted(expected - dispatched)
     assert not missing, (
         f"{missing} are configured into full-loop and were never dispatched. "

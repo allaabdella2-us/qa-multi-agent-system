@@ -472,7 +472,27 @@ class Router:
             map_version = await self._phase_map(specs, store, budget, report)
             await self._phase_discover(specs, store, budget, report, mode, map_version)
             await self._phase_synthesise(specs, store, budget, report, mode, map_version)
-            await self._phase_reproduce(specs, store, budget, report, map_version)
+            # Reproduction is scheduled by whoever will consume the test.
+            #
+            # It ran here for every finding above the floor, and on a real run
+            # that meant twenty contexts producing twenty committed failing
+            # tests of which **three** were ever executed: seven findings became
+            # tickets, three of those reached a fix cycle, and the other
+            # seventeen tests cost ~$56 of a $76 run and were opened by nothing.
+            # Worse, they spent the wall clock the fix loop then ran out of --
+            # 87% of a three-hour cap to prepare work, twenty minutes to do it.
+            #
+            # So when the roster has a fix loop, `_verify_loop` reproduces the
+            # ticket it is about to work on, one at a time, and a ticket that
+            # never reaches remediation never pays for a test nobody reads.
+            #
+            # When it does *not* -- `pr-check` and `nightly` carry REPRODUCER
+            # without VERIFIER -- the committed failing test is the deliverable
+            # rather than an input, and there is no fix loop for it to starve.
+            # That run still reproduces eagerly, which is why this is a change
+            # of *scheduling* and not of behaviour.
+            if specs.get("VERIFIER") is None:
+                await self._phase_reproduce(specs, store, budget, report, map_version)
         except QuotaExhausted as exc:
             quota = exc
         except BudgetExceeded as exc:
@@ -995,6 +1015,46 @@ class Router:
             budget.check()
             await self._verify_loop(envelope, specs, store, budget, report, map_version)
 
+    async def _reproduce_for(
+        self, envelope, specs, store, budget, report, map_version
+    ):
+        """Reproduce one finding, at the moment a fix is about to be attempted.
+
+        The same dispatch `_phase_reproduce` makes, scheduled by the consumer
+        instead of ahead of every possible consumer. Returns the envelope as it
+        stands afterwards: REPRODUCER writes the repro branch onto it, and
+        `_verify_loop` reads that branch two lines later, so the caller must not
+        keep holding the copy it had before.
+
+        A finding below `reproduce_min_severity` still gets its fix cycle -- it
+        just has no committed failing test, and VERIFIER falls back to
+        exercising the running application, which it already does and already
+        says so when it does.
+        """
+        spec = specs.get("REPRODUCER")
+        fresh = next((e for e in store.envelopes() if e.id == envelope.id), envelope)
+        if spec is None or fresh.reproduction.status.value != "unattempted":
+            return fresh
+
+        floor = self.config.thresholds.reproduce_min_severity
+        if fresh.severity.rank > floor.rank:
+            store.log(
+                "skipped", agent="REPRODUCER", ticket_key=fresh.jira.key,
+                reason=(
+                    f"{fresh.severity.value} is below {floor.value}: verified against "
+                    "the running application rather than a committed failing test "
+                    "(thresholds.reproduce_min_severity)"
+                ),
+            )
+            return fresh
+
+        budget.check()
+        await self._gather(
+            [(spec, tasks.reproducer(fresh, self.config, self.config.thresholds.flake_runs))],
+            store, budget, report, map_version, concurrency=1,
+        )
+        return next((e for e in store.envelopes() if e.id == fresh.id), fresh)
+
     async def _verify_loop(self, envelope, specs, store, budget, report, map_version) -> None:
         """VERIFIER -> NOT_FIXED -> remediate -> VERIFIER, bounded by §8.3.
 
@@ -1021,6 +1081,12 @@ class Router:
                 reason=f"{ticket}: held by a human — {answer.note}",
             )
             return
+
+        # Reproduce now, not in a phase of its own: this is the first moment the
+        # test is known to have a reader. See `run()` for the measurement.
+        envelope = await self._reproduce_for(
+            envelope, specs, store, budget, report, map_version
+        )
 
         # The envelope names the *repro* branch, which by construction carries a
         # failing test and no fix -- it is written before any fix exists. Sending
