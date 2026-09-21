@@ -170,6 +170,19 @@ pure cost lever rather than a calibration change.
 
 ### The verify loop
 
+**A FIXER that changed nothing escalates rather than being reviewed.** That is
+the failure this system keeps producing, and every earlier instance was caught
+downstream — REVIEWER reading the diff and finding the branch byte-identical to
+main, after a second frontier-model context had been paid for. Three causes so
+far: write paths matching no file in the target, a diff budget narrower than
+the fix, and a branch created but never committed to. `_branch_written_since`
+cannot see it, because `create_branch` puts a branch name in the ledger and an
+empty branch then looks exactly like a real one; `_changed_anything_since` asks
+for a commit. The escalation names the guardrail that stopped it, and names the
+diff budget specially — that one means the fix is *wider than the envelope*
+rather than wrong, so a human widens `diff_budget` for the target or splits the
+ticket instead of hunting a bad fix that was never written.
+
 `_verify_loop` dispatches VERIFIER; on `NOT_FIXED` it calls `_remediate`
 (FIXER -> REVIEWER, bounded by `max_mender_arbiter_round_trips`) and re-runs
 VERIFIER, bounded by `max_proof_reopens`. Every exit either records a verdict or
@@ -630,6 +643,15 @@ and the SDK subprocess `cwd` are all anchored on. They coincide only for the
 bundled demo. A policy's `write_paths`, `protected_paths` and `forbidden_paths`
 are **target-relative** — a pattern written `*/x/*` will not match a repository's
 own root-level `x/`.
+
+`diff_budget:` on a profile overrides `max_diff_files` / `max_diff_lines` for
+every agent that already has one — a raise or a lower, never a grant, because
+an agent the §8.2 matrix left unbounded was left so deliberately. §8.2 ships a
+single number and how wide a *legitimate* fix is depends on the codebase: the
+merchant console's defects are duplication defects, so a correct fix touches
+every duplicate, and FIXER's shipped ceiling of 5 files could not express one.
+It edited five, was refused the sixth, and ended the round with an empty branch
+that REVIEWER had to discover.
 
 **A named target that does not exist is fatal.** The guard used to read
 `if chosen and profiles:`, so "named but absent stays fatal" held only when some
