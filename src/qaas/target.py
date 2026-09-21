@@ -169,6 +169,15 @@ class Environment(BaseModel):
         return self
 
 
+class DiffBudget(BaseModel):
+    """A target's own ceiling on how much one fix may change."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_diff_files: int | None = None
+    max_diff_lines: int | None = None
+
+
 class TargetProfile(BaseModel):
     """One application this system can be pointed at."""
 
@@ -183,6 +192,20 @@ class TargetProfile(BaseModel):
     layout: Layout = Field(default_factory=Layout)
     environment: Environment = Field(default_factory=Environment)
     auth: Auth = Field(default_factory=Auth)
+
+    #: How wide a fix this repository's shape allows, overriding the agent's own
+    #: `max_diff_files` / `max_diff_lines`.
+    #:
+    #: §8.2's budget is one global number, and how wide a *legitimate* fix is
+    #: depends entirely on the codebase. FIXER ships with 5 files; a
+    #: cross-currency aggregation defect in the merchant console spans six
+    #: aggregation sites, so the correct fix could not be written -- FIXER
+    #: edited five, was refused the sixth, and ended the round with an empty
+    #: branch. The budget was not wrong and neither was the fix; they simply
+    #: belong to different scopes, and only the target knows its own.
+    #:
+    #: Omitted means "whatever the agent says", which is every existing profile.
+    diff_budget: DiffBudget | None = None
 
     #: Golden ledger for calibration. Absent for real applications — you only
     #: have one for an app whose defects you planted yourself.

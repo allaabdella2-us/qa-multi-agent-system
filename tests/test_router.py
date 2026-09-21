@@ -51,6 +51,16 @@ def fake_agents(monkeypatch):
                         evidence=[{"type": "log", "uri": "artifact://a/b"}],
                     )
                 )
+        # A working FIXER ends a round with a commit on its branch. Modelled
+        # here because the router now checks for one: a branch with no commit is
+        # the "FIXER changed nothing" failure, and before this the fake never
+        # wrote a vcs entry at all, so every fix-loop test was exercising the
+        # empty-fix path without meaning to. `commits: False` opts into it.
+        if spec.name == "FIXER" and cfg.get("commits", True):
+            ctx.store.log(
+                "vcs", agent="FIXER", action="commit",
+                branch=f"fix/{cfg.get('branch', 'scripted')}", sha="0" * 40,
+            )
         if cfg.get("publish_map"):
             ctx.maps.put({"services": ["orders-api"], "routes": []})
         if cfg.get("review"):
@@ -681,6 +691,67 @@ async def test_a_finding_below_the_floor_still_gets_its_fix_cycle(cfg, tmp_path,
     names = [n for n, _ in calls]
     assert "REPRODUCER" not in names, "minor is below the floor"
     assert "VERIFIER" in names, "but it is still a ticket, and still gets verified"
+
+
+async def test_a_fixer_that_changed_nothing_escalates_instead_of_being_reviewed(
+    cfg, tmp_path, verdicts
+):
+    """The failure this system keeps producing, caught where it happens.
+
+    FIXER reporting success having changed nothing has three known causes --
+    write paths matching no file in the target, a diff budget narrower than the
+    fix, and a branch created but never committed to -- and all three reached
+    REVIEWER as "there is no fix to review", after a second frontier-model
+    context had been paid for. On one full-loop run every remaining ticket
+    ended that way.
+
+    `_branch_written_since` cannot catch it: `create_branch` puts a branch name
+    in the ledger, so an empty branch looks exactly like a real one.
+    """
+    calls, behaviour, script = verdicts
+    script("NOT_FIXED")
+    behaviour["FIXER"] = {"commits": False, "hook": lambda ctx, spec: ctx.store.log(
+        "vcs", agent="FIXER", action="create_branch", branch="fix/empty")}
+    behaviour["REVIEWER"] = {"review": "APPROVE"}
+    store = RunStore.new(tmp_path)
+    _filed(store)
+
+    report = await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+
+    assert "REVIEWER" not in {n for n, _ in calls}, (
+        "REVIEWER must not be paid to discover an empty branch"
+    )
+    assert any("changed nothing" in e for e in report.escalations), report.escalations
+
+
+async def test_the_escalation_names_the_diff_budget_when_that_is_the_cause(
+    cfg, tmp_path, verdicts
+):
+    """A budget refusal means the fix is wider than the envelope, not wrong.
+
+    That distinction is why the refusal is named: a human widens
+    `max_diff_files` for this target or splits the ticket, rather than going to
+    look for a bad fix that was never written.
+    """
+    calls, behaviour, script = verdicts
+    script("NOT_FIXED")
+
+    def _blocked(ctx, spec):
+        ctx.store.log("vcs", agent="FIXER", action="create_branch", branch="fix/blocked")
+        ctx.store.log(
+            "denial", agent="FIXER", tool="Edit",
+            reason="FIXER has already changed 5 files, which is its limit of 5 (§8.2). "
+                   "A fix this wide is outside the autonomy envelope.",
+        )
+
+    behaviour["FIXER"] = {"commits": False, "hook": _blocked}
+    store = RunStore.new(tmp_path)
+    _filed(store)
+
+    report = await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    said = " ".join(report.escalations)
+    assert "wider than the envelope" in said, said
+    assert "max_diff_files" in said, said
 
 
 async def test_a_ticket_already_verified_is_not_verified_again(cfg, tmp_path, fake_agents):

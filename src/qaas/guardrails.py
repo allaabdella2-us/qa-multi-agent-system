@@ -184,6 +184,14 @@ class Decision:
     reason: str = ""
 
 
+#: What a diff-budget refusal says, so the router can recognise one in the
+#: ledger without matching on prose that may be reworded. The guardrail can
+#: only refuse the write; it cannot end the turn, and the agent reading
+#: "stop, and escalate with what you have found" has no channel to escalate on.
+#: So the router reads this back and escalates on the agent's behalf.
+DIFF_BUDGET_REFUSAL = "(§8.2)"
+
+
 class Guardrail:
     """One agent's enforcement of its own policy."""
 
@@ -464,7 +472,7 @@ class Guardrail:
             return Decision(
                 False,
                 f"{self.agent.name} has already changed {len(touched)} files, which is "
-                f"its limit of {max_files} (§8.2). A fix this wide is outside the "
+                f"its limit of {max_files} {DIFF_BUDGET_REFUSAL}. A fix this wide is outside the "
                 "autonomy envelope: stop, and escalate with what you have found. "
                 f"Already touched: {', '.join(sorted(touched))}.",
             )

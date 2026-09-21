@@ -399,6 +399,7 @@ def _resolve_agent_paths(config: "SystemConfig") -> "SystemConfig":
     if config.profile is None:
         return config
     layout = config.profile.layout
+    budget = config.profile.diff_budget
     agents = {}
     for name, spec in config.agents.items():
         policy = spec.policy
@@ -407,6 +408,18 @@ def _resolve_agent_paths(config: "SystemConfig") -> "SystemConfig":
             for field in _PATH_FIELDS
             if any(p.startswith("$") for p in getattr(policy, field))
         }
+        # How wide a legitimate fix is belongs to the codebase, not to the
+        # agent. FIXER's shipped `max_diff_files: 5` could not express a
+        # cross-currency defect spanning six aggregation sites: it edited five,
+        # was refused the sixth, and ended with an empty branch that REVIEWER
+        # had to discover. Applied only to an agent that already has a budget --
+        # this raises or lowers a ceiling, it never gives one to an agent the
+        # §8.2 matrix left unbounded on purpose.
+        if budget is not None:
+            for field in ("max_diff_files", "max_diff_lines"):
+                value = getattr(budget, field)
+                if value is not None and getattr(policy, field) is not None:
+                    updates[field] = value
         if not updates:
             agents[name] = spec
             continue

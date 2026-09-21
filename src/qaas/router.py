@@ -40,6 +40,7 @@ from qaas.mcp.context import ToolContext
 from qaas.runner import RunOutcome, run_agent
 from qaas.store import AgentResult, HumanDecision, RunStore, SystemMapStore
 from qaas import tasks
+from qaas.guardrails import DIFF_BUDGET_REFUSAL
 
 
 class BudgetExceeded(RuntimeError):
@@ -1220,8 +1221,31 @@ class Router:
 
         for trip in range(1, self.config.thresholds.max_mender_arbiter_round_trips + 1):
             budget.check()
+            vcs_mark = len(list(store.ledger("vcs")))
+            deny_mark = len(list(store.ledger("denial")))
             await self._dispatch(fixer, store, budget, report,
                                  tasks.fixer(ticket, envelope, feedback=feedback), map_version)
+
+            # FIXER reporting success having changed nothing is the failure mode
+            # this system keeps producing, and every time it has been caught by
+            # something downstream rather than by itself: REVIEWER reading the
+            # diff and finding the branch byte-identical to main. Three causes so
+            # far -- write paths that matched no file in the target, a diff
+            # budget narrower than the fix, and a branch created but never
+            # committed to -- and all three reached REVIEWER as "there is no fix
+            # to review", after a second frontier-model context had been paid
+            # for. `_branch_written_since` cannot catch it: `create_branch`
+            # writes a branch name into the ledger, so an empty branch looks
+            # exactly like a real one.
+            if not self._changed_anything_since(store, vcs_mark):
+                self._escalate(
+                    report, store, "FIXER",
+                    f"{ticket}: FIXER changed nothing — "
+                    f"{self._why_no_change(store, deny_mark)}",
+                    ticket_key=ticket,
+                )
+                return False
+
             if reviewer is None:
                 return True
 
@@ -1253,6 +1277,52 @@ class Router:
             f"{ticket}: {self.config.thresholds.max_mender_arbiter_round_trips} "
             "FIXER/REVIEWER round trips without approval; escalating", ticket_key=ticket)
         return False
+
+    #: vcs actions that mean FIXER actually changed something. `create_branch`
+    #: is deliberately absent: a branch with no commit on it is the shape of the
+    #: failure this exists to catch.
+    _PRODUCED_A_CHANGE = frozenset({"commit", "write_file", "push", "open_pr"})
+
+    @classmethod
+    def _changed_anything_since(cls, store, mark: int) -> bool:
+        """Whether FIXER's round left a change behind, not just a branch."""
+        return any(
+            entry.agent == "FIXER"
+            and str(entry.detail.get("action")) in cls._PRODUCED_A_CHANGE
+            for entry in list(store.ledger("vcs"))[mark:]
+        )
+
+    @staticmethod
+    def _why_no_change(store, mark: int) -> str:
+        """Why FIXER ended a round having written nothing.
+
+        Read from its own denials, because the guardrail that stopped it is the
+        only thing that knows. The diff budget is named specially: it is the one
+        refusal that means "this fix is legitimate but wider than your
+        envelope", which is a human's decision to widen or to split -- every
+        other refusal means the fix was wrong.
+        """
+        budget = first = None
+        for entry in list(store.ledger("denial"))[mark:]:
+            if entry.agent != "FIXER":
+                continue
+            reason = str(entry.detail.get("reason") or "")
+            if DIFF_BUDGET_REFUSAL in reason:
+                budget = reason
+            elif first is None:
+                first = reason
+        if budget:
+            return (
+                budget.split(".")[0]
+                + ". The fix is wider than the envelope, not wrong: a human widens "
+                "`max_diff_files` for this target or splits the ticket"
+            )
+        if first:
+            return f"the last thing refused was: {first}"
+        return (
+            "no guardrail refused a write, so the turn simply ended without one; "
+            "the task may be unclear or the defect may already be absent"
+        )
 
     @staticmethod
     def _branch_written_since(store, mark: int) -> str | None:

@@ -488,3 +488,53 @@ def test_an_overlay_for_another_target_is_not_applied(tmp_path):
     (overlay / "fixer.yaml").write_text(yaml.safe_dump(spec), encoding="utf-8")
 
     assert load_config(config, target="widget").agents["FIXER"].max_turns != 7
+
+
+# -- how wide a fix may be belongs to the codebase --------------------------
+
+
+def _with_budget(tmp_path, **budget):
+    config = _project_with_layout(tmp_path, "widget", backend=["src"])
+    path = config / "targets" / "widget.yaml"
+    body = path.read_text()
+    if budget:
+        lines = "\n".join(f"  {k}: {v}" for k, v in budget.items())
+        body += f"diff_budget:\n{lines}\n"
+    path.write_text(body)
+    return config
+
+
+def test_a_target_may_widen_the_diff_budget(tmp_path):
+    """§8.2 ships one global number and a legitimate fix's width is per-codebase.
+
+    FIXER's `max_diff_files: 5` could not express a cross-currency defect
+    spanning six aggregation sites: it edited five, was refused the sixth, and
+    ended the round with an empty branch. Neither the budget nor the fix was
+    wrong -- they belong to different scopes.
+    """
+    cfg = load_config(_with_budget(tmp_path, max_diff_files=12), target="widget")
+    assert cfg.agents["FIXER"].policy.max_diff_files == 12
+
+
+def test_a_target_with_no_budget_leaves_every_agent_alone(tmp_path):
+    """Which is every profile that exists today."""
+    cfg = load_config(_with_budget(tmp_path), target="widget")
+    packaged = load_config(CONFIG_SEARCH[-1]).agents["FIXER"].policy.max_diff_files
+    assert cfg.agents["FIXER"].policy.max_diff_files == packaged
+
+
+def test_it_never_hands_a_budget_to_an_agent_that_had_none(tmp_path):
+    """A raise or a lower, never a grant.
+
+    An agent the §8.2 matrix left unbounded was left so on purpose, and a
+    target profile must not be a quiet way to start bounding it -- or, worse,
+    to bound something that was deliberately free.
+    """
+    cfg = load_config(_with_budget(tmp_path, max_diff_files=3), target="widget")
+    unbounded = [
+        name for name, spec in cfg.agents.items()
+        if spec.policy.max_diff_files is None
+    ]
+    assert unbounded, "this test needs an agent with no budget to be about anything"
+    for name in unbounded:
+        assert cfg.agents[name].policy.max_diff_files is None
