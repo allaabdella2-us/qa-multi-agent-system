@@ -114,6 +114,14 @@ class RunWatcher:
             # for every finished run anyone opened.
             self.done = True
             return
+        # EOF is taken *here*, on the caller's thread, not inside `_tail`.
+        # Seeking in the thread leaves a window between the view being built and
+        # the thread being scheduled, and any entry appended in it is behind the
+        # seek and absent from the view -- dropped from the live stream with
+        # nothing reporting it. On a loaded CI runner that window is wide enough
+        # to lose a line reliably.
+        path = self.view.store.ledger_path
+        self._start_offset = path.stat().st_size if path.exists() else 0
         self._thread = threading.Thread(target=self._tail, daemon=True)
         self._thread.start()
         self._drain = asyncio.get_running_loop().create_task(self._pump())
@@ -124,7 +132,8 @@ class RunWatcher:
         # Replaying from the start here would double-count every counter.
         try:
             for entry in trace.tail(
-                self.view.store, from_start=False, poll=self.poll, stop_on_finish=True
+                self.view.store, from_start=False, poll=self.poll, stop_on_finish=True,
+                start_offset=self._start_offset,
             ):
                 self._inbox.put(entry)
         finally:

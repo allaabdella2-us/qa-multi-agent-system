@@ -195,3 +195,47 @@ def test_the_sse_route_opens_with_a_snapshot(tmp_path: Path) -> None:
                 break
     assert "event: snapshot" in body
     assert '"run_id": "run-sse"' in body
+
+
+# -- the attach handoff -----------------------------------------------------
+
+
+async def test_the_tail_takes_its_offset_before_the_thread_is_scheduled(tmp_path: Path) -> None:
+    """The window between building the view and seeking to EOF has to be zero.
+
+    `trace.tail(from_start=False)` seeks inside the generator, which runs on the
+    tail thread. So a ledger line appended between `start()` returning and that
+    thread being scheduled lands *behind* the seek, and the view was built
+    before it -- the entry is in neither half and is dropped from the live
+    stream with nothing reporting it.
+
+    Asserted on the offset rather than by racing a write, because racing it is
+    what made `test_a_live_run_streams_its_entries` fail on CI roughly one run
+    in ten and read as a slow runner.
+    """
+    store = build_run(tmp_path, "run-offset", finish=False)
+    dash = Dashboard(tmp_path, specs=SPECS, poll=FAST)
+    watcher = dash.watcher("run-offset")
+
+    size_at_attach = store.ledger_path.stat().st_size
+    watcher.attach()
+    assert watcher._start_offset == size_at_attach, (
+        "the seek must happen on the caller's thread, while it still knows the size"
+    )
+
+
+def test_tail_resumes_from_an_offset_it_was_handed(tmp_path: Path) -> None:
+    """The mechanism under that, on its own: bytes before the mark are not replayed."""
+    from qaas import trace
+    from qaas.store import RunStore
+
+    store = RunStore.new(root=tmp_path)
+    store.log("run_started", mode="nightly", agents=["API"])
+    store.log("agent_started", agent="API", model="claude-opus-5")
+    mark = store.ledger_path.stat().st_size
+    store.log("agent_finished", agent="API", subtype="success")
+    store.log("run_finished", run_id=store.run_id)
+
+    seen = [e.kind for e in trace.tail(store, poll=0.001, start_offset=mark, timeout_s=5)]
+    assert "agent_started" not in seen, "everything before the mark is the view's job"
+    assert "agent_finished" in seen

@@ -81,6 +81,7 @@ def tail(
     poll: float = POLL_INTERVAL_S,
     stop_on_finish: bool = True,
     timeout_s: float | None = None,
+    start_offset: int | None = None,
 ) -> Iterator[LedgerEntry]:
     """Yield ledger entries as they are appended, for `qaas trace --follow`.
 
@@ -99,7 +100,16 @@ def tail(
 
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
     offset = 0
-    if not from_start and store.ledger_path.exists():
+    if start_offset is not None:
+        # Taken by the caller, at a moment it chose. `from_start=False` seeks to
+        # EOF *here*, which is inside whatever thread this generator runs on --
+        # so an entry appended between the caller building its view and this
+        # thread being scheduled lands behind the seek and is in neither half.
+        # The dashboard hit exactly that: a ledger line written right after
+        # `watcher.start()` was dropped from the live stream, and the test that
+        # noticed read as a flaky timeout because the entry simply never came.
+        offset = start_offset
+    elif not from_start and store.ledger_path.exists():
         offset = store.ledger_path.stat().st_size
     pending = ""
     #: Runs started minus runs finished, over what this reader has actually
