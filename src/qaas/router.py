@@ -1003,6 +1003,36 @@ class Router:
         if spec is None:
             return
         pending = [e for e in store.envelopes() if e.jira.key]
+
+        # A ticket this run already proved fixed is not verified twice.
+        #
+        # Every other phase learned this and this one had not: `_phase_map`
+        # skips a published map, `_succeeded_agents` skips agents that finished
+        # cleanly, `_phase_file` skips envelopes already carrying a key, and
+        # `_phase_reproduce` re-selects only `unattempted`. `_phase_verify`
+        # took every ticketed envelope, so resuming a run that had closed one
+        # re-ran VERIFIER against a ticket sitting in Done.
+        #
+        # Only VERIFIED counts as settled. A NOT_FIXED ticket, or one the run
+        # never reached, is unfinished work and must be attempted again --
+        # which is the case a resume exists for: the full-loop run that found
+        # this stopped on its wall clock with one ticket closed, one NOT_FIXED
+        # and five never touched.
+        settled = {
+            e.detail.get("ticket_key")
+            for e in store.ledger("verdict")
+            if str(e.detail.get("verdict") or "").upper() == "VERIFIED"
+        }
+        if settled:
+            done = [e for e in pending if e.jira.key in settled]
+            pending = [e for e in pending if e.jira.key not in settled]
+            if done:
+                store.log(
+                    "skipped", agent="VERIFIER",
+                    reason=f"{len(done)} ticket(s) already verified in this run",
+                    tickets=sorted(e.jira.key for e in done),
+                )
+
         if self.tickets:
             pending = [e for e in pending if e.jira.key in self.tickets]
             unknown = self.tickets - {e.jira.key for e in store.envelopes() if e.jira.key}

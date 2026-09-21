@@ -683,6 +683,53 @@ async def test_a_finding_below_the_floor_still_gets_its_fix_cycle(cfg, tmp_path,
     assert "VERIFIER" in names, "but it is still a ticket, and still gets verified"
 
 
+async def test_a_ticket_already_verified_is_not_verified_again(cfg, tmp_path, fake_agents):
+    """Resuming must not re-open a ticket this run already closed.
+
+    Every other phase learned this and this one had not: map skips a published
+    map, file skips envelopes already carrying a key, reproduce re-selects only
+    `unattempted`. `_phase_verify` took every ticketed envelope, so resuming the
+    full-loop run that stopped on its wall clock -- one ticket closed, one
+    NOT_FIXED, five never touched -- would have re-verified the closed one.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 1, "severity": Severity.BLOCKER}
+    behaviour["TRIAGE"] = {"hook": _files_tickets}
+
+    first = await make_conductor(cfg, tmp_path).run("full-loop")
+    store = RunStore(first.run_id, root=tmp_path, create=False)
+    ticket = next(e.jira.key for e in store.envelopes() if e.jira.key)
+    store.log("verdict", agent="VERIFIER", ticket_key=ticket,
+              verdict="VERIFIED", observed="scripted")
+
+    calls.clear()
+    await make_conductor(cfg, tmp_path).run("full-loop", run_id=first.run_id)
+    assert "VERIFIER" not in {n for n, _ in calls}
+
+
+async def test_a_ticket_left_unfinished_is_attempted_again(cfg, tmp_path, fake_agents):
+    """NOT_FIXED is unfinished work, not a settled answer.
+
+    Only VERIFIED is terminal. A run cut off mid-remediation is exactly what a
+    resume is for, so anything short of proven-fixed has to come back round.
+    """
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 1, "severity": Severity.BLOCKER}
+    behaviour["TRIAGE"] = {"hook": _files_tickets}
+
+    first = await make_conductor(cfg, tmp_path).run("full-loop")
+    store = RunStore(first.run_id, root=tmp_path, create=False)
+    ticket = next(e.jira.key for e in store.envelopes() if e.jira.key)
+    store.log("verdict", agent="VERIFIER", ticket_key=ticket,
+              verdict="NOT_FIXED", observed="scripted")
+
+    calls.clear()
+    await make_conductor(cfg, tmp_path).run("full-loop", run_id=first.run_id)
+    assert "VERIFIER" in {n for n, _ in calls}
+
+
 async def test_every_shipped_agent_is_actually_dispatchable(cfg, tmp_path, fake_agents):
     """No agent may validate, assemble, and then silently do nothing.
 
