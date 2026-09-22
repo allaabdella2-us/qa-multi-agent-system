@@ -34,7 +34,7 @@ import fnmatch
 import re
 import shlex
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from claude_agent_sdk import (
@@ -190,6 +190,17 @@ class Decision:
 #: "stop, and escalate with what you have found" has no channel to escalate on.
 #: So the router reads this back and escalates on the agent's behalf.
 DIFF_BUDGET_REFUSAL = "(§8.2)"
+
+
+def _under(relative: str, prefix: str) -> bool:
+    """Is this target-relative path inside `prefix`?
+
+    Compared as path segments, not as a string: `qa/reproduction.ts` starts
+    with `qa/repro` and is not inside it.
+    """
+    rel = PurePosixPath(relative.replace("\\", "/")).parts
+    pre = PurePosixPath(prefix.strip("/").replace("\\", "/")).parts
+    return len(rel) > len(pre) and rel[: len(pre)] == pre
 
 
 class Guardrail:
@@ -463,6 +474,14 @@ class Guardrail:
         """
         max_files = self.policy.max_diff_files
         if max_files is None:
+            return Decision(True)
+
+        # A scratch harness is not the fix, and charging it to the fix's budget
+        # is why remediation stalled: FIXER writes a probe project to
+        # investigate -- package.json, vitest.config.ts, .gitignore, README.md,
+        # probe.test.ts -- which is exactly five files against a limit of five,
+        # so the budget was gone before a product file was opened.
+        if any(_under(relative, prefix) for prefix in self.policy.scratch_paths):
             return Decision(True)
 
         touched = self.ctx.touched_files

@@ -391,6 +391,18 @@ there — and it had never learned about `forbidden_paths`. `Guardrail._check_pa
 is now the single implementation and all three doors call it. When adding a
 path-taking surface, call it; do not restate it.
 
+`policy.scratch_paths` is exempt from that budget, and without it remediation
+does not work at all. §8.2 bounds how much *production code* one agent may
+change on its own authority; a probe harness is neither production nor part of
+the fix. FIXER writes one to investigate a defect — `package.json`,
+`vitest.config.ts`, `.gitignore`, `README.md`, `probe.test.ts` — which is
+exactly five files against the shipped limit of five, so the budget was gone
+before a product file was opened. Across one full-loop run **115 of the 115
+files that consumed FIXER's budget were under `qa/repro` and none were product
+code**, and all seven tickets escalated with "there is no fix to review". The
+exemption is compared as path segments, not as a string prefix: `qa/reproduction.ts`
+starts with `qa/repro` and is not inside it.
+
 `_check_path` takes `count_against_budget`. `_check_diff_budget` *mutates*
 `touched_files`, and `mcp/vcs.py:commit` validates every staging pathspec through
 the same function — so committing `api/app` and `web/src`, which are FIXER's own

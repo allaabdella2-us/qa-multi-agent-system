@@ -44,6 +44,23 @@ class Policy(BaseModel):
     max_diff_lines: int | None = None
     protected_paths: list[str] = Field(default_factory=list)
 
+    #: Paths an agent may write without spending its §8.2 diff budget.
+    #:
+    #: The budget bounds how much *production code* one agent may change on its
+    #: own authority. A scratch harness is not production code and is not part
+    #: of the fix, and counting it meant FIXER never reached the fix at all: it
+    #: writes a probe project to investigate a defect -- package.json,
+    #: vitest.config.ts, .gitignore, README.md, probe.test.ts -- which is
+    #: exactly five files against a limit of five. Across one full-loop run,
+    #: 115 of the 115 files that consumed FIXER's budget were under `qa/repro`
+    #: and none were product code, and all seven tickets escalated with "there
+    #: is no fix to review".
+    #:
+    #: Safe because nothing in the application imports this directory, and
+    #: REVIEWER diffs the product paths specifically -- it caught a
+    #: scaffolding-only branch unaided.
+    scratch_paths: list[str] = Field(default_factory=list)
+
     #: Path globs this agent may never modify, whatever else its policy allows.
     #: §8.2 names the classes: migrations, auth, payment paths and infra config.
     #: These are the changes whose blast radius a review cannot reliably bound,

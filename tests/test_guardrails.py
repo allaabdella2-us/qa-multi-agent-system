@@ -597,6 +597,47 @@ def test_the_shell_counts_against_the_same_diff_budget(tmp_path):
     assert "limit of 2" in third.reason
 
 
+def test_a_probe_harness_does_not_spend_the_budget_meant_for_the_fix(tmp_path):
+    """The §8.2 budget bounds production change; a scratch harness is neither.
+
+    FIXER writes a probe project to investigate a defect -- package.json,
+    vitest.config.ts, .gitignore, README.md, probe.test.ts -- which is exactly
+    five files against the shipped limit of five. Across one full-loop run,
+    **115 of the 115 files that consumed FIXER's budget were under `qa/repro`
+    and none were product code**, so it never opened a product file and all
+    seven tickets escalated with "there is no fix to review".
+    """
+    guard = _guard("FIXER", tmp_path, max_diff_files=2, scratch_paths=["qa/repro"],
+                   write_paths=["api/app", "qa/repro"])
+    for name in ("package.json", "vitest.config.ts", ".gitignore", "README.md", "probe.test.ts"):
+        assert guard.check("Write", {"file_path": f"qa/repro/probe/{name}"}).allowed, name
+
+    # The budget is untouched, so the fix itself still fits.
+    assert guard.check("Write", {"file_path": "api/app/one.py"}).allowed
+    assert guard.check("Write", {"file_path": "api/app/two.py"}).allowed
+    third = guard.check("Write", {"file_path": "api/app/three.py"})
+    assert not third.allowed, "product code must still be bounded"
+    assert "limit of 2" in third.reason
+
+
+def test_the_exemption_is_a_path_prefix_not_a_string_prefix(tmp_path):
+    """`qa/reproduction.ts` starts with `qa/repro` and is not inside it."""
+    guard = _guard("FIXER", tmp_path, max_diff_files=1, scratch_paths=["qa/repro"],
+                   write_paths=["qa"])
+    assert guard.check("Write", {"file_path": "qa/repro/probe/a.ts"}).allowed
+    assert guard.check("Write", {"file_path": "qa/reproduction.ts"}).allowed   # spends it
+    spent = guard.check("Write", {"file_path": "qa/another.ts"})
+    assert not spent.allowed, "a sibling file must not ride the exemption"
+
+
+def test_an_agent_with_no_scratch_paths_is_unchanged(tmp_path):
+    """Which is every agent but FIXER, and every policy written before this."""
+    guard = _guard("FIXER", tmp_path, max_diff_files=1, scratch_paths=[],
+                   write_paths=["qa/repro"])
+    assert guard.check("Write", {"file_path": "qa/repro/probe/a.ts"}).allowed
+    assert not guard.check("Write", {"file_path": "qa/repro/probe/b.ts"}).allowed
+
+
 @pytest.mark.parametrize("command", ["rm -R build", "rm --recursive build", "rm --force x"])
 def test_the_long_forms_of_a_recursive_delete_are_refused_too(tmp_path, command):
     """`-[a-zA-Z]*[rf]` matched `-rf` and missed every spelled-out equivalent."""

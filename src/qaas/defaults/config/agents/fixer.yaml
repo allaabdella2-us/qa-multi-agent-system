@@ -28,6 +28,15 @@ policy:
   # `$backend`/`$frontend` come from the target profile's `layout`, which every
   # other consumer already trusts to say where the code is.
   write_paths: [$backend, $frontend, qa/repro]
+
+  # `qa/repro` is where FIXER builds a probe harness to investigate a defect,
+  # and a harness is not the fix. Charging it to the §8.2 budget meant FIXER
+  # never reached the fix: a probe project is package.json, vitest.config.ts,
+  # .gitignore, README.md and probe.test.ts -- exactly five files against a
+  # limit of five. On one full-loop run every file that consumed the budget was
+  # scaffolding, no product file was ever opened, and all seven tickets
+  # escalated with "there is no fix to review".
+  scratch_paths: [qa/repro]
   branch_patterns: ["fix/*"]
   may_open_pr: true
   may_transition_tickets: true
