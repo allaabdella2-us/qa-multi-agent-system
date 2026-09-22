@@ -284,7 +284,25 @@ def build_tools(ctx: ToolContext) -> list:
         if refusal:
             return _deny(ctx, "commit", f"refusing to commit on '{branch}': {refusal}")
 
-        requested = args.get("paths") or ctx.agent.policy.write_paths
+        # A commit with no explicit paths stages the agent's *product* write
+        # paths, never its scratch area.
+        #
+        # It used to default to the whole of `write_paths`, and FIXER's includes
+        # `qa/repro` -- so every commit swept in whatever scaffolding happened
+        # to be sitting there. The target tree is shared across findings ("two
+        # invocations are separate contexts but not separate sandboxes"), so
+        # that was usually *another* finding's probe harness. QAAS-53 was
+        # committed with five files in it, all five of them scaffolding for
+        # finding 4d955330, and REVIEWER escalated it as "there is no fix here
+        # to review" -- correctly, because there was not.
+        #
+        # An agent that genuinely wants to commit scratch still can, by naming
+        # the path; this only changes what "commit everything I may write"
+        # means. REPRODUCER declares no `scratch_paths`, so its own sandbox is
+        # product to it and its commits are unaffected.
+        scratch = ctx.agent.policy.scratch_paths
+        default = [p for p in ctx.agent.policy.write_paths if p not in scratch]
+        requested = args.get("paths") or default or ctx.agent.policy.write_paths
         staged: list[str] = []
         for raw in requested:
             # Read-only: staging a path is not changing it. The §8.2 diff budget

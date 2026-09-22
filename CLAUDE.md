@@ -403,6 +403,16 @@ code**, and all seven tickets escalated with "there is no fix to review". The
 exemption is compared as path segments, not as a string prefix: `qa/reproduction.ts`
 starts with `qa/repro` and is not inside it.
 
+`scratch_paths` also narrows what `mcp/vcs.py:commit` means by "everything I
+may write". It defaulted to the whole of `write_paths`, so every FIXER commit
+staged `qa/repro` and swept in whatever scaffolding was sitting there — and the
+target tree is shared across findings, so that was usually *another* finding's
+probe harness. QAAS-53 was committed with five files in it, all five
+scaffolding for a different finding, and REVIEWER escalated it as "there is no
+fix here to review", correctly. An agent that wants to commit scratch still
+names the path; REPRODUCER declares no `scratch_paths`, so its sandbox is
+product to it and its commits are unchanged.
+
 `_check_path` takes `count_against_budget`. `_check_diff_budget` *mutates*
 `touched_files`, and `mcp/vcs.py:commit` validates every staging pathspec through
 the same function — so committing `api/app` and `web/src`, which are FIXER's own

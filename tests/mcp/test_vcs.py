@@ -342,3 +342,78 @@ async def test_a_glob_write_path_still_resolves_through_the_shared_check(repo, t
     guard = Guardrail(ctx)
     assert guard.check("Write", {"file_path": "qa/repro/generated/test_x.py"}).allowed
     assert not guard.check("Write", {"file_path": "qa/repro/other/test_x.py"}).allowed
+
+
+# -- a commit carries this agent's fix, not the sandbox it was standing in ---
+
+
+def _fixer(repo: Path, tmp_path: Path) -> ToolContext:
+    """FIXER, pointed at this scratch repo's own layout."""
+    ctx = make_ctx("FIXER", repo, tmp_path)
+    ctx.agent.policy.write_paths = ["src", "qa/repro"]
+    ctx.agent.policy.scratch_paths = ["qa/repro"]
+    ctx.agent.policy.branch_patterns = ["fix/*"]
+    return ctx
+
+
+def test_a_commit_leaves_another_findings_scaffolding_behind(repo: Path, tmp_path: Path):
+    """`commit` defaulted to the whole of `write_paths`, and FIXER's holds
+    `qa/repro` -- so it swept in whatever scaffolding was sitting there.
+
+    The target tree is shared across findings ("separate contexts but not
+    separate sandboxes"), so that was usually *another* finding's probe
+    harness. QAAS-53 was committed with five files in it, all five scaffolding
+    for finding 4d955330, and REVIEWER escalated it as "there is no fix here to
+    review" -- correctly, because there was not.
+    """
+    ctx = _fixer(repo, tmp_path)
+    tools = tools_for(ctx)
+
+    # Someone else's probe harness, left in the shared sandbox.
+    (repo / "qa" / "repro" / "4d955330").mkdir(parents=True)
+    (repo / "qa" / "repro" / "4d955330" / "probe.test.ts").write_text("// not mine\n")
+
+    # FIXER's actual fix.
+    (repo / "src" / "app.py").write_text("VALUE = 2\n")
+
+    import asyncio
+    asyncio.run(tools["create_branch"]({"name": "fix/real-work"}))
+    result = asyncio.run(tools["commit"]({"message": "Fix the value"}))
+    assert not result.get("is_error"), result["content"][0]["text"]
+
+    files = git(repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert "src/app.py" in files, files
+    assert not any(f.startswith("qa/repro") for f in files), (
+        f"another finding's scaffolding rode along: {files}"
+    )
+
+
+def test_naming_the_sandbox_explicitly_still_commits_it(repo: Path, tmp_path: Path):
+    """This narrows what "commit everything I may write" means, nothing else."""
+    ctx = _fixer(repo, tmp_path)
+    tools = tools_for(ctx)
+    (repo / "qa" / "repro" / "mine.test.ts").write_text("// deliberate\n")
+
+    import asyncio
+    asyncio.run(tools["create_branch"]({"name": "fix/deliberate"}))
+    result = asyncio.run(tools["commit"]({"message": "Keep the probe", "paths": ["qa/repro"]}))
+    assert not result.get("is_error"), result["content"][0]["text"]
+    assert "qa/repro/mine.test.ts" in git(repo, "show", "--name-only", "--format=", "HEAD")
+
+
+def test_an_agent_whose_sandbox_is_its_work_is_unaffected(repo: Path, tmp_path: Path):
+    """REPRODUCER declares no `scratch_paths`, so `qa/repro` is product to it.
+
+    Its committed failing test is the deliverable, and narrowing this for
+    everyone would have stopped it committing anything at all.
+    """
+    ctx = make_ctx("REPRODUCER", repo, tmp_path)
+    tools = tools_for(ctx)
+    assert ctx.agent.policy.scratch_paths == []
+    (repo / "qa" / "repro" / "failing.test.ts").write_text("// the deliverable\n")
+
+    import asyncio
+    asyncio.run(tools["create_branch"]({"name": "qa/repro/abc-thing"}))
+    result = asyncio.run(tools["commit"]({"message": "Pin the defect"}))
+    assert not result.get("is_error"), result["content"][0]["text"]
+    assert "qa/repro/failing.test.ts" in git(repo, "show", "--name-only", "--format=", "HEAD")
