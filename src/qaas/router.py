@@ -1256,7 +1256,7 @@ class Router:
             # raised the question re-raises it having never been told the
             # answer, and the human answers the same escalation every run.
             await self._dispatch(reviewer, store, budget, report,
-                                 tasks.reviewer(ticket, envelope, guidance=guidance), map_version)
+                                 tasks.reviewer(ticket, envelope, self.config, guidance=guidance), map_version)
             entry = self._entry_since(store, "review", ticket, review_mark)
             review = entry.detail.get("decision") if entry else None
             if review == "APPROVE":

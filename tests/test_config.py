@@ -538,3 +538,51 @@ def test_it_never_hands_a_budget_to_an_agent_that_had_none(tmp_path):
     assert unbounded, "this test needs an agent with no budget to be about anything"
     for name in unbounded:
         assert cfg.agents[name].policy.max_diff_files is None
+
+
+# -- a prompt must not state a number the config owns -----------------------
+
+
+def test_the_task_states_the_budget_this_target_actually_enforces(cfg):
+    from qaas import tasks
+
+    """`minimal-diff-discipline` said "its limit of 5" and `adversarial-review`
+    said "the budget (5 / 150)", as literals.
+
+    A target that raises the budget changed neither, so both agents were told a
+    number the guardrail was not enforcing. REVIEWER escalated QAAS-45 rather
+    than requesting the two extra files the fix needed -- "max_diff_files is 5
+    and the diff is already at exactly 5" -- when FIXER in fact had twelve. The
+    fix was sound and went unapproved because the prompt disagreed with the
+    enforcement.
+    """
+    raised = cfg.model_copy(deep=True)
+    raised.agents["FIXER"].policy.max_diff_files = 12
+    raised.agents["FIXER"].policy.max_diff_lines = 400
+
+    for text in (tasks.fixer("X-1", None, raised), tasks.reviewer("X-1", None, raised)):
+        assert "12 files and 400 lines" in text, text[-300:]
+
+    packaged = cfg.agents["FIXER"].policy.max_diff_files
+    assert f"{packaged} files" in tasks.fixer("X-1", None, cfg)
+
+
+def test_no_skill_hardcodes_the_diff_budget():
+    """Enforcement lives in Python; a skill that restates it will go stale."""
+    skills = REPO / "src" / "qaas" / "plugin" / "skills"
+    offenders = [
+        path.parent.name
+        for path in skills.rglob("SKILL.md")
+        if re.search(r"limit of \d+|budget \(\d+\s*/\s*\d+\)", path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, f"these state a budget the config owns: {offenders}"
+
+
+def test_an_agent_with_no_budget_gets_no_budget_line(cfg):
+    from qaas import tasks
+
+    """Most agents have none, and inventing one would be a rule they must obey."""
+    none = cfg.model_copy(deep=True)
+    none.agents["FIXER"].policy.max_diff_files = None
+    none.agents["FIXER"].policy.max_diff_lines = None
+    assert "diff budget" not in tasks.fixer("X-1", None, none)

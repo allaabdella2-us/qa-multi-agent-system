@@ -451,6 +451,36 @@ the ticket accordingly. Say what you actually observed, including anything you
 skipped or could not run."""
 
 
+def _diff_budget(config: SystemConfig | None, agent: str) -> str:
+    """One line stating the real diff budget, or nothing if there is none.
+
+    The number belongs to the config and used to be written into the skills as
+    a literal -- `minimal-diff-discipline` said "its limit of 5" and
+    `adversarial-review` said "the budget (5 / 150)". A target that raises the
+    budget did not change either, so both agents were told a number the
+    guardrail was not enforcing. REVIEWER escalated QAAS-45 rather than
+    requesting the two extra files the fix needed, reasoning that "max_diff_files
+    is 5 and the diff is already at exactly 5" -- when FIXER in fact had twelve.
+    A prompt that states an enforcement value is a prompt that will be wrong.
+    """
+    if config is None or agent not in config.agents:
+        return ""
+    policy = config.agents[agent].policy
+    if policy.max_diff_files is None and policy.max_diff_lines is None:
+        return ""
+    files = policy.max_diff_files if policy.max_diff_files is not None else "unbounded"
+    lines = policy.max_diff_lines if policy.max_diff_lines is not None else "unbounded"
+    scratch = (
+        f" Files under {', '.join(policy.scratch_paths)} do not count against it."
+        if policy.scratch_paths else ""
+    )
+    return (
+        f"\nFIXER's diff budget on this target is {files} files and {lines} lines."
+        f"{scratch} That is the number the guardrail enforces; ignore any other "
+        "figure you have seen.\n"
+    )
+
+
 def fixer(
     ticket_key: str,
     envelope: DefectEnvelope | None,
@@ -494,7 +524,7 @@ and the objection is wrong, say so and escalate rather than submitting it again.
 {steps or "    (none recorded)"}
 """
     return f"""Fix ticket {ticket_key} in {where}.
-{prior}{detail}
+{prior}{detail}{_diff_budget(config, "FIXER")}
 Read the affected code with the system map for context, then write the smallest
 change that makes the failing test pass. Add a regression test. Run the affected
 suite locally before you open anything.
@@ -512,7 +542,11 @@ Never merge — merge is a human decision."""
 
 
 def reviewer(
-    ticket_key: str, envelope: DefectEnvelope | None = None, *, guidance: str = ""
+    ticket_key: str,
+    envelope: DefectEnvelope | None = None,
+    config: SystemConfig | None = None,
+    *,
+    guidance: str = "",
 ) -> str:
     """The adversarial review task. REVIEWER is Phase 3.
 
@@ -531,7 +565,7 @@ def reviewer(
             f"The test that defines success: {envelope.reproduction.failing_test or '(none recorded)'}\n"
         )
     answered = f"\n{guidance.strip()}" if guidance.strip() else ""
-    return f"""Review the fix for {ticket_key} as an adversarial reviewer.{context}{answered}
+    return f"""Review the fix for {ticket_key} as an adversarial reviewer.{context}{answered}{_diff_budget(config, "FIXER")}
 
 Does the change address the root cause or only the symptom? Is the diff minimal?
 Does it break a contract, a schema, or a public API? Does it introduce a security

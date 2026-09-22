@@ -51,7 +51,7 @@ Do these in sequence. Each step's value depends on not having already formed a v
 
 **8. Rollback note.** `rollback-plan-authoring` lists what it must contain. A note with no signal to watch, or no irreversibility section, is `REQUEST_CHANGES` on its own — it is cheap to ask for and expensive to be without.
 
-**9. Scope.** Count files and lines against the budget (5 / 150). Then ask of each hunk not required by the fix: does it add risk? Unnecessary-and-risky is `REQUEST_CHANGES`. Unnecessary-and-inert is worth one line in `concerns`, not a round trip.
+**9. Scope.** Count files and lines against the budget, which the task states for this target — do not assume a figure. A target may raise it, and REVIEWER once declined to request two more files believing the budget was five when it was twelve. Then ask of each hunk not required by the fix: does it add risk? Unnecessary-and-risky is `REQUEST_CHANGES`. Unnecessary-and-inert is worth one line in `concerns`, not a round trip.
 
 ## "The tests pass" is the floor
 
