@@ -69,7 +69,13 @@ run_modes:
   fix-cycle:
     trigger: agent_ready_ticket
     agents: [VERIFIER, FIXER, REVIEWER]
-    max_wall_clock_s: 3600
+    # One ticket costs roughly twenty minutes: VERIFIER, then FIXER, then
+    # REVIEWER, then VERIFIER again, serially. An hour is therefore three
+    # tickets, and `--from-board` routinely hands this mode ten. Two
+    # consecutive runs ended `wall-clock cap reached: 3605s of 3600s` with
+    # tickets the operator had selected never touched, which reads as "the
+    # system could not fix them" and meant "it never looked".
+    max_wall_clock_s: 14400
     max_concurrency: 1
 
   # Everything, end to end: discover, triage, file, fix, review, verify. The most
@@ -77,5 +83,10 @@ run_modes:
   full-loop:
     trigger: on_demand
     agents: [MAPPER, ARCHITECT, API, BROWSER, DBA, AUDITOR, SOCKET, GUIDE, LOAD, SYNTHESIZER, REPRODUCER, TRIAGE, FIXER, REVIEWER, VERIFIER, REPORTER]
-    max_wall_clock_s: 10800
+    # Three hours was never survivable for this roster. Discovery alone took
+    # 2h45m on `run-20260919T152757-4c8c37` -- eight agents, before a single
+    # ticket was filed -- and this mode then has to reproduce, file, fix,
+    # review and verify every one of them. The run that proved it stopped on
+    # this clock with one ticket closed, one NOT_FIXED and five never reached.
+    max_wall_clock_s: 28800
     max_concurrency: 3

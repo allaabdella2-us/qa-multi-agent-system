@@ -29,6 +29,26 @@ files the next batch. The dashboard's description of this threshold said the
 cap "takes the most severe findings first, so what it drops is the tail" —
 both halves were wrong, and it now says what actually happens.
 
+### A fix cycle gets a clock it can finish in
+
+**Behaviour change.** One ticket costs roughly twenty minutes — VERIFIER, then
+FIXER, then REVIEWER, then VERIFIER again, serially, because they share one
+working tree. `fix-cycle` allowed 3600s, which is three tickets, and
+`--from-board` routinely hands it ten. Two consecutive runs ended
+`wall-clock cap reached: 3605s of 3600s` with tickets the operator had selected
+never touched — which reads as "the system could not fix them" and meant "it
+never looked at them". It is now 14400s.
+
+`full-loop` moves from 10800s to 28800s for the same reason and with more
+evidence: discovery alone took 2h45m on `run-20260919T152757-4c8c37`, eight
+agents, before a single ticket was filed — and that mode then has to reproduce,
+file, fix, review and verify every one of them. Three hours was never
+survivable. The run that proved it stopped on this clock with one ticket
+closed, one NOT_FIXED and five never reached.
+
+Neither number is a discovery about how long the work takes; both are the
+measured cost of the work these modes were already being asked to do.
+
 ### A run survives the provider running out of quota
 
 `run-20260919T152757-4c8c37`: 8 agents, 2h45m, $56.58, 34 findings, discovery
