@@ -22,7 +22,14 @@ thresholds:
   # filed on the evidence discovery already produced instead of earning one.
   # Lower it to `trivial` to reproduce everything, as releases before 0.0.2 did.
   reproduce_min_severity: major
-  max_tickets_per_run: 10          # §4.12 rate limit
+  # §8.3 loop breaker, not a throttle. A runaway TRIAGE filing thousands of
+  # tickets is a real hazard; ten was not that bound, it was lower than the
+  # number of real defects an ordinary repository holds. A run that found
+  # eighty filed ten and left seventy on disk, already paid for. The *enforced*
+  # limit is min(this, TRIAGE's policy cap) -- raise one alone and nothing
+  # changes. Findings over the cap are not dropped: they keep their envelopes
+  # and a resume files them.
+  max_tickets_per_run: 100
   flake_runs: 5                    # REPRODUCER runs a repro N times to measure flake
   max_mender_arbiter_round_trips: 2
   max_proof_reopens: 1

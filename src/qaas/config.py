@@ -177,7 +177,12 @@ class Thresholds(BaseModel):
     #: of each earning a fresh REPRODUCER context. See `_phase_reproduce` for
     #: the run that made this necessary.
     reproduce_min_severity: Severity = Severity.MAJOR
-    max_tickets_per_run: int = 10
+    #: A §8.3 loop breaker, not a throttle. It was 10, which is lower than the
+    #: number of real defects an ordinary repository holds -- so a run that
+    #: found eighty filed ten and left seventy on disk, having already paid to
+    #: find them. The enforced limit is `min(this, TRIAGE's policy cap)`, so
+    #: both have to move; raising only one silently changes nothing.
+    max_tickets_per_run: int = 100
     flake_runs: int = 5
     max_mender_arbiter_round_trips: int = 2
     max_proof_reopens: int = 1

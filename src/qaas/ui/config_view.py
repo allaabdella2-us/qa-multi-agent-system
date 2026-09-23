@@ -369,8 +369,11 @@ class ConfigView:
                 "a finding is still filed on discovery's evidence; it just does "
                 "not get a committed failing test.",
             "max_tickets_per_run":
-                "§4.12 rate limit. The cap takes the most severe findings "
-                "first, so what it drops is the tail.",
+                "§8.3 loop breaker, not a throttle: it exists to stop a "
+                "runaway TRIAGE, not to ration output. The enforced limit is "
+                "the lower of this and TRIAGE's own policy cap, so raising "
+                "only one changes nothing. Findings over the cap are not "
+                "dropped — they keep their envelopes and a resume files them.",
             "flake_runs":
                 "How many times REPRODUCER runs a reproduction to measure "
                 "flake. A test that passes sometimes has not reproduced "

@@ -2,6 +2,33 @@
 
 ## 0.0.2
 
+### The ticket cap stops throttling findings you already paid for
+
+**Behaviour change.** `max_tickets_per_run` was 10, in both
+`thresholds` and TRIAGE's own policy. That is lower than the number of real
+defects an ordinary repository holds, so a run that found eighty filed ten —
+and the other seventy sat on disk as envelopes nobody was looking at. The cap
+was doing the work of a precision gate, badly: it throttles *output*, and
+nothing about it makes the findings it withholds any more likely to be right.
+
+Both numbers are now 100, which is the number a §8.3 loop breaker should be. A
+TRIAGE stuck in a loop filing thousands of tickets is a real hazard and the
+ledger is the wrong place to discover it; eighty legitimate defects is not that,
+and the two cases needed telling apart.
+
+The pair is the part worth knowing about. `mcp/tracker.py` enforces
+`min(policy.max_tickets_per_run, thresholds.max_tickets_per_run)`, so a project
+that raised the threshold in its own `system.yaml` and left TRIAGE's shipped
+policy alone still filed ten, with nothing anywhere saying why. Raising one
+alone silently changes nothing — which is the same shape as the bug that put
+that `min()` there, seen from the other side.
+
+Findings over the cap were never discarded: they keep their envelopes,
+`_phase_file` skips envelopes that already carry a ticket key, and a resume
+files the next batch. The dashboard's description of this threshold said the
+cap "takes the most severe findings first, so what it drops is the tail" —
+both halves were wrong, and it now says what actually happens.
+
 ### A run survives the provider running out of quota
 
 `run-20260919T152757-4c8c37`: 8 agents, 2h45m, $56.58, 34 findings, discovery

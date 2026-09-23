@@ -12,7 +12,11 @@ mcp_servers: [envelope, tracker, defect_memory]
 builtin_tools: [Read]
 policy:
   may_create_tickets: true
-  max_tickets_per_run: 10           # §4.12: over cap, pause and escalate
+  # The binding half of the pair. `mcp/tracker.py` enforces
+  # min(this, thresholds.max_tickets_per_run), so while this said 10 a project
+  # that raised the threshold to 25 in its own system.yaml still filed ten and
+  # had nothing anywhere saying why.
+  max_tickets_per_run: 100          # §8.3: over cap, pause and escalate
 
 skills: [severity-rubric, dedupe-strategy, ticket-writer, routing-rules, ownership-resolution]
 
