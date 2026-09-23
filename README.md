@@ -30,9 +30,16 @@ bookkeeping — they are separate operating-system processes with separate
 permissions.
 
 ```
-map    -> discover     -> synthesise  -> reproduce  -> file   -> verify   -> report
-MAPPER    API/BROWSER/…  SYNTHESIZER     REPRODUCER    TRIAGE    VERIFIER    REPORTER
+map    -> discover     -> synthesise  -> file   -> verify ------------------> report
+MAPPER    API/BROWSER/…  SYNTHESIZER     TRIAGE    REPRODUCER -> VERIFIER      REPORTER
+                                                   (per ticket, in the loop)
 ```
+
+Reproduction is scheduled by whoever will consume the test. Where the roster has
+a fix loop, REPRODUCER runs inside it, one ticket at a time, so a ticket that
+never reaches remediation never buys a context. Where it does not — `pr-check`,
+`nightly` — the committed failing test is the deliverable, and it runs as its own
+phase between synthesise and file.
 
 <p align="center">
   <img src="docs/roster.png" alt="The sixteen agents by phase" width="880">
@@ -130,8 +137,8 @@ merges. Merge is a human decision and there is no code path to it.
 | `pr-check` | 8 | 15 min | yes |
 | `nightly` | 13 | 2 h | yes |
 | `incident` | 1 | 10 min | no — diagnostic only |
-| `fix-cycle` | 3 | 1 h | yes |
-| `full-loop` | 16 | 3 h | yes |
+| `fix-cycle` | 3 | 4 h | yes |
+| `full-loop` | 16 | 8 h | yes |
 
 `qaas run --mode nightly --only API` restricts a run to named agents.
 `qaas run --mode fix-cycle --from-board "Ready for Fix"` takes its work from the
@@ -160,6 +167,25 @@ Python, before the tool runs — not requested in a prompt.
 
 Every refusal is logged with its reason. An agent that is refused adapts; the
 turn does not die.
+
+**Escalation is a designed ending, not a failure.** Some tickets are a product
+question, and no amount of model is going to answer one: *this fix is correct and
+applying it exposes a regression filed as another ticket — ship now or hold?*
+When that happens the run says so and stops working that ticket.
+
+```bash
+qaas escalations                  # what is blocked on a human, across every run
+qaas answer QAAS-31 --decision hold    --note "the fix is outside FIXER's paths"
+qaas answer QAAS-45 --decision proceed --note "USD only, and label it"
+```
+
+The answer **records; it never dispatches.** It appends one line to the run's
+ledger from a process with no agent in it, and the router still schedules
+everything out of that ledger under the same budget and loop breakers. A `hold`
+is read *before* VERIFIER, so a parked ticket costs nothing to skip; a `proceed`
+note reaches FIXER and REVIEWER verbatim on the next cycle, which is the part
+that was missing — REVIEWER had nowhere to receive an answer, so it re-raised the
+same question every run.
 
 ## Does it actually find things?
 
@@ -215,6 +241,26 @@ Credentials are never written into a profile; it names environment variables.
 `qaas doctor` tells you which agents a given profile can usefully run, and
 `qaas init` will guess most of this from your repository and tell you what it
 guessed.
+
+**One knob is worth setting deliberately on a real codebase.** FIXER ships with a
+five-file, 150-line autonomy envelope — how much production code it may change
+before a human sees it. How wide a *legitimate* fix is depends on the code: in a
+repository whose defects are duplication defects, a correct fix touches every
+duplicate, and five files cannot express one. The profile overrides it:
+
+```yaml
+diff_budget: {max_diff_files: 12, max_diff_lines: 400}
+```
+
+A raise or a lower, never a grant — an agent the permission matrix left unbounded
+stays unbounded. When a fix genuinely exceeds the budget the run escalates saying
+so, naming it as *wider than the envelope rather than wrong*, so you widen it or
+split the ticket instead of hunting a bad fix that was never written.
+
+The budget also does not count `scratch_paths` — `qa/repro`, where FIXER builds a
+probe harness to investigate a defect. A harness is neither production code nor
+part of the fix, and charging it to the same budget meant FIXER spent the whole
+envelope on scaffolding before opening a single product file.
 
 ## Filing into Jira
 
@@ -277,6 +323,7 @@ person edits.
 |---|---|
 | [MANUAL.md](MANUAL.md) | every command and flag |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | how the code is put together |
+| [UNDERSTANDING_QAAS.md](UNDERSTANDING_QAAS.md) | the whole system in one file, with flowcharts |
 | [CLAUDE.md](CLAUDE.md) | the design decisions and the bugs behind them |
 | [docs/dashboard.md](docs/dashboard.md) | the live run view |
 | [docs/jira-setup.md](docs/jira-setup.md) | Jira credentials and the per-repo board |
@@ -319,7 +366,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest -q                              # 1104 tests, offline, free, no API key
+pytest -q                              # 1126 tests, offline, free, no API key
 qaas validate                          # config, prompts and allowlists cohere
 qaas run --mode pr-check --dry-run     # every agent's options assemble
 ```

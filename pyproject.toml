@@ -3,7 +3,7 @@
 # the CLI are both `qaas`.
 name = "qaas-python"
 version = "0.0.2"
-description = "A harness that runs fifteen governed Claude Code sessions over your repo: find, reproduce, file, fix, verify"
+description = "A harness that runs sixteen governed Claude Code sessions over your repo: find, reproduce, file, fix, verify"
 dynamic = ["readme"]
 license = "MIT"
 license-files = ["LICENSE"]
@@ -47,6 +47,11 @@ qaas = "qaas.cli:app"
 [project.urls]
 Homepage = "https://github.com/allaabdella2-us/qa-multi-agent-system"
 Repository = "https://github.com/allaabdella2-us/qa-multi-agent-system"
+# PyPI renders a Documentation link in the sidebar and there was none, so the
+# project page's only route into the docs was whatever the README happened to
+# link. MANUAL.md is the command reference, which is what someone who has just
+# run `pip install` is looking for.
+Documentation = "https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/MANUAL.md"
 Issues = "https://github.com/allaabdella2-us/qa-multi-agent-system/issues"
 Changelog = "https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/CHANGELOG.md"
 
@@ -96,6 +101,7 @@ include = [
     # README and CLAUDE.md both link these, and the sdist shipped neither -- so
     # the one distribution that carries the docs carried dangling links to them.
     "MANUAL.md", "PROVIDERS_PLAN.md", "qa-agent-system-architecture.md",
+    "UNDERSTANDING_QAAS.md",
     "docs/*.md",
     "pyproject.toml",
 ]
