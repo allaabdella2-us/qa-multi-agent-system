@@ -25,6 +25,9 @@ def test_qaas_credentials_are_blanked_for_the_agent():
     env = {
         "JIRA_API_TOKEN": "t", "JIRA_EMAIL": "me@example.com", "GITHUB_TOKEN": "g",
         "GH_TOKEN": "g", "NPM_TOKEN": "n", "DATABASE_PASSWORD": "p", "OPENAI_API_KEY": "o",
+        # The word first, as a real `.env` spelled it -- the suffix-only
+        # pattern let this one through.
+        "TOKEN_PYPI": "pypi-x", "SECRET_KEY_BASE": "s", "GOOGLE_CREDENTIALS": "c",
     }
     assert scrubbed_credentials(env) == {name: "" for name in env}
 
@@ -32,7 +35,8 @@ def test_qaas_credentials_are_blanked_for_the_agent():
 @pytest.mark.parametrize(
     "name",
     ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-     "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "QAAS_TARGET_PASSWORD", "PATH", "HOME"],
+     "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "QAAS_TARGET_PASSWORD", "PATH", "HOME",
+     "TOKENIZERS_PARALLELISM", "PATHEXT", "COMPOSE_PROJECT_NAME"],
 )
 def test_what_claude_code_itself_needs_is_left_alone(name):
     assert name not in scrubbed_credentials({name: "value"})

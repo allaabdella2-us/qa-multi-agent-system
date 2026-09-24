@@ -515,9 +515,13 @@ def qualified_skills(spec: AgentSpec, ctx: ToolContext) -> list[str]:
     return [q for q in (ws.qualify(name) for name in spec.skills) if q]
 
 
-#: A variable whose name says it holds a secret.
+#: A variable whose name says it holds a secret, wherever the word sits.
+#: Anchored on `_` boundaries, not on the end of the name: `TOKEN_PYPI` is as
+#: much a token as `PYPI_TOKEN`, and the suffix-only form let a PyPI publish
+#: token in a real `.env` through to the agent's shell.
 _CREDENTIAL_NAME = re.compile(
-    r"(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY|_PAT)$", re.IGNORECASE
+    r"(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE_KEY|ACCESS_KEY|PAT|CREDENTIALS?)(_|$)",
+    re.IGNORECASE,
 )
 #: Credentials the Claude Code process itself needs (the API key or OAuth
 #: token, Bedrock's AWS keys), and `QAAS_TARGET_*` -- the documented way to
