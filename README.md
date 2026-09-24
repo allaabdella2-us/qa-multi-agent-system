@@ -18,88 +18,98 @@
 
 ---
 
+## Contents
+
+1. [What it is](#what-it-is)
+2. [Install](#install)
+3. [Quick start](#quick-start)
+4. [How a run works](#how-a-run-works)
+5. [Run modes](#run-modes)
+6. [What you get](#what-you-get)
+7. [Why it is safe to point at your code](#why-it-is-safe-to-point-at-your-code)
+8. [Pointing it at your own project](#pointing-it-at-your-own-project)
+9. [Filing into Jira](#filing-into-jira)
+10. [Opening pull requests on GitHub](#opening-pull-requests-on-github)
+11. [The dashboard](#the-dashboard)
+12. [Does it actually find things?](#does-it-actually-find-things)
+13. [Customising it](#customising-it)
+14. [Command reference](#command-reference)
+15. [Troubleshooting](#troubleshooting)
+16. [What's new in 0.0.2](#whats-new-in-002)
+17. [Roadmap and contributing](#roadmap-and-contributing)
+
+---
+
 ## What it is
 
 `qaas` is a harness **around Claude Code**, not a program that calls an API.
 
 Each agent is a real Claude Code session: its own process, its own context, its
-own tool allowlist, its own budget. A Python state machine runs them in order and
-can refuse any tool call any of them makes. That is what makes the per-agent cost
-number, the context boundary and the write-permission matrix real rather than
-bookkeeping — they are separate operating-system processes with separate
-permissions.
-
-```
-map    -> discover     -> synthesise  -> file   -> verify ------------------> report
-MAPPER    API/BROWSER/…  SYNTHESIZER     TRIAGE    REPRODUCER -> VERIFIER      REPORTER
-                                                   (per ticket, in the loop)
-```
-
-Reproduction is scheduled by whoever will consume the test. Where the roster has
-a fix loop, REPRODUCER runs inside it, one ticket at a time, so a ticket that
-never reaches remediation never buys a context. Where it does not — `pr-check`,
-`nightly` — the committed failing test is the deliverable, and it runs as its own
-phase between synthesise and file.
+own tool allowlist, its own budget. A Python state machine — the router — runs
+them in order and can refuse any tool call any of them makes. That is what makes
+the per-agent cost, the context boundary and the write-permission matrix real
+rather than bookkeeping: they are separate operating-system processes with
+separate permissions.
 
 <p align="center">
   <img src="docs/roster.png" alt="The sixteen agents by phase" width="880">
 </p>
 
-<details>
-<summary><b>The sixteen, in text</b></summary>
-
-| agent | phase | what it is for |
+| Agent | Phase | What it is for |
 |---|---|---|
 | **MAPPER** | Map | Services, routes, schema and ownership → the shared system map |
-| **ARCHITECT** | Discovery | Dependency cycles, layering violations, dead code |
-| **API** | Discovery | Contract drift, missing authorization, error-shape inconsistency |
-| **BROWSER** | Discovery | Real UI journeys, driven in a browser |
-| **DBA** | Discovery | Constraints the application assumes and the database does not enforce |
-| **AUDITOR** | Discovery | Authorization, committed secrets, vulnerable dependencies |
-| **SOCKET** | Discovery | WebSocket auth, reconnect, backpressure |
-| **GUIDE** | Discovery | Whether a person can actually find the feature |
-| **LOAD** | Discovery | N+1 queries, hot paths, unbounded results |
+| **ARCHITECT** | Discover | Dependency cycles, layering violations, dead code |
+| **API** | Discover | Contract drift, missing authorization, inconsistent errors |
+| **BROWSER** | Discover | Real UI journeys, driven in a browser |
+| **DBA** | Discover | Constraints the application assumes and the database does not enforce |
+| **AUDITOR** | Discover | Authorization, committed secrets, vulnerable dependencies |
+| **SOCKET** | Discover | WebSocket auth, reconnect, backpressure |
+| **GUIDE** | Discover | Whether a person can actually find and use the feature |
+| **LOAD** | Discover | N+1 queries, hot paths, unbounded results |
 | **SYNTHESIZER** | Synthesise | The defect that is two findings until someone joins them |
-| **REPRODUCER** | Reproduce | Minimise it, write the failing test, measure the flake |
 | **TRIAGE** | File | Dedupe, score, file — the only agent that writes to a tracker |
+| **REPRODUCER** | Verify loop | Minimise it, write the failing test, measure the flake |
+| **VERIFIER** | Verify loop | Re-run the original test → VERIFIED / NOT_FIXED / REGRESSED |
 | **FIXER** | Verify loop | The smallest fix, on its own branch |
 | **REVIEWER** | Verify loop | Adversarial review: root cause or symptom? |
-| **VERIFIER** | Verify loop | Re-run the original test → VERIFIED / NOT_FIXED / REGRESSED |
 | **REPORTER** | Report | What was found, what recurred, what nothing reached |
 
-</details>
-
-ROUTER is in neither the picture nor the table, and is not an agent: it is the
-Python state machine that dispatches the rest.
+---
 
 ## Install
 
 ```bash
-pip install qaas-python          # the CLI and the import package are both `qaas`
-pip install "qaas-python[ui]"    # adds `qaas dashboard`
+pip install qaas-python            # the CLI and the import package are both `qaas`
+pip install "qaas-python[ui]"      # adds `qaas dashboard`
 ```
 
-Requires Python 3.12+ and an `ANTHROPIC_API_KEY`. The Claude Code binary ships
-with the SDK, so there is nothing else to install. Add
-`npx playwright install chromium` only if you want the browser agents.
+**Requirements**
 
-The agents that run shell commands do so inside an OS sandbox — writes stay in
-the checkout, credential stores are unreadable, the network reaches only your
-app. macOS has it built in; on Linux install `bubblewrap` and `socat`
-(`qaas doctor` tells you which applies).
+| | |
+|---|---|
+| Python | 3.12 or newer |
+| Model access | Signed in to Claude Code (`claude`), or `ANTHROPIC_API_KEY` set. The Claude Code binary ships with the SDK — nothing else to install. |
+| Browser agents *(optional)* | `npx -y @playwright/mcp@0.0.82 install-browser chrome-for-testing` — only for BROWSER and GUIDE. Needs Node.js. |
+| Shell sandbox | Built in on macOS. On Linux: `sudo apt-get install bubblewrap socat`. |
+| Demo app *(optional)* | Docker, for `target-app/` in this repository |
 
-## Five minutes
+`qaas doctor` checks all of these for the target you point it at and says what
+is missing.
+
+---
+
+## Quick start
 
 ```bash
 cd your-project
-qaas init .                      # writes .qaas/ and a target profile
-qaas doctor                      # what this target makes possible
-qaas run --mode pr-check --dry-run   # the whole plan, no API call, no money
+qaas init .                          # writes .qaas/ and a target profile
+qaas doctor                          # what this target makes possible
+qaas run --mode pr-check --dry-run   # the whole plan: no API call, no money
 qaas run --mode pr-check             # a real run
-qaas show <run-id>
+qaas show <run-id>                   # what it found, what it cost
 ```
 
-Or point it at anything without setting up first:
+Or point it at any repository without setting anything up first:
 
 ```bash
 qaas run --repo https://github.com/someone/their-project --mode nightly
@@ -109,114 +119,140 @@ qaas run --repo https://github.com/someone/their-project --mode nightly
 without spending anything. Run it before the first paid run, and after any change
 to a prompt or a policy.
 
-## What you actually get
+---
 
-A **run ledger** — every tool call, every refusal, every escalation, append-only,
-on disk. `qaas trace <run-id> --follow` streams it; `qaas dashboard` renders it.
+## How a run works
 
-**Defect envelopes** rather than prose. Agents never hand each other paragraphs.
-One validated type crosses every boundary, with two gates on the model itself:
-a finding needs evidence, and it needs confidence above the filing threshold.
-Findings that fail are held for a human, not filed.
+```
+map    -> discover      -> synthesise  -> file   -> verify loop (per ticket) -> report
+MAPPER    API/BROWSER/…    SYNTHESIZER    TRIAGE    REPRODUCER -> VERIFIER      REPORTER
+                                                    FIXER -> REVIEWER -> VERIFIER
+```
 
-**Failing tests**, not bug reports. REPRODUCER takes a finding, writes the
-shortest test that makes it appear, runs it five times to measure flake, and
-commits it on its own branch. A finding it cannot reproduce is demoted — that
-filter is the point.
+1. **Map.** MAPPER reads the repository once and publishes a versioned system
+   map every other agent reads.
+2. **Discover.** The discovery agents run concurrently. Each is a specialist
+   that can only read — the finder never fixes.
+3. **Synthesise.** SYNTHESIZER reads every finding and joins the ones that are
+   one defect seen from two sides (an endpoint with no org filter *and* a table
+   with no owning-org constraint is one cross-tenant leak, not two minor issues).
+4. **File.** TRIAGE dedupes against everything filed before, scores, and files
+   tickets.
+5. **Verify loop, one ticket at a time.** REPRODUCER writes the failing test;
+   VERIFIER confirms it fails; FIXER writes the smallest fix on its own branch;
+   REVIEWER reviews it adversarially; VERIFIER re-runs the original test. A
+   ticket ends **VERIFIED**, or is handed to a human — never looped forever.
+6. **Report.** REPORTER summarises what was found, fixed, and left.
 
-**Tickets** in Jira or in a local file-backed tracker, deduplicated across runs
-by a structural fingerprint that ignores prose, line numbers and timestamps.
+**Escalation is a designed ending, not a failure.** Some tickets are a product
+question no model can answer — *this fix is correct, but it breaks the orders
+page, which has no paging: ship now or hold?* The run says so and stops working
+that ticket until you answer:
 
-**Fixes**, on their own branches, as draft pull requests, reviewed adversarially
-and verified against the original failing test before anything is closed. Nothing
-merges. Merge is a human decision and there is no code path to it.
+```bash
+qaas escalations                                        # what is waiting on you
+qaas answer QAAS-60 --decision proceed --note "add paging in the same PR"
+qaas answer QAAS-31 --decision hold    --note "outside FIXER's paths; mine"
+```
 
-<p align="center">
-  <img src="docs/dashboard.png" alt="The dashboard" width="820">
-</p>
+An answer records one line in the run's ledger and dispatches nothing; your note
+reaches FIXER and REVIEWER verbatim on the next cycle.
+
+**Stopping and resuming.** Every run can be resumed with
+`qaas run --mode <mode> --run-id <run-id>`. A resume skips everything already
+done — the map, finished agents, filed tickets, verified tickets, and tickets
+waiting on your answer — and keeps the run's ticket cap.
+
+**Provider usage limits.** When Claude Code reports a session limit and says
+when it resets ("resets 3:50pm"), the run **waits for the reset and retries the
+agent it stopped**, as long as the reset falls inside the run's own time limit.
+Nothing else is dispatched into the limit while it waits. If it cannot wait, it
+stops cleanly and prints the resume command.
+
+---
 
 ## Run modes
 
-| mode | agents | wall clock | files tickets |
-|---|---|---|---|
-| `pr-check` | 8 | 15 min | yes |
-| `nightly` | 13 | 2 h | yes |
-| `incident` | 1 | 10 min | no — diagnostic only |
-| `fix-cycle` | 3 | 4 h | yes |
-| `full-loop` | 16 | 8 h | yes |
+| Mode | Agents | Wall clock | Files tickets | Use it for |
+|---|---|---|---|---|
+| `pr-check` | 8 | 15 min | yes | Every pull request |
+| `nightly` | 13 | 2 h | yes | A scheduled sweep: find, reproduce, file |
+| `incident` | 1 | 10 min | no | A quick diagnostic |
+| `fix-cycle` | 3 | 4 h | yes | Fix and verify tickets already filed |
+| `full-loop` | 16 | 8 h | yes | Everything, end to end |
 
-`qaas run --mode nightly --only API` restricts a run to named agents.
-`qaas run --mode fix-cycle --from-board "Ready for Fix"` takes its work from the
-board: drag a card into that column and the next run picks it up.
+Useful flags on `qaas run`:
 
-## The part that makes it safe to point at your code
+| Flag | What it does |
+|---|---|
+| `--dry-run` | Build every agent's options and stop. Free. |
+| `--only API --only DBA` | Restrict the run to named agents |
+| `--target <name>` / `--repo <path-or-url>` | Choose what to run against |
+| `--run-id <id>` | Resume a run |
+| `--ticket QAAS-12` | Restrict a `fix-cycle` to named tickets |
+| `--from-board "Ready for Fix"` | Take the tickets from a Jira column: drag a card there and the next run picks it up |
+| `--dashboard` | Serve the live dashboard alongside the run |
 
-Every agent's write permissions are declared in its config and enforced in
-Python, before the tool runs — not requested in a prompt.
+---
 
-- **Discovery agents cannot write at all.** The finder never fixes.
+## What you get
+
+- **A run ledger** — every tool call, refusal, escalation and verdict, append-only,
+  on disk under `.qaas/runs/<run-id>/`. `qaas trace <run-id> --follow` streams
+  it; `qaas dashboard` renders it.
+- **Defect envelopes, not prose.** Agents never hand each other paragraphs. One
+  validated type crosses every boundary, with two gates built into it: a finding
+  needs evidence, and it needs confidence above the filing threshold. Findings
+  that fail are held, not filed.
+- **Failing tests, not bug reports.** REPRODUCER writes the shortest test that
+  makes the defect appear, runs it several times to measure flake, and commits it
+  on its own branch. A finding it cannot reproduce is demoted.
+- **Tickets** in Jira or in a local file-backed tracker, deduplicated across runs
+  by a structural fingerprint that ignores prose, line numbers and timestamps.
+- **Fixes** on their own branches, reviewed adversarially and verified against
+  the original failing test before anything is closed. **Nothing merges** —
+  merging is a human decision and there is no code path to it.
+- **A memory across runs.** A defect seen before is recognised; one whose fix
+  was merged and that comes back is reported as a regression. A fix that is
+  verified but not yet merged is not mistaken for one.
+
+---
+
+## Why it is safe to point at your code
+
+Every agent's permissions are declared in its config and **enforced in Python
+before the tool runs** — not requested in a prompt.
+
+- **Discovery agents cannot write at all.**
 - **FIXER writes to source and cannot touch the test that defines success**, nor
-  migrations, auth, payment paths, secrets or CI config. Those stop at a human
-  however small the change looks.
-- **The shell is not a way around any of it.** A command that mutates and whose
-  destination cannot be resolved is refused, naming `Write`/`Edit` in the reason.
-  Wrappers are peeled, indirection is refused, deletion counts as a write.
-- **Nothing reaches the network** except the application under test. `WebFetch`
-  and `WebSearch` are refused to every agent: findings come from the code and the
-  running app, not the web.
-- **Your credentials stay yours.** The target's own test suite runs with an
-  allowlisted environment, not a copy of yours.
-- **Nothing is loaded from the target's filesystem settings.** A repository
-  cloned from a URL cannot inject hooks or MCP servers into the process holding
-  your API key.
+  migrations, auth, payment paths, secrets or CI config. It is also bounded by a
+  diff budget (files and lines) per ticket.
+- **The shell cannot go around the rules.** Commands are parsed for what they
+  write; a command that mutates and whose destination cannot be resolved is
+  refused. `git push --force`, pushes to protected branches and merges are
+  refused outright.
+- **The shell runs in an OS sandbox** (Seatbelt on macOS, bubblewrap on Linux):
+  writes only inside the checkout and a private temp directory, no reads of
+  `~/.ssh`, `~/.aws`, `~/.config/gh` or other credential stores, and network
+  only to your application.
+- **Your credentials stay yours.** Agents get an environment with Jira, GitHub
+  and other tokens blanked; the target's own test suite runs with an allowlisted
+  environment.
+- **Nothing is loaded from the target's settings.** A repository cloned from a URL
+  cannot inject hooks or MCP servers into the process holding your API key.
+- **Security findings are never filed where everyone can read them** — they need a
+  restricted Jira project, and a fix for one is committed but never pushed.
 
-Every refusal is logged with its reason. An agent that is refused adapts; the
-turn does not die.
+Every refusal is logged with its reason, and the agent adapts; the turn does not
+die.
 
-**Escalation is a designed ending, not a failure.** Some tickets are a product
-question, and no amount of model is going to answer one: *this fix is correct and
-applying it exposes a regression filed as another ticket — ship now or hold?*
-When that happens the run says so and stops working that ticket.
-
-```bash
-qaas escalations                  # what is blocked on a human, across every run
-qaas answer QAAS-31 --decision hold    --note "the fix is outside FIXER's paths"
-qaas answer QAAS-45 --decision proceed --note "USD only, and label it"
-```
-
-The answer **records; it never dispatches.** It appends one line to the run's
-ledger from a process with no agent in it, and the router still schedules
-everything out of that ledger under the same budget and loop breakers. A `hold`
-is read *before* VERIFIER, so a parked ticket costs nothing to skip; a `proceed`
-note reaches FIXER and REVIEWER verbatim on the next cycle, which is the part
-that was missing — REVIEWER had nowhere to receive an answer, so it re-raised the
-same question every run.
-
-## Does it actually find things?
-
-`qaas score` answers that with numbers rather than vibes.
-
-The repository ships `target-app/`, a deliberately buggy FastAPI + React
-application, and `target-app/defects.yaml`, a golden ledger of exactly what is
-wrong with it — plus a `not_defects` section of correct-but-suspicious code, so
-precision is *measured* rather than assumed. Matching is deterministic: using a
-model to judge whether a finding matches a seeded defect would make the score
-depend on the same class of system being measured.
-
-```bash
-cd target-app && docker compose up -d
-qaas run --mode nightly
-qaas score                       # recall, precision, false-positive rate, per agent
-qaas sweep --min-precision 0.7   # run + score + exit non-zero below the gate
-```
-
-`qaas sweep` is the cron line. It fails loudly rather than quietly filling a
-backlog nobody reads.
+---
 
 ## Pointing it at your own project
 
-A **target profile** is what makes this portable. Nothing in any prompt names a
-specific application; the profile does.
+A **target profile** makes the system portable: nothing in any prompt names a
+specific application. `qaas init` writes one by reading your repository and tells
+you what it guessed.
 
 ```yaml
 name: my-service
@@ -236,76 +272,130 @@ auth:
     admin: {username: admin@example.test, password_env: DEMO_ADMIN_PASSWORD}
 ```
 
-`environment.mode` is the load-bearing field. `none` means static reads only.
-`external` means agents may exercise the app but never reset it — someone else
-may be relying on it, and a reset has no undo. `compose` means this run owns the
-lifecycle and may seed, reset and tear down. The system refuses lifecycle
-operations the profile has not granted.
+| `environment.mode` | Meaning |
+|---|---|
+| `none` | Static reads only |
+| `external` | Agents may exercise the running app but never reset it — someone else may rely on it |
+| `compose` | This run owns the lifecycle: it may build, seed, reset and tear down |
 
 Credentials are never written into a profile; it names environment variables.
-`qaas doctor` tells you which agents a given profile can usefully run, and
-`qaas init` will guess most of this from your repository and tell you what it
-guessed.
 
-**One knob is worth setting deliberately on a real codebase.** FIXER ships with a
-five-file, 150-line autonomy envelope — how much production code it may change
-before a human sees it. How wide a *legitimate* fix is depends on the code: in a
-repository whose defects are duplication defects, a correct fix touches every
-duplicate, and five files cannot express one. The profile overrides it:
+**Set the diff budget on a real codebase.** FIXER ships with a five-file,
+150-line limit on how much production code it may change before a human sees it.
+In a codebase whose defects are duplication, a correct fix touches every
+duplicate. Raise (or lower) it per target:
 
 ```yaml
 diff_budget: {max_diff_files: 12, max_diff_lines: 400}
 ```
 
-A raise or a lower, never a grant — an agent the permission matrix left unbounded
-stays unbounded. When a fix genuinely exceeds the budget the run escalates saying
-so, naming it as *wider than the envelope rather than wrong*, so you widen it or
-split the ticket instead of hunting a bad fix that was never written.
+When a fix genuinely exceeds the budget, the run escalates saying it is *wider
+than the envelope, not wrong*.
 
-The budget also does not count `scratch_paths` — `qa/repro`, where FIXER builds a
-probe harness to investigate a defect. A harness is neither production code nor
-part of the fix, and charging it to the same budget meant FIXER spent the whole
-envelope on scaffolding before opening a single product file.
+---
 
 ## Filing into Jira
 
 ```bash
-export JIRA_BASE_URL=https://you.atlassian.net
-export JIRA_EMAIL=you@example.com
-export JIRA_API_TOKEN=...                # an API token, not a password
-export JIRA_PROJECT_KEY=QA
-
-QAAS_TRACKER=jira qaas tracker-check     # creates nothing
-QAAS_TRACKER=jira qaas run --mode nightly
+# .qaas/.env — read by every command; anything already exported wins
+JIRA_BASE_URL=https://you.atlassian.net
+JIRA_EMAIL=bot@example.com
+JIRA_API_TOKEN=...                   # an API token, not a password
+JIRA_PROJECT_KEY=QA
+JIRA_SECURITY_PROJECT_KEY=QASEC      # optional: a restricted project for security findings
 ```
 
-`tracker-check` validates the credentials, confirms the project and issue type
-exist, maps your workflow statuses and prints the exact JSON it *would* POST.
-Run it before you spend anything.
+```bash
+QAAS_TRACKER=jira qaas tracker-check   # validates everything, creates nothing
+QAAS_TRACKER=jira qaas run --mode nightly
+qaas board                             # this repository's board
+```
 
-Four exports in every shell gets old — put them in `.qaas/.env`, which is already
-gitignored, and every command reads it. Anything you export wins over the file,
-so a stale `.env` can never redirect a run.
+- **Use a dedicated bot account** with *Browse*, *Create*, *Transition* and
+  *Link* permissions on the project. Jira Cloud only.
+- **`tracker-check` first.** It confirms the credentials, the project and issue
+  type, maps your workflow's statuses, and prints the exact request it *would*
+  send.
+- **One view per repository.** Every ticket carries a `repo-<target>` label, and
+  `qaas board` finds or creates a saved filter (and a board, where the project
+  allows one) over exactly that label.
+- **Dedupe across runs.** Tickets carry a fingerprint label, so next week's run
+  recognises a defect it already filed instead of filing it again.
+- **Security findings are refused** unless `JIRA_SECURITY_PROJECT_KEY` names a
+  restricted project: filing a vulnerability where the whole company can read it
+  is a disclosure with no undo.
 
-Two things happen without being asked. Tickets carry a `qaas-fp-<fingerprint>`
-label, so next week's run recognises an already-filed defect and increments its
-occurrence count instead of filing again. And a **security-relevant finding is
-refused** unless `JIRA_SECURITY_PROJECT_KEY` names a restricted project — filing
-a vulnerability where the whole company can read it is a disclosure with no undo,
-so it escalates to a human instead.
+`.qaas/.env` is gitignored by `qaas init`. The default tracker is `local`, which
+writes tickets as JSON under `.qaas/tickets/` so you can see what *would* be filed.
 
-Each repository also gets its own view: every ticket carries `repo-<target>`, and
-`qaas board` finds or creates a saved filter over exactly that label. Not a
-project per repository — creating one needs admin rights a bot account rarely
-has. [docs/jira-setup.md](docs/jira-setup.md) has the details, including why a
-board is not always possible.
+---
 
-The committed default is `local`, which writes tickets as JSON under
-`.qaas/tickets/` so you can read what *would* be filed.
+## Opening pull requests on GitHub
+
+The default is `vcs: local`: fixes are committed to branches in your checkout and
+nothing is pushed. To have FIXER push its branch and open a **draft** pull
+request, set `vcs: github` in `.qaas/config/system.yaml` (or `QAAS_VCS=github`)
+and authenticate the GitHub CLI with `gh auth login`. Protected branches can
+never be pushed to, security fixes are never pushed, and nothing is ever merged.
+
+---
+
+## The dashboard
+
+```bash
+pip install "qaas-python[ui]"
+qaas dashboard                 # the latest run, at http://127.0.0.1:7777
+qaas dashboard <run-id>        # a specific run
+qaas run --mode nightly --dashboard   # serve it alongside a run
+```
+
+<p align="center">
+  <img src="docs/dashboard.png" alt="The dashboard" width="820">
+</p>
+
+It shows the phases, one card per agent (cost, findings, refusals), the
+findings, tickets, escalations and a live feed of the ledger — and the
+installation's configuration.
+
+| Card | Meaning |
+|---|---|
+| Green — *done* | The agent's latest invocation succeeded |
+| Red — *failed* | The agent failed |
+| Amber — *waiting* | A provider usage limit is being waited out; the card says when it retries |
+| Amber — *rate-limited* | The run stopped on a usage limit it could not wait out; the card shows the resume command |
+| Amber — *interrupted* | The process running it was stopped before it finished |
+
+It binds to localhost only and reads the ledger; the one thing it can write is
+*tuning* — which model an agent runs, a turn cap, a threshold — never an agent's
+permissions.
+
+---
+
+## Does it actually find things?
+
+`qaas score` answers that with numbers.
+
+This repository ships `target-app/`, a deliberately buggy FastAPI + React
+application, and `target-app/defects.yaml`, a golden ledger of exactly what is
+wrong with it — plus correct-but-suspicious code, so precision is measured rather
+than assumed. Matching is deterministic, not model-judged.
+
+```bash
+cd target-app && docker compose up -d
+qaas run --mode nightly
+qaas score                       # recall, precision, false positives — per agent
+qaas sweep --min-precision 0.7   # run + score + exit non-zero below the gate (the cron line)
+```
+
+The latest full-loop run on the demo app found **19 of 21** seeded defects
+(90% recall), filed three tickets and verified two fixes, for about $66.
+
+---
 
 ## Customising it
 
-An agent is a prompt file plus a YAML file. Adding one needs no Python.
+**Agents are data.** An agent is a prompt file plus a YAML file; adding one needs
+no Python.
 
 ```bash
 qaas prompts list                # every prompt and which layer it came from
@@ -313,82 +403,113 @@ qaas prompts eject API           # copy it into .qaas/prompts/ to edit
 qaas prompts diff                # what you changed against what ships
 ```
 
-Config layers the ordinary way — an explicit `--config` beats your project, and
-your project beats what shipped. Agent files, prompts and skills union by name,
-so raising one agent's budget is one dropped-in file rather than a fork of the
-whole roster.
+**Config layers the ordinary way:** `--config` beats your project's `.qaas/config/`,
+which beats what ships. Agent files, prompts and skills merge by name, so changing
+one agent is one dropped-in file. `.qaas/config/overrides.yaml` changes single
+values without forking anything:
 
-The dashboard can edit *tuning* — which model an agent runs, a turn cap, a
-threshold — and deliberately cannot edit *permissions*. Those live in a file a
-person edits.
+```yaml
+thresholds:
+  max_tickets_per_run: 10        # stop filing after this many tickets per run
+  min_confidence_to_file: 0.7    # file fewer, surer findings
+  quota_wait_max_s: 21600        # longest to wait for a usage limit to reset (0 = never)
+agents:
+  FIXER: {max_budget_usd: 20, max_turns: 120}
+```
 
-## Documentation
+**Sandbox:** `sandbox.mode` in `system.yaml` is `auto` (sandbox where the OS can),
+`required` (refuse to run unsandboxed) or `off`.
 
-| | |
+---
+
+## Command reference
+
+| Command | What it does |
 |---|---|
-| [MANUAL.md](MANUAL.md) | every command and flag |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | how the code is put together |
-| [UNDERSTANDING_QAAS.md](UNDERSTANDING_QAAS.md) | the whole system in one file, with flowcharts |
-| [CLAUDE.md](CLAUDE.md) | the design decisions and the bugs behind them |
-| [docs/dashboard.md](docs/dashboard.md) | the live run view |
-| [docs/jira-setup.md](docs/jira-setup.md) | Jira credentials and the per-repo board |
-| [docs/launch.md](docs/launch.md) | running it for the first time |
-| [CHANGELOG.md](CHANGELOG.md) | what changed |
+| `qaas init <repo>` | Scaffold `.qaas/` and a target profile |
+| `qaas targets` | List the target profiles this project can see |
+| `qaas doctor [--target X]` | What a target makes possible, and what is missing |
+| `qaas validate` | Check config, prompts and tool allowlists — no API call |
+| `qaas run --mode M` | Run. Costs money unless `--dry-run` |
+| `qaas runs` | Recent runs with cost and finding count |
+| `qaas show <run-id>` | One run's findings, tickets, escalations and cost |
+| `qaas trace <run-id> [--follow]` | The ledger as a timeline |
+| `qaas map` | The system map MAPPER produced |
+| `qaas dashboard [<run-id>]` | The live run view in a browser |
+| `qaas escalations` | What is blocked on a human, across runs |
+| `qaas answer <TICKET> --decision proceed\|hold --note "..."` | Answer an escalation |
+| `qaas score [<run-id>]` | Recall and precision against the golden ledger |
+| `qaas sweep` | Run, score, and fail below a precision gate |
+| `qaas board` | Show or create this repository's Jira board |
+| `qaas tracker-check` | Validate the tracker configuration; creates nothing |
+| `qaas prompts list / eject / diff` | Inspect and override agent prompts |
 
-## Roadmap, and where help is wanted
+Every command takes `--help`.
 
-`qaas` runs on the Claude Agent SDK today. Making the model a *choice* rather
-than an assumption is the next step, and it is where contributions would help
-most. The envelope, the guardrails, the ledger and the phase machine are already
-provider-agnostic; the coupling is `ClaudeAgentOptions`, the hook events and
-`query()`.
+---
 
-- **A provider interface** in `runner.py`, so it talks to *a* provider rather
-  than to one.
-- **A second implementation behind it.** The interesting work is not the API
-  call — it is mapping tool definitions, streamed tool calls and a stop condition
-  onto the same `PreToolUse`/`PostToolUse`/`Stop` contract the guardrails and the
-  output contract depend on.
-- **Local models for the agents that do not need a frontier one.** Cost per run
-  is the reason discovery fans out as carefully as it does; running MAPPER
-  locally changes that arithmetic.
-- **A scored per-agent model matrix.** `model:` is already per-agent config, so
-  once several providers exist the honest question is a comparison with
-  `qaas score` as the referee rather than a preference.
+## Troubleshooting
 
-[PROVIDERS_PLAN.md](PROVIDERS_PLAN.md) is the staged version of that.
+| Symptom | Fix |
+|---|---|
+| BROWSER and GUIDE are skipped with "browser … is not installed" | `npx -y @playwright/mcp@0.0.82 install-browser chrome-for-testing` |
+| `qaas doctor` says the sandbox is unavailable (Linux) | `sudo apt-get install bubblewrap socat` |
+| A run stopped on "session limit" | Wait for the reset, then run the resume command it printed. Runs wait by themselves when the reset falls inside their time limit. |
+| "no target profile" | Run `qaas init .` in the project, or pass `--target` / `--repo` |
+| A fix escalated as "wider than the envelope" | Raise `diff_budget` in the target profile, or split the ticket |
+| Security findings are not filed | Set `JIRA_SECURITY_PROJECT_KEY` to a restricted project |
+| Anything else | `qaas doctor`, then `qaas trace <run-id>` — every refusal says why |
 
-This is a solo project and the list is bigger than one person. Issues and PRs
-welcome — especially a provider implementation, a new agent (a prompt plus a YAML
-file, no Python), or simply running `qaas` against your own repository and
-reporting what it got wrong. The last one is the most useful and the least
-glamorous.
+---
 
-## Contributing
+## What's new in 0.0.2
+
+- **Sixteen agents** — ARCHITECT, DBA, AUDITOR, SOCKET, GUIDE, LOAD and
+  SYNTHESIZER join the roster, and a verify loop (REPRODUCER → VERIFIER → FIXER →
+  REVIEWER → VERIFIER) that runs per ticket.
+- **An OS sandbox around every agent's shell**, credentials blanked in agents'
+  environments, and a shell-command guardrail that git's global options, wrappers
+  and indirection can no longer get around.
+- **Escalations you can answer** (`qaas escalations`, `qaas answer`), and
+  `--from-board` to take work from a Jira column.
+- **Resumable runs that do only what is left**, including the ticket cap, and
+  **usage limits waited out** instead of failing the run.
+- **A browser check** before BROWSER and GUIDE run, a headless browser, and the
+  correct install command.
+- **Memory that knows merged from verified:** a fix waiting to be merged is not
+  reported as a regression when the defect is seen again.
+- **The dashboard** — phases, agent cards, findings, tickets, escalations and a
+  configuration view; rate-limited agents drawn amber, never as failures.
+- **Per-agent scoring** with `qaas score`, and `qaas sweep` as a precision gate.
+
+---
+
+## Roadmap and contributing
+
+`qaas` runs on the Claude Agent SDK today. Making the model a *choice* is the
+next step, and the most useful place for help: a provider interface in the
+runner, a second implementation behind it, local models for the agents that do
+not need a frontier one, and a scored per-agent model comparison with
+`qaas score` as the referee.
+
+Issues and pull requests are welcome — especially a new agent (a prompt plus a
+YAML file), or simply running `qaas` against your own repository and reporting
+what it got wrong.
 
 ```bash
 git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest -q                              # 1522 tests, offline, free, no API key
+pytest -q                              # 1602 tests, offline, free, no API key
 qaas validate                          # config, prompts and allowlists cohere
 qaas run --mode pr-check --dry-run     # every agent's options assemble
 ```
 
-Those three are the whole gate; CI runs exactly them. The default `pytest` run
-makes no API calls and touches no network, and must stay that way — the tiers
-that do are behind markers (`llm`, `docker`, `github`, `jira`) and deselected by
-default.
+Those three are the whole CI gate. The default test run makes no API calls and
+touches no network. If you change a seeded defect in `target-app/`, change its
+entry in `defects.yaml` in the same commit.
 
-If you change a seeded defect in `target-app/`, change its entry in
-`defects.yaml` in the same commit. A stale golden ledger silently corrupts every
-score.
+---
 
-## Status
-
-0.0.2, beta. It works, it is used, and the interesting parts have tests. The
-model is currently Claude; [PROVIDERS_PLAN.md](PROVIDERS_PLAN.md) is the staged
-plan for making that a choice.
-
-MIT licensed.
+**Status:** 0.0.2, beta. **License:** MIT.

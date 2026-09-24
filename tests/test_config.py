@@ -371,7 +371,9 @@ def test_the_docs_agree_with_the_suite_about_its_own_size():
         pytest.skip("could not read the collected count from pytest")
     actual = int(match.group(1))
 
-    for name in ("README.md", "CLAUDE.md"):
+    # CLAUDE.md is a working document that lives in a checkout, not in the
+    # repository, so a clean clone -- CI -- has only the README to check.
+    for name in ("README.md", *(["CLAUDE.md"] if (REPO / "CLAUDE.md").exists() else [])):
         claimed = re.search(r"([\d,]+) tests", (REPO / name).read_text(encoding="utf-8"))
         assert claimed, f"{name} no longer states a test count"
         stated = int(claimed.group(1).replace(",", ""))

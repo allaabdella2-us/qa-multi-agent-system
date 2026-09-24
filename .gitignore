@@ -27,3 +27,19 @@ tutorial/
 # They are run output, reproducible from the ledger, and they accumulate one
 # file per finding across every run -- not source, and not reviewable as a diff.
 target-app/qa/
+
+# Internal and working documents. They live in this checkout and are not
+# published: README.md is the repository's and the package's one document.
+/CLAUDE.md
+/MANUAL.md
+/UNDERSTANDING_QAAS.md
+/ARCHITECTURE.md
+/BUILD_PLAN.md
+/PROVIDERS_PLAN.md
+/RELEASE_0_0_2_PLAN.md
+/CHANGELOG.md
+/qa-agent-system-architecture.md
+/docs/*.md
+
+# Probe scripts an early run wrote into this repository's own root.
+/qa/

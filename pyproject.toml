@@ -47,13 +47,11 @@ qaas = "qaas.cli:app"
 [project.urls]
 Homepage = "https://github.com/allaabdella2-us/qa-multi-agent-system"
 Repository = "https://github.com/allaabdella2-us/qa-multi-agent-system"
-# PyPI renders a Documentation link in the sidebar and there was none, so the
-# project page's only route into the docs was whatever the README happened to
-# link. MANUAL.md is the command reference, which is what someone who has just
-# run `pip install` is looking for.
-Documentation = "https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/MANUAL.md"
+# The README is the one published document -- the repository's and this
+# package's -- so both sidebar links land in it.
+Documentation = "https://github.com/allaabdella2-us/qa-multi-agent-system#readme"
 Issues = "https://github.com/allaabdella2-us/qa-multi-agent-system/issues"
-Changelog = "https://github.com/allaabdella2-us/qa-multi-agent-system/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/allaabdella2-us/qa-multi-agent-system#whats-new-in-002"
 
 [build-system]
 requires = ["hatchling", "hatch-fancy-pypi-readme"]
@@ -96,13 +94,8 @@ include = [
     # ".claude/skills/" entry outlived the directory it named -- hatchling
     # ignores a missing path, so it broke nothing and simply misled.
     "src/", "config/", "target-app/", "tests/",
-    "README.md", "LICENSE", "ARCHITECTURE.md", "CLAUDE.md", "BUILD_PLAN.md",
-    "CHANGELOG.md",
-    # README and CLAUDE.md both link these, and the sdist shipped neither -- so
-    # the one distribution that carries the docs carried dangling links to them.
-    "MANUAL.md", "PROVIDERS_PLAN.md", "qa-agent-system-architecture.md",
-    "UNDERSTANDING_QAAS.md",
-    "docs/*.md",
+    # The README is the package's one document, as it is the repository's.
+    "README.md", "LICENSE",
     "pyproject.toml",
 ]
 
