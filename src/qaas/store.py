@@ -60,6 +60,10 @@ class LedgerKind(StrEnum):
     #: (`run-20260919T152757-4c8c37`, $56.58) wrote eleven of them, one per
     #: agent that walked into the same wall, and none of them said the word.
     QUOTA_EXHAUSTED = "quota_exhausted"
+    #: The provider's limit said when it lifts and the run is waiting for it,
+    #: then retrying the agent it stopped. Not `quota_exhausted`, which means
+    #: the run gave up and needs a resume.
+    QUOTA_WAIT = "quota_wait"
 
     # agent lifecycle (runner, store)
     AGENT_STARTED = "agent_started"
@@ -319,8 +323,32 @@ class RunStore:
         REPRODUCER runs once per finding and FIXER once per review round trip, so
         each of them got a fresh allowance every time -- and on a resumed run
         every cap in the system started again from zero.
+
+        That last clause stayed true after the move, because a resume is a new
+        process and a new store: the tally lived in memory, so a run capped at
+        three tickets filed three more when it was resumed. It is seeded from
+        disk on first use -- the tickets this agent created, from the ledger,
+        and the findings it emitted, from the envelopes.
         """
-        return self._counters.setdefault(agent, {})
+        if agent not in self._counters:
+            self._counters[agent] = self._spent_so_far(agent)
+        return self._counters[agent]
+
+    def _spent_so_far(self, agent: str) -> dict[str, int]:
+        """What earlier processes of this run already counted against `agent`."""
+        spent: dict[str, int] = {}
+        tickets = sum(
+            1 for e in self.ledger("ticket")
+            if e.agent == agent and e.detail.get("action") == "created"
+        )
+        # Envelopes, not `envelope` ledger lines: `put_envelope` logs every
+        # write, and stamping a ticket key or a reproduction rewrites the file.
+        envelopes = sum(1 for e in self.envelopes() if e.discovered_by == agent)
+        if tickets:
+            spent["tickets"] = tickets
+        if envelopes:
+            spent["envelopes"] = envelopes
+        return spent
 
     def touched_files(self, agent: str, scope: str | None = None) -> set[str]:
         """The distinct files one agent has written for one piece of work (§8.2).

@@ -350,11 +350,16 @@ def agent_usable(agent_name: str, caps: dict[str, bool]) -> bool:
 
     Everything except BROWSER can contribute from static analysis alone, at
     lower confidence. BROWSER without a reachable UI has nothing to do at all.
+
+    `browser` is not a property of the profile but of this machine, so the
+    caller adds it (`qaas.browser.status`); absent means "not checked", and is
+    not a refusal.
     """
     if agent_name in ("BROWSER", "GUIDE"):
         # Both drive a browser. GUIDE's whole method is navigating the product
-        # as a person would; with nothing to navigate it has no job at all.
-        return caps.get("live_ui", False)
+        # as a person would; with nothing to navigate it has no job at all --
+        # and a reachable UI is no use without the browser to reach it with.
+        return caps.get("live_ui", False) and caps.get("browser", True)
     if agent_name == "LOAD":
         # Performance work needs something to measure. LOAD can read query and
         # rendering code statically, but a latency claim about an application it

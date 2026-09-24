@@ -43,6 +43,11 @@ thresholds:
   flake_runs: 5                    # REPRODUCER runs a repro N times to measure flake
   max_mender_arbiter_round_trips: 2
   max_proof_reopens: 1
+  # A provider session limit that says when it resets ("resets 3:50pm") is
+  # waited out, and the agent it stopped is dispatched again -- if the reset is
+  # within this many seconds and the run's wall clock still has time after it.
+  # Otherwise the run stops with a resume command. 0 never waits.
+  quota_wait_max_s: 21600
 
 run_modes:
   pr-check:

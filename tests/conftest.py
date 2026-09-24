@@ -86,3 +86,27 @@ def _remove_sandbox_tmpdirs():
     if root.is_dir():
         for path in set(root.glob("qaas-*-*")) - before:
             _shutil.rmtree(path, ignore_errors=True)
+
+
+@_pytest.fixture(autouse=True)
+def _browser_not_probed(monkeypatch):
+    """The router asks whether the Playwright server's browser is installed
+    before dispatching BROWSER and GUIDE, and asking runs `npx`. The suite is
+    offline and must not depend on Node, so the answer is "not checked" -- the
+    one that changes nothing. `tests/test_browser.py` tests the real question
+    through a reference taken at import, before this replaces it."""
+    from qaas import browser
+
+    monkeypatch.setattr(browser, "status", lambda config=None: (None, "not checked in the offline suite"))
+
+
+@_pytest.fixture(autouse=True)
+def _no_quota_reset_time(monkeypatch):
+    """A provider limit that names its reset time is waited out by the router.
+    Every quota test here uses a message with a clock time in it, so whether a
+    test slept for hours would depend on the time of day it ran. The suite
+    reads no reset time unless a test asks for one: `tests/test_quota.py`
+    tests the parser directly and the waiting with an injected clock."""
+    from qaas import router
+
+    monkeypatch.setattr(router, "quota_reset_at", lambda text, now=None: None)

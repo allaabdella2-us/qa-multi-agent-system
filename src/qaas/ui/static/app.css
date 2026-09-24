@@ -345,6 +345,9 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .card[data-status="failed"]::before  { background: var(--k-red); }
 .card[data-status="skipped"]::before { background: var(--k-dim); }
 .card[data-status="never_ran"]::before { background: var(--k-dim); }
+.card[data-status="waiting"]::before,
+.card[data-status="rate_limited"]::before,
+.card[data-status="interrupted"]::before { background: var(--k-yellow); }
 .card[data-status="running"] { border-color: rgba(217,119,87,.45); }
 .card[data-status="skipped"],
 .card[data-status="never_ran"] { opacity: .55; }
@@ -361,6 +364,10 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
                                     animation: pulse 1.2s ease-in-out infinite; }
 .card[data-status="done"]    .pip { background: var(--k-green); }
 .card[data-status="failed"]  .pip { background: var(--k-red); }
+.card[data-status="waiting"] .pip { background: var(--k-yellow);
+                                    animation: pulse 1.2s ease-in-out infinite; }
+.card[data-status="rate_limited"] .pip,
+.card[data-status="interrupted"]  .pip { background: var(--k-yellow); }
 .card .nums { display: flex; gap: 8px; margin-top: 3px; font-family: var(--mono);
               font-size: 10.5px; color: var(--ink-faint); }
 .card .nums b { color: var(--ink-dim); font-weight: 600; }

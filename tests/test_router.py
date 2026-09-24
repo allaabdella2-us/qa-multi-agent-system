@@ -1686,3 +1686,105 @@ def test_a_checkout_that_cannot_happen_is_recorded_not_raised(cfg, tmp_path, fix
     store = RunStore.new(tmp_path / "state")
     Router(cfg, target_root=fixed_target, root=tmp_path / "state")._checkout(store, "no/such-branch")
     assert any("could not check out" in e.detail.get("reason", "") for e in store.ledger("skipped"))
+
+
+async def test_a_verified_fix_is_remembered_with_where_it_lives(cfg, tmp_path, verdicts, fixed_target, monkeypatch):
+    """VERIFIED is true of one branch at one commit until a human merges it. The
+    memory was told only "resolved", so the next run on the unmerged main branch
+    filed the same open defect as a REGRESSION."""
+    import subprocess
+
+    calls, behaviour, script = verdicts
+    script("VERIFIED")
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        conductor_mod.defect_memory, "resolve",
+        lambda *args, **kwargs: seen.append(kwargs),
+    )
+    store = RunStore.new(tmp_path / "state")
+    _filed(store)
+    router = Router(cfg, target_root=fixed_target, root=tmp_path / "state")
+    await router.run("fix-cycle", run_id=store.run_id)
+
+    verified = list(store.ledger("verified"))[-1].detail
+    head = subprocess.run(["git", "-C", str(fixed_target), "rev-parse", verified["branch"]],
+                          capture_output=True, text=True).stdout.strip()
+    assert verified["commit"] == head
+    assert seen and seen[0]["branch"] == verified["branch"] and seen[0]["commit"] == head
+
+
+async def test_a_resume_does_not_re_ask_a_question_a_human_has_not_answered(cfg, tmp_path, verdicts):
+    """Stopped on a quota after QAAS-60 went REGRESSED, the resume re-verified the
+    unchanged fix, got REGRESSED again and escalated it a second time."""
+    calls, behaviour, script = verdicts
+    script("REGRESSED")
+    store = RunStore.new(tmp_path)
+    _filed(store)
+    await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    assert [n for n, _ in calls].count("VERIFIER") == 1
+
+    await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    assert [n for n, _ in calls].count("VERIFIER") == 1, "re-verified a ticket awaiting a human"
+    skips = [e for e in store.ledger("skipped") if "not yet answered" in e.detail.get("reason", "")]
+    assert skips and skips[-1].detail["tickets"] == ["CORVID-1"]
+
+    # Answered, it is work again.
+    store.log("human_decision", ticket_key="CORVID-1", decision="proceed", note="page the list")
+    script("VERIFIED")
+    await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    assert [n for n, _ in calls].count("VERIFIER") == 2
+
+
+async def test_naming_an_escalated_ticket_runs_it(cfg, tmp_path, verdicts):
+    calls, behaviour, script = verdicts
+    script("REGRESSED", "VERIFIED")
+    store = RunStore.new(tmp_path)
+    _filed(store)
+    await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    await Router(cfg, target_root=REPO, root=tmp_path, tickets=["CORVID-1"]).run(
+        "fix-cycle", run_id=store.run_id
+    )
+    assert [n for n, _ in calls].count("VERIFIER") == 2
+
+
+async def test_a_resume_neither_rejoins_nor_refiles(cfg, tmp_path, fake_agents):
+    """Resumed after a quota stop, a capped run re-dispatched SYNTHESIZER over
+    forty findings, and TRIAGE's cap -- counted in memory -- started again at
+    zero, so a run capped at three tickets could file six."""
+    calls, behaviour = fake_agents
+    behaviour["MAPPER"] = {"publish_map": True}
+    behaviour["API"] = {"emit": 3, "severity": Severity.BLOCKER}
+    behaviour["TRIAGE"] = {"hook": _files_tickets}
+    capped = cfg.model_copy(update={
+        "thresholds": cfg.thresholds.model_copy(update={"max_tickets_per_run": 2}),
+    })
+
+    first = await make_conductor(capped, tmp_path).run("full-loop")
+    store = RunStore(first.run_id, root=tmp_path, create=False)
+    for n, envelope in enumerate(e for e in store.envelopes() if e.jira.key):
+        store.log("ticket", agent="TRIAGE", action="created", key=envelope.jira.key)
+        if n == 1:
+            break  # two created -- the cap
+    for envelope in store.envelopes():  # one left unfiled, as the cap leaves it
+        if envelope.jira.key and envelope.jira.key.endswith("3"):
+            envelope.jira.key = None
+            store.put_envelope(envelope)
+    assert "SYNTHESIZER" in {n for n, _ in calls}
+
+    calls.clear()
+    await make_conductor(capped, tmp_path).run("full-loop", run_id=first.run_id)
+    ran = [n for n, _ in calls]
+    assert "SYNTHESIZER" not in ran
+    assert "TRIAGE" not in ran
+    assert any("ticket cap reached in this run (2/2)" in e.detail.get("reason", "")
+               for e in store.ledger("skipped"))
+
+
+def test_run_caps_are_read_back_from_disk_by_a_new_process(tmp_path):
+    store = RunStore.new(tmp_path)
+    store.log("ticket", agent="TRIAGE", action="created", key="P-1")
+    store.log("ticket", agent="TRIAGE", action="transitioned", key="P-1")
+    store.log("ticket", agent="TRIAGE", action="created", key="P-2")
+    resumed = RunStore(store.run_id, root=tmp_path, create=False)
+    assert resumed.counters("TRIAGE") == {"tickets": 2}
+    assert resumed.counters("API") == {}

@@ -36,7 +36,7 @@ KIND_STYLE = {
     "denial": "yellow", "stop_blocked": "yellow", "contract_unmet": "yellow",
     "skipped": "dim", "tool_call": "dim", "dry_run": "dim",
     "escalation": "red", "agent_error": "red", "tool_error": "red",
-    "quota_exhausted": "yellow",
+    "quota_exhausted": "yellow", "quota_wait": "yellow",
     "regression": "red", "reopened": "red",
     "envelope": "magenta", "reproduction": "magenta", "ticket": "magenta",
     "verdict": "green", "verified": "green", "review": "green",
@@ -828,6 +828,16 @@ def doctor(
         console.print(f"[dim]{profile.description.strip()}[/dim]")
 
     caps = profile.capabilities()
+    # The one capability that is this machine's rather than the target's, and
+    # the one a run now checks before dispatching BROWSER and GUIDE -- so doctor
+    # asks the same question the same way (`browser.status`).
+    from qaas import browser
+
+    browser_line = None
+    if caps.get("live_ui") and browser.needed_by(cfg):
+        installed, browser_line = browser.status(cfg)
+        if installed is not None:
+            caps["browser"] = installed
     table = Table(header_style="bold")
     table.add_column("capability")
     table.add_column("", justify="center")
@@ -840,6 +850,7 @@ def doctor(
         "reset_state": "seed and reset between checks",
         "impersonate": "act as different roles",
         "scored": "measure recall against a golden ledger",
+        "browser": "a browser the Playwright server can launch",
     }
     for cap, ok in caps.items():
         table.add_row(cap, "[green]yes[/green]" if ok else "[dim]no[/dim]", meanings[cap])
@@ -880,6 +891,9 @@ def doctor(
     line, fatal = _sandbox_line(cfg)
     if line:
         console.print(f"\n[{'red' if fatal else 'dim'}]{_plain(line)}[/]")
+    if browser_line:
+        missing = caps.get("browser") is False
+        console.print(f"[{'yellow' if missing else 'dim'}]browser: {_plain(browser_line)}[/]")
 
     problems = profile.readiness()
     if problems:
@@ -914,6 +928,16 @@ def _write_paths_that_exist(spec, target_root: Path) -> tuple[list[str], list[st
         else:
             missing.append(pattern)
     return present, missing
+
+
+def _local_time(iso: str | None) -> str:
+    """`2026-09-24T19:51:00+00:00` as this machine's wall-clock time."""
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(iso)).astimezone().strftime("%H:%M %Z")
+    except (TypeError, ValueError):
+        return str(iso)
 
 
 def _agent_usable(spec, caps: dict[str, bool]) -> bool:
@@ -2451,6 +2475,11 @@ def run(
             )
         elif kind == "stopped":
             console.print(f"[yellow]stopped: {_plain(detail.get('reason'))}[/yellow]")
+        elif kind == "quota_wait":
+            console.print(
+                f"[yellow]{detail.get('agent')} hit the provider's limit; waiting until "
+                f"{_local_time(detail.get('until'))}, then retrying it[/yellow]"
+            )
 
     router = Router(cfg, root=root, on_event=on_event, tickets=tickets)
     report = asyncio.run(router.run(mode, run_id=run_id))

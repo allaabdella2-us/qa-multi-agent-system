@@ -24,6 +24,7 @@ from typing import Any, Iterable, Mapping
 from qaas import trace
 from qaas.config import AgentSpec
 from qaas.envelope import DefectEnvelope, Severity
+from qaas.quota import is_quota_error
 from qaas.store import DEFAULT_ROOT, LedgerEntry, LedgerKind, RunStore, list_runs
 
 #: The router's phases, in the order `Router.run` calls them (`router.py:233-242`).
@@ -50,7 +51,11 @@ _NAME_PHASE = {"REPRODUCER": "reproduce", "TRIAGE": "file"}
 #: agent to it -- so a run that stopped early with one agent finished and one
 #: never started fell through to `active` and the phase pulsed forever on a run
 #: that had been over for an hour.
-_TERMINAL = ("done", "failed", "skipped", "never_ran")
+_TERMINAL = ("done", "failed", "skipped", "never_ran", "rate_limited", "interrupted")
+
+#: Statuses that belong to a process. A new `run_started` means that process is
+#: gone, so a card still showing one of these is showing something that stopped.
+_IN_FLIGHT = ("running", "waiting")
 
 
 def phase_of(agent: str, layer: str | None) -> str | None:
@@ -130,7 +135,11 @@ class AgentView:
     name: str
     layer: str | None = None
     model: str | None = None
-    status: str = "queued"  # queued | running | done | failed | skipped
+    #: queued | running | waiting | done | failed | rate_limited | interrupted
+    #: | skipped | never_ran. `waiting` is a provider limit being waited out;
+    #: `rate_limited` is a run that stopped on one -- neither is this agent
+    #: failing, and neither is drawn as if it were.
+    status: str = "queued"
     invocations: int = 0
     turns: int = 0
     cost_usd: float = 0.0
@@ -142,7 +151,13 @@ class AgentView:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
-    reason: str | None = None  # why it was skipped
+    reason: str | None = None  # why it was skipped, or is waiting
+    #: When a provider limit this agent is waiting on lifts.
+    waiting_until: datetime | None = None
+    #: How the last invocation that *finished* ended. REPRODUCER runs once per
+    #: finding and a resume can outlive a killed one; the card falls back to
+    #: this rather than to "running" forever.
+    settled: str | None = None
 
     @property
     def phase(self) -> str | None:
@@ -167,6 +182,7 @@ class AgentView:
             "finished_at": _iso(self.finished_at),
             "error": self.error,
             "reason": self.reason,
+            "waiting_until": _iso(self.waiting_until),
         }
 
 
@@ -364,7 +380,7 @@ class RunView:
             members = [a for a in self.agents.values() if a.phase == phase]
             if not members:
                 out[phase] = "absent"
-            elif any(a.status == "running" for a in members):
+            elif any(a.status in _IN_FLIGHT for a in members):
                 out[phase] = "active"
             elif any(a.status in _TERMINAL for a in members):
                 out[phase] = "done" if all(a.status in _TERMINAL for a in members) else "active"
@@ -450,6 +466,13 @@ class RunView:
             self.target_sha = detail.get("target_sha")
             self.target_dirty = detail.get("target_dirty")
             self.target_branch = detail.get("target_branch")
+            # The process that was running these is gone -- a resume starts a
+            # new one. A SYNTHESIZER killed mid-dispatch showed "running" for
+            # ever after, beside a run that had finished.
+            for view in self.agents.values():
+                if view.status in _IN_FLIGHT:
+                    view.status = view.settled or "queued"
+                    view.waiting_until = None
             for name in self.roster:
                 view = self._agent(name)
                 # A resume re-rosters agents the previous session marked as
@@ -467,6 +490,9 @@ class RunView:
                 # without dispatching it -- usually a wall-clock or budget stop.
                 if view.status == "queued":
                     view.status = "never_ran"
+                elif view.status in _IN_FLIGHT:
+                    view.status = view.settled or "interrupted"
+                    view.waiting_until = None
 
         elif kind == LedgerKind.AGENT_STARTED and agent:
             view = self._agent(agent)
@@ -477,18 +503,56 @@ class RunView:
 
         elif kind == LedgerKind.AGENT_FINISHED and agent:
             view = self._agent(agent)
-            view.status = "failed" if detail.get("error") else "done"
+            error = detail.get("error")
+            if error and is_quota_error(error):
+                # The provider stopped serving; the agent did nothing wrong.
+                # Red "failed" was drawn over a REPRODUCER that the resume then
+                # ran to completion.
+                view.status = "rate_limited"
+                view.reason = "stopped by the provider's usage limit"
+            elif error:
+                view.status = "failed"
+                view.error = error
+            else:
+                # The latest outcome is the card's: an earlier invocation's
+                # error stays in the ledger, not on a box that has since succeeded.
+                view.status = "done"
+                view.error = None
+                view.reason = None
+            view.settled = view.status
+            view.waiting_until = None
             view.finished_at = entry.at
             view.cost_usd += float(detail.get("cost_usd") or 0.0)
             view.turns += int(detail.get("num_turns") or 0)
-            view.error = detail.get("error") or view.error
             if view.started_at:
                 view.duration_s = (entry.at - view.started_at).total_seconds()
 
         elif kind == LedgerKind.AGENT_ERROR and agent:
             view = self._agent(agent)
-            view.status = "failed"
-            view.error = detail.get("error")
+            if is_quota_error(detail.get("error")):
+                view.status = "rate_limited"
+                view.reason = "stopped by the provider's usage limit"
+            else:
+                view.status = "failed"
+                view.error = detail.get("error")
+
+        elif kind == LedgerKind.QUOTA_WAIT and agent:
+            view = self._agent(agent)
+            view.status = "waiting"
+            view.error = None
+            try:
+                view.waiting_until = datetime.fromisoformat(str(detail.get("until")))
+            except ValueError:
+                view.waiting_until = None
+            view.reason = "waiting for the provider's usage limit to reset"
+
+        elif kind == LedgerKind.QUOTA_EXHAUSTED:
+            # Names the agent it stopped on as "AGENT: error".
+            name = str(detail.get("reason") or "").split(":", 1)[0].strip()
+            if name in self.agents and detail.get("resume"):
+                self.agents[name].reason = (
+                    f"stopped by the provider's usage limit -- resume: {detail['resume']}"
+                )
 
         elif kind == LedgerKind.TOOL_CALL and agent:
             view = self._agent(agent)

@@ -15,6 +15,7 @@ the code location, and the words — with fixed weights.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -92,6 +93,8 @@ CREATE TABLE IF NOT EXISTS {name} (
     resolved_at         TEXT,
     resolved_ticket_key TEXT,
     target              TEXT NOT NULL DEFAULT '',
+    resolved_branch     TEXT,
+    resolved_commit     TEXT,
     PRIMARY KEY (target, fingerprint)
 )"""
 
@@ -138,7 +141,15 @@ _MIGRATIONS = {
     # PROJ-N, do not file again", persisting that suppression into every future
     # run. `''` means "recorded before this column existed" and stays visible, so
     # no existing memory is orphaned.
-    "defects": [("target", "TEXT NOT NULL DEFAULT ''")],
+    "defects": [
+        ("target", "TEXT NOT NULL DEFAULT ''"),
+        # Where a VERIFIED fix lives. Resolved used to mean "a VERIFIER passed
+        # it", on a branch no human had merged yet, so the next run against the
+        # unchanged main branch filed the same open defect as a REGRESSION.
+        # `record` asks git whether this commit is in the code under test.
+        ("resolved_branch", "TEXT"),
+        ("resolved_commit", "TEXT"),
+    ],
 }
 
 #: Primary keys changed after release, and the table each is declared by.
@@ -360,6 +371,19 @@ def _backup(conn: sqlite3.Connection) -> Path | None:
 # An agent can read these through `search_similar` and cannot write them at all.
 
 
+def _fix_landed(target_root: Path | str | None, commit: str, branch: str | None) -> bool | None:
+    """`LocalGit.landed`, never raising: an unreadable repository is "cannot
+    tell", which leaves the recurrence a regression, as it always was."""
+    if target_root is None:
+        return None
+    try:
+        from qaas.adapters.vcs import LocalGit
+
+        return LocalGit(target_root).landed(commit, branch)
+    except Exception:  # noqa: BLE001 - VcsError, OSError, a bad ref: all "cannot tell"
+        return None
+
+
 def resolve(
     root: Path | str,
     fingerprint: str,
@@ -367,6 +391,8 @@ def resolve(
     run_id: str,
     *,
     target: str = "",
+    branch: str | None = None,
+    commit: str | None = None,
 ) -> bool:
     """Mark a defect fixed in `target`'s memory. Returns whether that target
     knew anything by that fingerprint.
@@ -377,13 +403,18 @@ def resolve(
     its own open defect was announced as "REGRESSION of <the first project's
     ticket>". A legacy `''` row is not touched from a named target: it may be
     another project's, and `record` no longer lets it speak for this one.
+
+    `branch` and `commit` are where the verified fix is. Without them a
+    recurrence is always a regression, which is right only once the fix is in
+    the code being tested -- see `LocalGit.landed`.
     """
     conn = connect(root)
     try:
         cursor = conn.execute(
             "UPDATE defects SET resolved_at = ?, resolved_ticket_key = COALESCE(?, ticket_key), "
+            "resolved_branch = ?, resolved_commit = ?, "
             "last_run_id = ? WHERE target = ? AND fingerprint = ?",
-            (_utcnow_iso(), ticket_key, run_id, target or "", fingerprint),
+            (_utcnow_iso(), ticket_key, branch, commit, run_id, target or "", fingerprint),
         )
         conn.commit()
         return cursor.rowcount > 0
@@ -555,6 +586,7 @@ def _row_view(
         "first_seen": row["first_seen"],
         "last_seen": row["last_seen"],
         "resolved": row["resolved_at"] is not None,
+        "resolved_branch": row["resolved_branch"],
         "location": {
             "service": row["service"],
             "endpoint": row["endpoint"],
@@ -681,7 +713,17 @@ def build_tools(ctx: ToolContext) -> list:
                 # Not "a recurrence is a regression" for a legacy row: `record`
                 # will not call it one, because the fix may have been another
                 # project's.
-                line += "  [RESOLVED]" if c["legacy"] else "  [RESOLVED — a recurrence is a regression]"
+                if c["legacy"]:
+                    line += "  [RESOLVED]"
+                elif c["resolved_branch"]:
+                    # Verified on a branch; whether it is merged is `record`'s
+                    # question, answered by git when the defect is seen again.
+                    line += (
+                        f"  [FIX VERIFIED on {c['resolved_branch']} — a recurrence is a "
+                        "regression only once that fix is in the code under test]"
+                    )
+                else:
+                    line += "  [RESOLVED — a recurrence is a regression]"
             if c["legacy"]:
                 line += f"\n      ({_LEGACY_NOTE}; check the ticket is this repository's before using it)"
             if c["last_outcome"]:
@@ -835,18 +877,51 @@ def build_tools(ctx: ToolContext) -> list:
 
             was_resolved = row["resolved_at"] is not None
             count = row["occurrence_count"] + 1
-            # resolved_at is cleared unconditionally: a defect that is back is
-            # open again, whatever the tracker still says.
+            # A fix VERIFIED on a branch nobody has merged is not in the code
+            # this run tested, so seeing the defect here is not a regression --
+            # it is the same open defect, with its fix waiting for a human.
+            unmerged = None
+            if was_resolved and row["resolved_commit"]:
+                landed = await asyncio.to_thread(
+                    _fix_landed, ctx.target_root, row["resolved_commit"], row["resolved_branch"]
+                )
+                if landed is False:
+                    unmerged = row["resolved_branch"]
+            # Otherwise resolved_at is cleared: a defect that is back is open
+            # again, whatever the tracker still says.
             conn.execute(
                 "UPDATE defects SET occurrence_count = ?, last_seen = ?, last_run_id = ?, "
-                "ticket_key = COALESCE(?, ticket_key), resolved_at = NULL "
-                "WHERE target = ? AND fingerprint = ?",
+                "ticket_key = COALESCE(?, ticket_key)"
+                + ("" if unmerged else ", resolved_at = NULL")
+                + " WHERE target = ? AND fingerprint = ?",
                 (count, now, ctx.store.run_id, ticket_key, target, fp),
             )
             conn.commit()
             known_ticket = ticket_key or row["ticket_key"]
         finally:
             conn.close()
+
+        if unmerged:
+            fixed_under = row["resolved_ticket_key"] or known_ticket or "its ticket"
+            ctx.store.log(
+                "defect_memory", agent=ctx.agent.name, action="fix_unmerged",
+                fingerprint=fp, envelope_id=envelope.id, ticket_key=fixed_under,
+                branch=unmerged, commit=row["resolved_commit"], occurrence_count=count,
+            )
+            return ok(
+                f"Known defect, NOT a regression: occurrence {count} of fingerprint {fp}, "
+                f"tracked as {fixed_under}. A fix was verified on branch {unmerged} "
+                f"(commit {row['resolved_commit'][:12]}) and is not in the code under "
+                "test -- it has not been merged. Do not file it again or call it a "
+                f"regression; add this sighting to {fixed_under} if it adds evidence.",
+                fingerprint=fp,
+                occurrence_count=count,
+                ticket_key=fixed_under,
+                regression=False,
+                fix_unmerged=True,
+                fix_branch=unmerged,
+                first_time=False,
+            )
 
         if was_resolved:
             closed_under = row["resolved_ticket_key"] or row["ticket_key"] or "an earlier ticket"
@@ -967,6 +1042,7 @@ def build_tools(ctx: ToolContext) -> list:
             resolved_under = ticket_key or row["ticket_key"]
             conn.execute(
                 "UPDATE defects SET resolved_at = ?, resolved_ticket_key = ?, "
+                "resolved_branch = NULL, resolved_commit = NULL, "
                 "ticket_key = COALESCE(?, ticket_key) WHERE target = ? AND fingerprint = ?",
                 (now, resolved_under, ticket_key, target, fp),
             )

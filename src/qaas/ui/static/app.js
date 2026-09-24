@@ -104,7 +104,8 @@ function renderCounters(v) {
 
 /* ---------- agent grid ---------- */
 
-const ORDER = { running: 0, done: 1, failed: 2, queued: 3, never_ran: 4, skipped: 5 };
+const ORDER = { running: 0, waiting: 0, done: 1, failed: 2, rate_limited: 2,
+                interrupted: 3, queued: 3, never_ran: 4, skipped: 5 };
 
 /* The roster's own layers, in the order the router walks them (router.py's
  * phase pipeline). Grouping by layer rather than sorting a flat grid is what
@@ -115,6 +116,9 @@ const ORDER = { running: 0, done: 1, failed: 2, queued: 3, never_ran: 4, skipped
 const LAYERS = [
   ["control",     "understand the system", "i-l-map"],
   ["discovery",   "find what's wrong",     "i-l-find"],
+  // SYNTHESIZER's layer was missing here, so it was drawn under "not in this
+  // roster" in every run that had it.
+  ["synthesis",   "join what belongs together", "i-l-join"],
   ["triage",      "prove and prioritise",  "i-l-triage"],
   ["remediation", "fix, review and verify","i-l-fix"],
   ["reporting",   "share the results",     "i-l-report"],
@@ -129,11 +133,19 @@ const LAYERS = [
 function agentCard(a) {
   const label = { running: `turn ${a.turns || "—"}`, done: "done",
                   failed: "failed", skipped: "skipped", queued: "queued",
-                  never_ran: "never ran" }[a.status];
-  const note = a.error ? `<div class="err" title="${esc(a.error)}">${esc(a.error)}</div>`
+                  never_ran: "never ran", waiting: "waiting",
+                  rate_limited: "rate-limited", interrupted: "interrupted" }[a.status];
+  // A provider limit is a pause, not this agent failing: amber, with when it
+  // lifts, and never the raw error in red.
+  const resumes = a.waiting_until
+    ? new Date(a.waiting_until).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : null;
+  const note = a.status === "waiting"
+      ? `<div class="why" title="${esc(a.reason || "")}">limit resets · retrying at ${esc(resumes || "—")}</div>`
+    : a.error ? `<div class="err" title="${esc(a.error)}">${esc(a.error)}</div>`
     : a.status === "running" && a.last_tool
       ? `<div class="tool">▸ ${esc(a.last_tool)}</div>`
-    : a.status === "skipped" && a.reason
+    : ["skipped", "rate_limited", "interrupted"].includes(a.status) && a.reason
       ? `<div class="why" title="${esc(a.reason)}">${esc(a.reason)}</div>`
     : "";
   return `<div class="card" data-status="${a.status}" data-agent="${esc(a.name)}"

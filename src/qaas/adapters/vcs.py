@@ -163,7 +163,7 @@ class LocalGit(VcsAdapter):
             )
         self._verified_root = True
 
-    def _git(self, *args: str, check: bool = True) -> str:
+    def _proc(self, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess:
         # Reads are fine anywhere; anything that could *change* a repository has
         # to prove it is changing the right one.
         if args and args[0] in _MUTATING_GIT:
@@ -172,14 +172,15 @@ class LocalGit(VcsAdapter):
             # `errors="replace"`: a Latin-1 source file in a diff, or one such
             # byte in a commit message, made strict decoding raise out of the
             # tool and lose the whole result.
-            proc = subprocess.run(
+            return subprocess.run(
                 ["git", *args],
                 cwd=self.repo,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                stdin=subprocess.DEVNULL,
+                input=input_text,
+                stdin=None if input_text is not None else subprocess.DEVNULL,
                 env=_NO_PROMPT_ENV(),
                 timeout=self.timeout_s,
                 check=False,
@@ -188,6 +189,9 @@ class LocalGit(VcsAdapter):
             raise VcsError(f"git {' '.join(args)} timed out after {self.timeout_s}s") from exc
         except OSError as exc:  # git missing, repo path gone
             raise VcsError(f"could not run git: {exc}") from exc
+
+    def _git(self, *args: str, check: bool = True) -> str:
+        proc = self._proc(*args)
         if check and proc.returncode != 0:
             detail = (proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}"
             raise VcsError(f"git {' '.join(args)} failed: {detail}")
@@ -324,6 +328,56 @@ class LocalGit(VcsAdapter):
     def list_branches(self) -> list[str]:
         out = self._git("for-each-ref", "--format=%(refname:short)", "refs/heads")
         return [line.strip() for line in out.splitlines() if line.strip()]
+
+    def rev(self, ref: str) -> str | None:
+        """The commit `ref` names, or None if there is no such commit."""
+        out = self._git(
+            "rev-parse", "--verify", "--quiet", f"{_reject_ref('ref', ref)}^{{commit}}", check=False
+        )
+        return out.strip() or None
+
+    def landed(self, commit: str, branch: str | None = None, head: str = "HEAD") -> bool | None:
+        """Whether the change `commit` carries is in `head`. None when that cannot be told.
+
+        For the regression loop. VERIFIED means a fix works *on its branch*, and
+        until a human merges it (§8.4) the code under test still has the defect
+        -- so the next run finding it there is the same open defect, not a
+        regression. Called one, it was filed as a new REGRESSION ticket linked
+        to a ticket whose fix had never left its branch.
+
+        Merged is read the three ways a merge button offers: an ancestor (merge
+        commit, fast-forward), every commit patch-equivalent (rebase), or the
+        branch's whole diff equal to one commit's (squash). False only when none
+        of those holds *and* `branch` still exists. A deleted branch or a missing
+        commit is None, not False, because deleting the branch is what merging a
+        pull request usually does -- and a false "not merged" suppresses a real
+        regression, which is the worse mistake.
+        """
+        sha = self.rev(commit)
+        if sha is None:
+            return None
+        if self._proc("merge-base", "--is-ancestor", sha, head).returncode == 0:
+            return True
+        cherry = [line.split()[0] for line in self._git("cherry", head, sha, check=False).splitlines() if line.strip()]
+        if cherry and all(mark == "-" for mark in cherry):
+            return True
+        base = self._git("merge-base", head, sha, check=False).strip()
+        if base:
+            whole = self._patch_ids(self._git("diff", base, sha, check=False))
+            merged = self._patch_ids(
+                self._git("log", "-p", "--no-merges", "--format=commit %H", f"{base}..{head}", check=False)
+            )
+            if whole and whole <= merged:
+                return True
+        if branch and self._proc("rev-parse", "--verify", "--quiet", f"refs/heads/{_reject_ref('branch', branch)}").returncode == 0:
+            return False
+        return None
+
+    def _patch_ids(self, patch: str) -> set[str]:
+        if not patch.strip():
+            return set()
+        out = self._proc("patch-id", "--stable", input_text=patch).stdout
+        return {line.split()[0] for line in out.splitlines() if line.strip()}
 
 
 # Branches an agent may never publish or use as a PR head. Enforced in the

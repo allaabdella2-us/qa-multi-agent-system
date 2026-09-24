@@ -29,6 +29,7 @@ import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -39,7 +40,7 @@ from qaas.mcp import defect_memory
 from qaas.mcp.context import ToolContext
 from qaas.runner import RunOutcome, run_agent
 from qaas.store import AgentResult, HumanDecision, RunStore, SystemMapStore
-from qaas import tasks
+from qaas import browser, tasks
 from qaas.guardrails import DIFF_BUDGET_REFUSAL
 
 
@@ -59,37 +60,21 @@ class QuotaExhausted(RuntimeError):
     """
 
 
-#: What a provider's refusal-to-serve looks like in the error text that reaches
-#: us. Matched case-blind against whatever the SDK surfaced -- `ResultError:
-#: ... You've hit your session limit · resets 4:20pm` is the shape that cost the
-#: run this exists for. Deliberately a small list of phrases rather than a regex
-#: over status codes: the text is what every layer (SDK exception, result
-#: subtype, CLI stderr) has in common, and a marker that is merely absent costs
-#: one agent, while a marker that is too eager would stop a healthy run.
-#:
-#: A bare "429" was tried here and removed: `_dispatch`'s own timeout error
-#: reads `exceeded the run's remaining wall clock (429s)`, so a run could stop
-#: itself on quota because of how many seconds were left on its clock.
-QUOTA_MARKERS = (
-    "session limit",
-    "rate limit",
-    "usage limit",
-    "quota",
-    "too many requests",
-)
+# Re-exported: `router.is_quota_error` is what `cli._quota_preflight` and the
+# tests have always imported. The phrases live in `qaas.quota` so the
+# dashboard's read model can use them without importing the router.
+from qaas.quota import QUOTA_MARKERS, is_quota_error, reset_at as quota_reset_at  # noqa: E402,F401
 
-
-def is_quota_error(text: str | None) -> bool:
-    """Is this error the provider declining to serve, rather than a defect?
-
-    One implementation, two callers: `_dispatch` reads an agent's error text and
-    `cli._quota_preflight` reads the probe's output. They were about to be two
-    lists of the same phrases, which is the shape of a rule that drifts.
-    """
-    if not text:
-        return False
-    lowered = str(text).lower()
-    return any(marker in lowered for marker in QUOTA_MARKERS)
+#: Past the reset time the provider names, before the retry. Clocks disagree by
+#: a few seconds and a limit lifts on its own schedule; retrying on the minute
+#: bought a second refusal.
+QUOTA_RESET_MARGIN_S = 60
+#: Clock the run must still have *after* the reset for waiting to be worth it.
+#: Waiting four hours to be left with thirty seconds is a stop with extra steps.
+QUOTA_MIN_WORK_AFTER_S = 600
+#: Waits per dispatch. A limit that is still in force after its own stated
+#: reset is not going to be fixed by believing it a third time.
+QUOTA_MAX_WAITS = 2
 
 
 def target_revision(root: Path | str | None) -> dict[str, Any]:
@@ -250,6 +235,26 @@ def _human_answer(store, ticket_key: str) -> HumanAnswer | None:
             author=str(entry.detail.get("author") or ""),
         )
     return found
+
+
+def _awaiting_human(store) -> set[str]:
+    """Tickets this run escalated that no human has answered since.
+
+    Paired by position, which is what append-only buys and what `qaas
+    escalations` does: an escalation after the last answer is waiting again.
+    One marked `retry` -- an agent that crashed or recorded nothing -- is not a
+    question for anyone, and leaves the ticket as work.
+    """
+    last: dict[str, bool] = {}
+    for entry in store.ledger():
+        ticket = entry.detail.get("ticket_key")
+        if not ticket:
+            continue
+        if entry.kind == "escalation":
+            last[ticket] = not entry.detail.get("retry")
+        elif entry.kind == "human_decision":
+            last[ticket] = False
+    return {ticket for ticket, waiting in last.items() if waiting}
 
 
 def _human_guidance(answer: HumanAnswer | None) -> str:
@@ -417,6 +422,11 @@ class Router:
         self.tickets = set(tickets) if tickets else None
         #: The ref this run started on -- see `_run_base`. Set by `run()`.
         self._base_ref: str | None = None
+        #: When the provider said its limit lifts. Every dispatch waits for it,
+        #: so a queued agent is not sent into a wall another has just found.
+        self._quota_until: datetime | None = None
+        #: Injectable so the suite can wait out a limit without the clock.
+        self._sleep: Callable[[float], Any] = asyncio.sleep
 
     def _target_root(self) -> Path | None:
         """The checkout under examination, or None when nothing is configured.
@@ -613,6 +623,28 @@ class Router:
             return None
         return ref if proc.returncode == 0 else None
 
+    def _commit_of(self, ref: str | None) -> str | None:
+        """The commit `ref` names in the target, or None. Never raises."""
+        if not ref or self.target_root is None:
+            return None
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(self.target_root), "rev-parse", "--verify", "--quiet",
+                 f"{ref}^{{commit}}"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout.strip() or None
+
+    def _quota_pause(self, error: str | None, budget, reserve: bool) -> tuple[datetime, float] | None:
+        return _quota_pause_for(
+            error,
+            now=datetime.now(timezone.utc),
+            seconds_left=budget.seconds_left(reserve=reserve),
+            max_wait=self.config.thresholds.quota_wait_max_s,
+        )
+
     def _stopped(self, report: RunReport, store: RunStore, note: str) -> None:
         """A phase ended the run's work early. Recorded once, in one place."""
         report.stopped_early = note
@@ -693,6 +725,8 @@ class Router:
             verdicts = [e for e in store.ledger("verdict")]
             reviews = [e for e in store.ledger("review")]
             envelopes = store.envelopes()
+            # The last `verified` line per ticket names where the fix is.
+            verified_on = {e.detail.get("ticket_key"): e.detail for e in store.ledger("verified")}
         except OSError:
             return
 
@@ -733,9 +767,10 @@ class Router:
                     # fingerprint), and an unscoped resolve marked only the
                     # pre-target `''` partition, so the regression loop never
                     # fired for a named target.
+                    where = verified_on.get(envelope.jira.key) or {}
                     defect_memory.resolve(
                         self.root, envelope.fingerprint(), envelope.jira.key, store.run_id,
-                        target=target,
+                        target=target, branch=where.get("branch"), commit=where.get("commit"),
                     )
                 except (sqlite3.Error, OSError):
                     pass
@@ -811,16 +846,32 @@ class Router:
         profile = getattr(self.config, "profile", None)
         if profile is not None:
             caps = profile.capabilities()
+            reason = "target cannot support these agents"
+            browsing = [s for s in discovery if "playwright" in s.mcp_servers]
+            if browsing and caps.get("live_ui"):
+                # The one capability that belongs to this machine rather than
+                # to the target. Without it BROWSER and GUIDE were dispatched
+                # into a server that could not launch, and paid for the lesson.
+                installed, why = await asyncio.to_thread(browser.status, self.config)
+                caps["browser"] = installed is not False
+                if installed is False:
+                    reason = why
+                    report.escalations.append(
+                        f"{', '.join(s.name for s in browsing)} not dispatched: {why}"
+                    )
             unusable = [s for s in discovery if not agent_usable(s.name, caps)]
             if unusable:
                 discovery = [s for s in discovery if s not in unusable]
                 store.log(
                     "skipped",
-                    reason="target cannot support these agents",
+                    reason=reason,
                     agents=[s.name for s in unusable],
                 )
                 for spec in unusable:
-                    self._emit("skipped", agent=spec.name, reason="target lacks the capability")
+                    self._emit(
+                        "skipped", agent=spec.name,
+                        reason=reason if caps.get("browser") is False else "target lacks the capability",
+                    )
 
         # Agents that already did their work in this run are not asked again.
         #
@@ -892,6 +943,17 @@ class Router:
         prompt and a YAML and no Python.
         """
         synthesis = [s for s in specs.values() if s.layer == "synthesis"]
+        # Resumed: a join already made is not made again. `_phase_map` and
+        # `_phase_discover` learned this and this phase had not, so a resume
+        # re-read all forty findings at full price and could emit the same
+        # composite twice.
+        done = self._succeeded_agents(store)
+        if any(s.name in done for s in synthesis):
+            store.log(
+                "skipped", reason="already synthesised in this run",
+                agents=sorted(s.name for s in synthesis if s.name in done),
+            )
+            synthesis = [s for s in synthesis if s.name not in done]
         if not synthesis:
             return
         # Nothing to join. One finding is not a conjunction, and dispatching a
@@ -1079,6 +1141,17 @@ class Router:
             return
         budget.check()
         cap = min(spec.policy.max_tickets_per_run, self.config.thresholds.max_tickets_per_run)
+        # On a resume, the cap this run has already used. `create_issue` would
+        # refuse every call; dispatching TRIAGE to be told so is a bill for
+        # nothing.
+        filed = store.counters(spec.name).get("tickets", 0)
+        if filed >= cap:
+            store.log(
+                "skipped", agent=spec.name,
+                reason=f"ticket cap reached in this run ({filed}/{cap}); "
+                       f"{len(fileable)} fileable finding(s) left unfiled",
+            )
+            return
         await self._dispatch(spec, store, budget, report, tasks.triage(self.config, cap), map_version)
 
     async def _phase_verify(self, specs, store, budget, report, map_version) -> None:
@@ -1115,6 +1188,24 @@ class Router:
                     reason=f"{len(done)} ticket(s) already verified in this run",
                     tickets=sorted(e.jira.key for e in done),
                 )
+
+        # Nor is one this run already handed to a human who has not answered.
+        # A resume after a quota stop re-verified a REGRESSED fix that nothing
+        # had changed, reached the same verdict and escalated it a second time
+        # -- the retry that carries nothing forward, paid for. Named with
+        # `--ticket`, it runs: that is a person asking.
+        waiting = _awaiting_human(store) - set(self.tickets or ())
+        parked = [e for e in pending if e.jira.key in waiting]
+        if parked:
+            pending = [e for e in pending if e not in parked]
+            store.log(
+                "skipped", agent="VERIFIER",
+                reason=(
+                    f"{len(parked)} ticket(s) escalated in this run and not yet answered; "
+                    "`qaas answer <TICKET> --decision proceed --note ...` to resume one"
+                ),
+                tickets=sorted(e.jira.key for e in parked),
+            )
 
         if self.tickets:
             pending = [e for e in pending if e.jira.key in self.tickets]
@@ -1248,10 +1339,18 @@ class Router:
             if verdict is None:
                 self._escalate(report, store, "VERIFIER",
                     f"{ticket}: VERIFIER returned no verdict; the ticket stays in review",
-                    ticket_key=ticket)
+                    ticket_key=ticket, retry=True)
                 return
             if verdict == "VERIFIED":
-                store.log("verified", agent="VERIFIER", ticket_key=ticket, reopens=reopens)
+                # Where, exactly: the fix is verified on this branch at this
+                # commit and nowhere else until a human merges it, and
+                # `_record_outcomes` hands both to the memory so a later run on
+                # the unmerged main branch is not told the defect "came back".
+                verified_on = fix_branch or repro_branch
+                store.log(
+                    "verified", agent="VERIFIER", ticket_key=ticket, reopens=reopens,
+                    branch=verified_on, commit=self._commit_of(verified_on),
+                )
                 return
             if verdict == "REGRESSED":
                 self._escalate(report, store, "VERIFIER",
@@ -1377,7 +1476,7 @@ class Router:
             if entry is None:
                 self._escalate(report, store, "REVIEWER",
                     f"{ticket}: REVIEWER recorded no decision; the fix stays unreviewed",
-                    ticket_key=ticket)
+                    ticket_key=ticket, retry=True)
                 return False
             feedback = _join(guidance, _review_feedback(entry, observed))
             store.log("review_round_trip", agent="REVIEWER", ticket_key=ticket, trip=trip)
@@ -1540,7 +1639,8 @@ class Router:
         return entries[-1] if entries else None
 
     def _escalate(
-        self, report, store, agent: str, note: str, *, ticket_key: str | None = None
+        self, report, store, agent: str, note: str, *, ticket_key: str | None = None,
+        retry: bool = False,
     ) -> None:
         """Record that this needs a human, and say which ticket if there is one.
 
@@ -1550,6 +1650,9 @@ class Router:
         and the reader still does that for the ledgers already on disk. Prose is
         not a field, though: the moment one of these notes is reworded the
         parser stops finding tickets and the queue quietly empties.
+
+        `retry` marks an agent that failed to answer rather than a question for
+        a person: a resume attempts that ticket again instead of parking it.
         """
         report.escalations.append(note)
         # Written only when there is one: `ticket_key: null` on every fan-out
@@ -1557,6 +1660,8 @@ class Router:
         detail = {"reason": note}
         if ticket_key:
             detail["ticket_key"] = ticket_key
+        if retry:
+            detail["retry"] = True
         store.log("escalation", agent=agent, **detail)
         self._emit("escalation", agent=agent, reason=note)
 
@@ -1610,7 +1715,14 @@ class Router:
     async def _dispatch(
         self, spec, store, budget, report, task, map_version, *, slots: int = 1,
         scope: str | None = None, base_ref: str | None = None, reserve: bool = False,
+        quota_waits: int = 0,
     ) -> RunOutcome:
+        # Another agent found the provider's limit and learned when it lifts.
+        # Dispatching into it anyway buys a refusal per queued agent.
+        if self._quota_until is not None:
+            ahead = (self._quota_until - datetime.now(timezone.utc)).total_seconds()
+            if ahead > 0:
+                await self._sleep(ahead)
         ctx = self._context(store, spec, map_version, scope)
         ctx.base_ref = base_ref or self._base_ref
         allowance = budget.allowance(spec, slots=slots)
@@ -1672,12 +1784,49 @@ class Router:
             # `run()` writes names the agent in its reason -- one line per fact
             # is the whole point of the change.
             if is_quota_error(outcome.result.error):
+                # A limit that names its reset, inside what is left of this
+                # run's clock, is waited out and the same dispatch retried: a
+                # session limit is a pause, and the run it cost was otherwise
+                # healthy. Anything else stops the run with a resume command.
+                pause = self._quota_pause(outcome.result.error, budget, reserve)
+                if pause is not None and quota_waits < QUOTA_MAX_WAITS:
+                    until, seconds = pause
+                    self._quota_until = until
+                    store.log(
+                        "quota_wait", agent=spec.name, until=until.isoformat(),
+                        seconds=round(seconds), reason=outcome.result.error,
+                    )
+                    self._emit("quota_wait", agent=spec.name, until=until.isoformat(), seconds=seconds)
+                    await self._sleep(seconds)
+                    return await self._dispatch(
+                        spec, store, budget, report, task, map_version, slots=slots,
+                        scope=scope, base_ref=base_ref, reserve=reserve,
+                        quota_waits=quota_waits + 1,
+                    )
                 self._emit("quota_exhausted", agent=spec.name, reason=outcome.result.error)
                 raise QuotaExhausted(f"{spec.name}: {outcome.result.error}")
             note = f"{spec.name} failed: {outcome.result.error or outcome.result.subtype}"
             report.escalations.append(note)
             store.log("escalation", agent=spec.name, reason=note)
         return outcome
+
+
+def _quota_pause_for(
+    error: str | None, *, now: datetime, seconds_left: float, max_wait: float
+) -> tuple[datetime, float] | None:
+    """(when to retry, seconds to wait), or None to stop the run instead.
+
+    None when the error names no reset time, when the wait exceeds
+    `thresholds.quota_wait_max_s`, or when the reset lands too close to the
+    end of the run's own clock for the retry to get any work done.
+    """
+    reset = quota_reset_at(error, now)
+    if reset is None or max_wait <= 0:
+        return None
+    seconds = max(0.0, (reset - now).total_seconds()) + QUOTA_RESET_MARGIN_S
+    if seconds > max_wait or seconds + QUOTA_MIN_WORK_AFTER_S > seconds_left:
+        return None
+    return now + timedelta(seconds=seconds), seconds
 
 
 def build(config_dir: Path | str = "config", root: Path | str = ".qaas") -> Router:

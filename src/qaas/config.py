@@ -186,6 +186,11 @@ class Thresholds(BaseModel):
     flake_runs: int = 5
     max_mender_arbiter_round_trips: int = 2
     max_proof_reopens: int = 1
+    #: Longest a run waits for a provider's session limit to lift before
+    #: retrying the agent it stopped, when the limit says when it lifts and the
+    #: run's own clock outlasts it. 0 never waits: the run stops with a resume
+    #: command, as it always did.
+    quota_wait_max_s: int = 21600
 
 
 class SandboxConfig(BaseModel):

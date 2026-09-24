@@ -189,3 +189,27 @@ def test_validate_fails_when_a_required_sandbox_cannot_start(monkeypatch):
     assert fatal and "required" in line
     line, fatal = cli._sandbox_line(cfg)
     assert not fatal and "unsandboxed" in line
+
+
+async def test_a_second_result_adds_its_turns_and_carries_the_running_cost(cfg, tmp_path, monkeypatch):
+    """A background subagent's completion is another turn with its own result.
+    The last result's `num_turns` alone said 1 for a 94-call REVIEWER."""
+    from claude_agent_sdk import ResultMessage
+
+    from qaas import runner
+
+    def result(turns, cost):
+        return ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+            num_turns=turns, session_id="s", total_cost_usd=cost,
+        )
+
+    async def two_results(**kwargs):
+        yield result(24, 3.9)
+        yield result(1, 4.5)
+
+    monkeypatch.setattr(runner, "query", two_results)
+    ctx = _ctx(cfg, "REVIEWER", tmp_path / "t", tmp_path / ".qaas")
+    outcome = await runner.run_agent(ctx.agent, ctx, "review")
+    assert outcome.result.num_turns == 25
+    assert outcome.result.cost_usd == pytest.approx(4.5)

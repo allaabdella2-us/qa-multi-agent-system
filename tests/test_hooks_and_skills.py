@@ -86,6 +86,17 @@ async def test_blocking_never_loops_forever(wire):
     assert unmet[0].detail["missing"] == ["mcp__envelope__record_reproduction"]
 
 
+async def test_a_contract_met_after_the_block_is_not_reported_unmet(wire):
+    """The block did its job: the agent called the tool, then stopped again."""
+    ctx, record, hooks = wire("REPRODUCER")
+    await fire(hooks, STOP, {"hook_event_name": "Stop", "stop_hook_active": False})
+    record.record("mcp__envelope__record_reproduction")
+
+    second = await fire(hooks, STOP, {"hook_event_name": "Stop", "stop_hook_active": True})
+    assert second.get("decision") != "block"
+    assert not list(ctx.store.ledger("contract_unmet"))
+
+
 async def test_a_discovery_agent_may_legitimately_find_nothing(wire):
     """Requiring an emission would manufacture findings to satisfy the hook."""
     ctx, record, hooks = wire("API")

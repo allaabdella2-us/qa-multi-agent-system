@@ -92,12 +92,19 @@ def _old_memory(root) -> None:
 
 
 def _snapshot(path) -> dict:
-    """Everything that a migration could lose or change, read with plain sqlite3."""
+    """Everything that a migration could lose or change, read with plain sqlite3.
+
+    NULLs are left out, so a column a later migration *adds* (empty on every old
+    row) does not read as a change -- while a value that became NULL still does.
+    """
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     try:
         return {
-            table: sorted(tuple(sorted(dict(r).items())) for r in conn.execute(f"SELECT * FROM {table}"))
+            table: sorted(
+                tuple(sorted((k, v) for k, v in dict(r).items() if v is not None))
+                for r in conn.execute(f"SELECT * FROM {table}")
+            )
             for table in ("defects", "outcomes")
         }
     finally:

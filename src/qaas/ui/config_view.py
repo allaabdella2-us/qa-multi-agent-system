@@ -385,6 +385,10 @@ class ConfigView:
                 "How many times VERIFIER may reopen a ticket before escalating. "
                 "Without it a fix that keeps missing cycles until the budget is "
                 "gone, and the run ends with no verdict and no money left.",
+            "quota_wait_max_s":
+                "Longest a run waits for a provider usage limit that names its "
+                "reset time, then retries the agent it stopped. Costs wall "
+                "clock, not money; 0 stops the run with a resume command instead.",
         }
         rows = []
         for key, value in t.model_dump().items():

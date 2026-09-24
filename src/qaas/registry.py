@@ -68,15 +68,21 @@ SDK_SERVER_MODULES: dict[str, str] = {
 #: that moment, inside a process holding this user's credentials, and a flag
 #: renamed upstream would break every BROWSER and GUIDE run of an installed
 #: release with no change on our side. Bump it deliberately; a project that
-#: needs another version declares `playwright` under `mcp_servers:`.
+#: needs another version declares `playwright` under `mcp_servers:`. Each
+#: release wants one exact browser build -- `qaas.browser` checks for it, and
+#: bumping this changes the install command the docs print.
 PLAYWRIGHT_MCP_VERSION = "0.0.82"
 
 STDIO_SERVERS: dict[str, dict[str, Any]] = {
     "playwright": {
         "type": "stdio",
         "command": "npx",
+        # `--headless`: the server is headed by default, which opens a window
+        # on the operator's desktop for every BROWSER and GUIDE session and
+        # fails outright on a Linux box with no display.
         "args": [
             "-y", f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}", "--isolated", "--browser", "chromium",
+            "--headless",
         ],
     },
 }
@@ -230,6 +236,12 @@ def build_mcp_servers(spec: AgentSpec, ctx: ToolContext) -> dict[str, Any]:
             servers[name] = module.build(ctx)
         elif name in STDIO_SERVERS:
             servers[name] = dict(STDIO_SERVERS[name])
+            if name == "playwright":
+                # Snapshots and console logs go beside the run, not into the
+                # server's cwd -- which is the target checkout, where they sat
+                # as untracked files in the repository under test.
+                out = ctx.store.dir / "playwright" / spec.name
+                servers[name]["args"] = [*servers[name]["args"], "--output-dir", str(out)]
         else:
             raise UnknownServer(
                 f"{spec.name} declares MCP server '{name}', which is neither an "
@@ -388,6 +400,13 @@ def build_hooks(
     required = satisfiable_contract(ctx)
 
     async def on_stop(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        # Checked first. The agent may have met its contract *after* being
+        # blocked -- which is what the block is for -- and a `contract_unmet`
+        # naming nothing was written for a VERIFIER that had recorded its verdict.
+        missing = record.missing(required)
+        if not missing:
+            return {}
+
         # `stop_hook_active` is true when this hook already blocked once. Without
         # honouring it, an agent that genuinely cannot satisfy its contract loops
         # until it burns the budget.
@@ -395,13 +414,9 @@ def build_hooks(
             ctx.store.log(
                 "contract_unmet",
                 agent=ctx.agent.name,
-                missing=record.missing(required),
+                missing=missing,
                 note="allowed to stop after one block",
             )
-            return {}
-
-        missing = record.missing(required)
-        if not missing:
             return {}
 
         record.stop_blocks += 1

@@ -200,7 +200,12 @@ async def _stream(
             elif isinstance(message, ResultMessage):
                 subtype = message.subtype or "success"
                 cost = message.total_cost_usd or 0.0
-                turns = message.num_turns or 0
+                # Summed, where the cost is not: one query can end in more than
+                # one result. An agent that starts a background subagent gets a
+                # second turn when it finishes, and its result reported
+                # `num_turns=1` for a REVIEWER that had made 94 tool calls --
+                # while `total_cost_usd` is the session's running total.
+                turns += message.num_turns or 0
                 if message.is_error:
                     error = _error_text(message)
                 if isinstance(message.result, str):

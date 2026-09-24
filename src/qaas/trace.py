@@ -36,6 +36,7 @@ DETAIL_WIDTH = 110
 DETAIL_FIELDS: dict[LedgerKind, tuple[str, ...]] = {
     LedgerKind.RUN_STARTED: ("mode", "agents", "budget_usd", "target_sha", "target_dirty"),
     LedgerKind.RUN_FINISHED: ("agents_run", "cost_usd", "failed", "stopped_early", "resume"),
+    LedgerKind.QUOTA_WAIT: ("until", "seconds"),
     LedgerKind.AGENT_STARTED: ("model", "task_chars", "task_preview"),
     LedgerKind.AGENT_FINISHED: ("subtype", "cost_usd", "num_turns", "envelopes", "error"),
     LedgerKind.TOOL_CALL: ("tool", "allowed"),
