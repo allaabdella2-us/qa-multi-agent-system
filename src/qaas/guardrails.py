@@ -79,9 +79,16 @@ WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 # Merging to main, force-pushing and recursive deletes are outside every
 # agent's remit in this system: merge is always human (§8.4), and nothing here
 # needs to delete a tree.
+#
+# These are matched against the command as typed AND against its normalised form
+# (`_normalised`: wrappers peeled, git's global options removed). Matching only
+# the raw text is how `git -C . push --force origin HEAD:main` -- one global
+# option between `git` and `push` -- cleared every rule here, including for
+# read-only VERIFIER. `main`/`master` must stand alone: `fix/main-menu` is a
+# branch name that merely contains the word, and was refused as a push to main.
 FORBIDDEN_BASH = [
     (r"\bgit\s+push\b.*(--force|-f\b)", "force-push is never permitted"),
-    (r"\bgit\s+push\b.*\b(main|master)\b", "pushing to main is never permitted"),
+    (r"\bgit\s+push\b.*(?<![\w/.-])(main|master)(?![\w/.-])", "pushing to main is never permitted"),
     (r"\bgit\s+merge\b", "merging is a human decision (§8.4)"),
     (r"\bgit\s+reset\s+--hard\b", "hard reset discards work outside the sandbox"),
     (r"\bgit\s+checkout\s+(main|master)\b", "agents work on their own branches only"),
@@ -96,15 +103,63 @@ FORBIDDEN_BASH = [
     (r">\s*/dev/(sd|nvme|disk)", "writing to a block device"),
     (r"\bdocker\s+system\s+prune", "prune would destroy state other runs depend on"),
     (r"\bgh\s+pr\s+merge\b", "merging a pull request is a human decision (§8.4)"),
+    # `gh api` is the whole REST API with this user's token: `-X PUT
+    # .../pulls/1/merge` merges past the rule above, and a DELETE removes a
+    # repository. The vcs tools are the sanctioned way to reach GitHub.
+    (r"\bgh\s+api\b", "`gh api` can perform any write on the repository; use the vcs tools"),
+    (
+        r"\bgh\s+(repo|release|secret|variable|workflow|ruleset|auth)\b",
+        "repository administration is outside every agent's remit",
+    ),
 ]
+
+#: git's own options, which sit *between* `git` and the subcommand. Each rule
+#: in this module reads the subcommand, and every one of them read it as the
+#: word after `git` -- so a single global option in between was a way past all
+#: of them. These are stripped before a rule looks (`_git_argv`).
+_GIT_GLOBAL_WITH_VALUE = frozenset({
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--config-env", "--super-prefix", "--attr-source", "--list-cmds",
+})
+#: Global options refused outright, whatever the subcommand. `-c` and
+#: `--config-env` set configuration, and git configuration runs commands:
+#: `core.fsmonitor`, `core.pager`, `core.sshCommand`, `core.hooksPath` and any
+#: `alias.x=!...` execute on an ordinary `git status`. The others point git at a
+#: different repository or binary, which no agent here has a reason to do --
+#: its cwd is already the target.
+_GIT_GLOBAL_REFUSED = {
+    "-c": "`git -c` sets configuration, and git configuration can run commands",
+    "--config-env": "`git --config-env` sets configuration, and git configuration can run commands",
+    "--exec-path": "`git --exec-path` runs git's subcommands from another directory",
+    "--git-dir": "`git --git-dir` points git at a different repository",
+    "--work-tree": "`git --work-tree` points git at a different working tree",
+    "--namespace": "`git --namespace` rewrites which refs a command touches",
+    "--super-prefix": "`git --super-prefix` is internal to git",
+}
+#: `git push` options that publish more than the one branch an agent names, or
+#: rewrite/delete what is already on the remote. `--force*` is caught by the
+#: FORBIDDEN_BASH regex too; it is here so a flag cluster such as `-uf` is.
+_PUSH_REFUSED_LONG = frozenset({
+    "--mirror", "--all", "--branches", "--delete", "--prune", "--tags",
+    "--receive-pack", "--exec", "--repo",
+})
+_PUSH_REFUSED_SHORT = frozenset("fd")
+_PUSH_TAKES_VALUE = frozenset({"-o", "--push-option"})
+#: Branch names no agent may push to, however its patterns are written.
+_PROTECTED_PUSH_NAMES = frozenset({"main", "master", "head"})
 
 # Bash that mutates git state. Gated on the agent having branch patterns at all.
 # `checkout`, `restore`, `clean`, `stash` and `rm` join the list because they
 # change the working tree even when they move no branch -- `git checkout --
 # api/app/auth.py` reverts a file a read-only agent may not touch, and neither
 # this nor `_writes_of` had heard of it.
+#
+# `reset` moves the branch pointer without `--hard`, and `pull`, `cherry-pick`,
+# `revert`, `mv`, `worktree`, `submodule` and `update-ref` all change the tree or
+# the refs; a read-only agent could run every one of them.
 GIT_WRITE = re.compile(
-    r"\bgit\s+(commit|push|branch|checkout|restore|clean|stash|rm|switch|tag|apply|am|rebase)\b"
+    r"\bgit\s+(commit|push|branch|checkout|restore|clean|stash|rm|switch|tag|apply|am|rebase"
+    r"|reset|pull|cherry-pick|revert|mv|worktree|submodule|update-ref|filter-branch|notes|replace)\b"
 )
 
 # Shell constructs that rewrite a file in place. `>` is not a word character, so
@@ -224,9 +279,20 @@ class Guardrail:
         # honoured globs in `write_paths` and this did not; now that both go
         # through `_check_path`, the more permissive of the two would have
         # silently become the rule for everything.
+        #
+        # Contained, not merely resolved. A write path that is itself a symlink
+        # -- `qa/repro -> ~` in a hostile repository -- resolved to somewhere
+        # outside the checkout, and `is_relative_to(allowed)` then approved
+        # `qa/repro/.bashrc`, i.e. the operator's own dotfiles. A root that
+        # leaves the target is dropped, so it grants nothing.
         self._allowed_roots = [
-            (self.root / p).resolve() for p in self.policy.write_paths if not _is_glob(p)
+            root
+            for root in ((self.root / p).resolve() for p in self.policy.write_paths if not _is_glob(p))
+            if root == self.root or root.is_relative_to(self.root)
         ]
+        #: qaas's own state: the ledger, memory.db, config, `.env`. Refused to
+        #: every agent whatever its policy -- see `_state_path`.
+        self._state_root = Path(ctx.store.root).resolve()
         self._allowed_globs = [p for p in self.policy.write_paths if _is_glob(p)]
         # Every MCP server the agent declared, as an allowlist prefix.
         self._mcp_prefixes = tuple(f"mcp__{s}__" for s in self.agent.mcp_servers)
@@ -387,6 +453,14 @@ class Guardrail:
         except ValueError:
             relative = resolved.as_posix()
 
+        state = self._state_path(resolved, relative)
+        if state:
+            return Decision(
+                False,
+                f"{relative} is {state}. No agent may write it, whatever its write "
+                "paths say -- it is how qaas governs and records the run.",
+            )
+
         # The autonomy envelope (§8.2) comes first. A path inside the sandbox but
         # in a forbidden class must still be refused, and the reason must name
         # the class so the agent escalates rather than looking for a way round.
@@ -438,6 +512,41 @@ class Guardrail:
             f"write refused: {resolved} is outside {self.agent.name}'s sandbox "
             f"({', '.join(self.policy.write_paths)}).",
         )
+
+    def _state_path(self, resolved: Path, relative: str) -> str | None:
+        """Which piece of qaas's own state, or of the repository's machinery, this is.
+
+        A single-package repository profiles as `backend: ["."]`, so FIXER's
+        `$backend` write path is the whole checkout -- and with `qaas init .`
+        the checkout contains `.qaas/`. FIXER could then rewrite
+        `.qaas/config/agents/fixer.yaml` (its own policy), the ledger the router
+        reads its verdicts back from, `memory.db` and the `.env` holding the
+        Jira token. CLAUDE.md's rule that the ledger and the memory are "in
+        nobody's write_paths" held only because no shipped layout reached them.
+
+        `.git/` is the same shape one level down: a file under `.git/hooks/` is
+        a program git runs on the operator's next commit. `.claude/` is read by
+        the operator's own Claude Code sessions in this repository later.
+        """
+        parts = [p.lower() for p in PurePosixPath(relative).parts]
+        if ".git" in parts:
+            return "inside .git/, git's own machinery (a hook there is a program git runs)"
+        if ".qaas" in parts:
+            return "qaas run state"
+        if ".claude" in parts:
+            return "Claude Code configuration, which the operator's own sessions load"
+        name = parts[-1] if parts else ""
+        if (name == ".env" or name.startswith(".env.")) and not name.endswith(
+            (".example", ".sample", ".template", ".dist")
+        ):
+            return "an environment file, which holds credentials"
+        # The state root may sit outside the target (the usual layout) or
+        # contain it (`qaas run --repo` clones under `.qaas/targets/`). Only the
+        # second case can put a *target* path under it, and those are fine.
+        if resolved == self._state_root or resolved.is_relative_to(self._state_root):
+            if not (self.root.is_relative_to(self._state_root) and resolved.is_relative_to(self.root)):
+                return "qaas run state"
+        return None
 
     def _forbidden_class(self, relative: str) -> str | None:
         """Which §8.2 class this path falls into, if any.
@@ -503,11 +612,25 @@ class Guardrail:
         if not command.strip():
             return Decision(False, "empty command")
 
+        # Every git rule below reads the subcommand, and they used to read it off
+        # the raw text as "the word after `git`" -- so `git -C . push --force
+        # origin HEAD:main` passed all of them, for every agent holding Bash.
+        # Each is now applied to the command as typed *and* to its normalised
+        # form, in which wrappers are peeled and git's global options removed.
+        normalised = _normalised(command)
         for pattern, why in FORBIDDEN_BASH:
-            if re.search(pattern, command):
+            if re.search(pattern, command) or re.search(pattern, normalised):
                 return Decision(False, f"command refused: {why}")
 
-        if GIT_WRITE.search(command) and not self.policy.branch_patterns:
+        git_refusal = _git_refusal(command)
+        if git_refusal:
+            return Decision(
+                False,
+                f"command refused: {git_refusal}. Run git plainly -- your working "
+                "directory is already the target.",
+            )
+
+        if (GIT_WRITE.search(command) or GIT_WRITE.search(normalised)) and not self.policy.branch_patterns:
             return Decision(
                 False,
                 f"{self.agent.name} may not modify git state. "
@@ -515,15 +638,16 @@ class Guardrail:
             )
 
         if self.policy.branch_patterns:
-            branch = _branch_from_command(command)
-            if branch and not any(
-                fnmatch.fnmatch(branch, pat) for pat in self.policy.branch_patterns
-            ):
-                return Decision(
-                    False,
-                    f"branch '{branch}' is outside {self.agent.name}'s patterns "
-                    f"({', '.join(self.policy.branch_patterns)}).",
-                )
+            # Every segment, not the first: `ls && git checkout -b anything`
+            # carried its branch in the second segment, where a reader that
+            # only looked at the first two tokens never found it.
+            for branch in _branches_from_command(command):
+                if not any(fnmatch.fnmatch(branch, pat) for pat in self.policy.branch_patterns):
+                    return Decision(
+                        False,
+                        f"branch '{branch}' is outside {self.agent.name}'s patterns "
+                        f"({', '.join(self.policy.branch_patterns)}).",
+                    )
 
         if self.policy.protected_paths:
             for protected in self.policy.protected_paths:
@@ -538,27 +662,99 @@ class Guardrail:
         if refspec:
             return refspec
 
+        routed = self._vcs_tool_refusal(command)
+        if routed:
+            return routed
+
         return self._check_bash_writes(command)
 
-    def _refspec_refusal(self, command: str) -> Decision | None:
-        """`git push` parses its argument as a *refspec*, not as a branch name.
+    def _vcs_tool_refusal(self, command: str) -> Decision | None:
+        """`git commit` and `git push` go through the vcs tools when the agent has them.
 
-        `mcp/vcs.py` already learned this -- `_reject_refspec` is there because
-        `git push origin qa/repro/x:main` published onto main past every
-        branch-pattern and protected-name check. The shell door never learned
-        it: `FORBIDDEN_BASH` matches only `--force`/`-f` and the literal words
-        `main`/`master`, and `_branch_from_command` reads a name only after
-        `-b`, `-c`, `branch` or `switch`, so a refspec returns None and the
-        branch-pattern gate below is skipped entirely. Same rule, third door.
+        Those tools are where the checks live: `commit` runs every staged file
+        through `_check_path` and the line budget, and `push`/`open_pr` refuse
+        to publish a fix for a security finding (§8.4). The same two operations
+        typed into Bash skipped all of it -- `git commit -am` took whatever a
+        script had changed, and `git push` published a security fix the vcs
+        tool would have held. No prompt or skill asks for either in the shell,
+        so routing them costs the happy path nothing.
         """
-        segments = _shell_segments(command)
-        for parts in segments:
+        if "vcs" not in self.agent.mcp_servers:
+            return None
+        for parts in _shell_segments(command):
             peeled = _peel_wrappers(parts)
             if not peeled or Path(peeled[0]).name != "git":
                 continue
-            if "push" not in peeled[1:3]:
+            argv, _ = _git_argv(peeled)
+            sub = argv[1] if len(argv) > 1 else ""
+            if sub in {"commit", "push"}:
+                return Decision(
+                    False,
+                    f"use mcp__vcs__{sub} instead of `git {sub}` in the shell: the tool "
+                    "checks every file you commit against your policy and budget, and "
+                    "will not publish a fix for a security finding.",
+                )
+        return None
+
+    def _refspec_refusal(self, command: str) -> Decision | None:
+        """What a `git push` may publish: one named branch, inside the patterns.
+
+        `git push` parses its argument as a *refspec*, not as a branch name.
+        `mcp/vcs.py` already learned this -- `_reject_refspec` is there because
+        `git push origin qa/repro/x:main` published onto main past every
+        branch-pattern and protected-name check. The shell door had learned only
+        that much, and three shapes still went through: `--mirror` (force the
+        remote to match every local ref, deleting the rest), `--all`, and
+        `--delete <branch>` -- none of which names main, and none of which
+        FORBIDDEN_BASH's two push rules read. So a push is now held to what the
+        vcs tool already requires: explicit branch names, each inside this
+        agent's patterns, and no option that reaches past them.
+        """
+        for parts in _shell_segments(command):
+            peeled = _peel_wrappers(parts)
+            if not peeled or Path(peeled[0]).name != "git":
                 continue
-            for token in _non_flag_args(peeled)[2:]:  # after `push` and the remote
+            argv, _ = _git_argv(peeled)
+            if argv[1:2] != ["push"]:
+                continue
+            positional: list[str] = []
+            skip = False
+            for token in argv[2:]:
+                if skip:
+                    skip = False
+                    continue
+                if token == "--":
+                    continue
+                if token.startswith("--"):
+                    name = token.split("=", 1)[0]
+                    if name in _PUSH_REFUSED_LONG or name.startswith("--force"):
+                        return Decision(
+                            False,
+                            f"refusing 'git push {name}': it publishes, rewrites or "
+                            "deletes more than the one branch you name. Push a single "
+                            "branch by its own name.",
+                        )
+                    skip = name in _PUSH_TAKES_VALUE and "=" not in token
+                    continue
+                if token.startswith("-") and token != "-":
+                    if set(token[1:]) & _PUSH_REFUSED_SHORT:
+                        return Decision(
+                            False,
+                            f"refusing 'git push {token}': -f forces and -d deletes a "
+                            "remote branch. Push a single branch by its own name.",
+                        )
+                    skip = token in _PUSH_TAKES_VALUE
+                    continue
+                positional.append(token)
+            refs = positional[1:]  # the first positional is the remote
+            if not refs:
+                return Decision(
+                    False,
+                    "refusing a 'git push' that names no branch: what it publishes "
+                    "depends on push.default and the upstream, not on this command. "
+                    "Name the branch: git push <remote> <branch>.",
+                )
+            for token in refs:
                 if ":" in token or token.startswith("+"):
                     return Decision(
                         False,
@@ -566,6 +762,17 @@ class Guardrail:
                         "name. A refspec can publish any local ref onto any remote ref, "
                         "which is how a sandboxed branch reaches main past every branch "
                         "pattern. Push the branch by its own name.",
+                    )
+                name = token.removeprefix("refs/heads/")
+                if name.lower() in _PROTECTED_PUSH_NAMES:
+                    return Decision(False, f"command refused: pushing '{name}' is never permitted")
+                if self.policy.branch_patterns and not any(
+                    fnmatch.fnmatch(name, pat) for pat in self.policy.branch_patterns
+                ):
+                    return Decision(
+                        False,
+                        f"branch '{name}' is outside {self.agent.name}'s patterns "
+                        f"({', '.join(self.policy.branch_patterns)}).",
                     )
         return None
 
@@ -763,15 +970,38 @@ def _writes_of(
         # system's own happy path is a guardrail that gets switched off. The
         # enforced tools (`Write`/`Edit`) and the agent's `write_paths` remain
         # the boundary for anything a script leaves behind.
+        if name in {"perl", "ruby"} and any(_short_flag_has(p, "i") for p in parts[1:]):
+            return targets, f"`{name} -i` edits files in place from a script"
     if name == "find":
         # `-exec`/`-execdir`/`-ok` run another command per match; `-delete` and
         # `-fprint` write directly. None of them has a destination this can name.
         if any(p in {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint"} for p in parts):
             return targets, "`find` is running an action over paths it chooses itself"
-    if name == "patch" or (name == "git" and "apply" in parts[1:3]):
-        return targets, "a patch carries its own destinations"
     if name == "git":
+        # Read past git's global options first: `git -C . checkout -- f` put
+        # `.` where the subcommand was expected and cleared as "writes nothing".
+        parts, _ = _git_argv(parts)
+        if parts[1:2] == ["apply"]:
+            return targets, "a patch carries its own destinations"
         return _git_writes(parts, targets)
+    if name == "patch":
+        return targets, "a patch carries its own destinations"
+    # Mutators that name their destination behind an option rather than as an
+    # argument. None of them was on any table, so `curl -o api/app/auth.py …`
+    # and `sort -o f f` cleared read-only VERIFIER as "writes nothing".
+    if name in _OPTION_WRITERS:
+        return _option_writes(name, parts, targets)
+    if name in {"awk", "gawk"} and (
+        any(p in {"inplace", "--include=inplace"} for p in parts) or "-i" in parts
+    ):
+        return targets, "`awk -i inplace` edits files in place from a script"
+    if name in {"tar", "bsdtar", "gtar"} and not _tar_only_lists(parts):
+        return targets, "`tar` writes the paths the archive names"
+    if name == "unzip" and not any(p in {"-l", "-t", "-v", "-p", "-Z", "-z"} for p in parts):
+        return targets, "`unzip` writes the paths the archive names"
+    if name in {"chmod", "chown", "chgrp"}:
+        # The mode or owner comes first; every argument after it is changed.
+        return targets + args[1:], None
     if name == "sed" and _is_in_place_sed(parts):
         # `sed -i '' s/x/y/ f.py` (BSD) and `sed -i s/x/y/ f.py` (GNU) differ by
         # an empty argument. Drop the empties, then drop the script expression;
@@ -793,6 +1023,88 @@ def _writes_of(
             destinations = destinations + sources
         return targets + destinations, None
     return targets, None
+
+
+def _short_flag_has(token: str, letter: str) -> bool:
+    """`-pi`, `-i`, `-i.bak` -- a short-option cluster that includes `letter`."""
+    return token.startswith("-") and not token.startswith("--") and letter in token[1:].split(".", 1)[0]
+
+
+#: command -> (options whose value is a file written, options that write a file
+#: whose name the command chooses itself). A value of `-` is stdout.
+_OPTION_WRITERS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
+    "curl": (
+        frozenset({"-o", "--output", "-D", "--dump-header", "-c", "--cookie-jar",
+                   "--trace", "--trace-ascii", "--libcurl", "--stderr"}),
+        frozenset({"-O", "--remote-name", "--remote-name-all", "-J", "--remote-header-name",
+                   "--output-dir"}),
+    ),
+    "wget": (
+        frozenset({"-O", "--output-document", "-o", "--output-file", "-a", "--append-output"}),
+        frozenset({"-P", "--directory-prefix"}),
+    ),
+    "sort": (frozenset({"-o", "--output"}), frozenset()),
+}
+
+
+def _option_writes(name: str, parts: list[str], targets: list[str]) -> tuple[list[str], str | None]:
+    """Destinations named behind an option, for the commands in `_OPTION_WRITERS`."""
+    valued, chosen = _OPTION_WRITERS[name]
+    short_valued = {o[1] for o in valued if len(o) == 2}
+    short_chosen = {o[1] for o in chosen if len(o) == 2}
+    found = list(targets)
+    named_output = False
+    tokens = parts[1:]
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        i += 1
+        if token.startswith("--"):
+            opt, eq, value = token.partition("=")
+            if opt in chosen:
+                return found, f"`{name} {opt}` writes a file whose name it chooses itself"
+            if opt in valued:
+                if not eq:
+                    value = tokens[i] if i < len(tokens) else ""
+                    i += 1
+                named_output = True
+                if value and value != "-" and value not in _DEV_SINKS:
+                    found.append(value)
+            continue
+        if token.startswith("-") and token != "-":
+            letters = token[1:]
+            for j, letter in enumerate(letters):
+                if letter in short_chosen:
+                    return found, f"`{name} -{letter}` writes a file whose name it chooses itself"
+                if letter in short_valued:
+                    value = letters[j + 1:]
+                    if not value:
+                        value = tokens[i] if i < len(tokens) else ""
+                        i += 1
+                    named_output = True
+                    if value and value != "-" and value not in _DEV_SINKS:
+                        found.append(value)
+                    break
+    # Without -O, wget saves under the remote file's own name, in the cwd.
+    if name == "wget" and not named_output and "--spider" not in parts:
+        return found, "`wget` saves under a name it takes from the URL"
+    return found, None
+
+
+def _tar_only_lists(parts: list[str]) -> bool:
+    """`tar -tf a.tar` / `tar tf a.tar` / `tar --list` read; every other mode writes."""
+    if "--list" in parts:
+        return True
+    modes: set[str] = set()
+    for i, token in enumerate(parts[1:]):
+        # Old-style `tar tf x.tar` carries its modes in the first argument
+        # without a dash; otherwise only short options carry them -- the
+        # archive's own name is not a cluster of mode letters.
+        if token.startswith("--"):
+            continue
+        if token.startswith("-") or i == 0:
+            modes |= set(token.lstrip("-")) & set("txcruA")
+    return modes == {"t"}
 
 
 def _looks_like_wrapper_operand(token: str) -> bool:
@@ -836,7 +1148,8 @@ def _git_writes(parts: list[str], targets: list[str]) -> tuple[list[str], str | 
     sub = next((p for p in parts[1:] if not p.startswith("-")), "")
     if sub in {"clean", "stash"}:
         return targets, f"`git {sub}` chooses its own paths from the index"
-    if sub == "rm":
+    if sub in {"rm", "mv"}:
+        # `git mv`'s source is removed and its destination written; both count.
         return targets + _non_flag_args(parts)[1:], None
     if sub in {"checkout", "restore"}:
         paths = _paths_after_double_dash(parts)
@@ -847,26 +1160,110 @@ def _git_writes(parts: list[str], targets: list[str]) -> tuple[list[str], str | 
     return targets, None
 
 
-def _branch_from_command(command: str) -> str | None:
-    """Best-effort branch name out of a git command, for policy matching."""
-    try:
-        parts = shlex.split(command)
-    except ValueError:
-        return None
-    # Only a git command names a branch. Without this, `-c` was read as
-    # `switch -c` in anything that happens to take one: `python -c '...'` was
-    # refused as "branch 'open(...)' is outside FIXER's patterns", which is
-    # both a wrong answer and an unactionable one.
-    if not any(Path(part).name == "git" for part in parts[:2]):
-        return None
-    for i, token in enumerate(parts):
-        if token in {"-b", "-c"} and i + 1 < len(parts):
-            return parts[i + 1]
-        if token in {"branch", "switch"} and i + 1 < len(parts):
-            candidate = parts[i + 1]
-            if not candidate.startswith("-"):
-                return candidate
+def _git_argv(parts: list[str]) -> tuple[list[str], list[tuple[str, str | None]]]:
+    """`git <global options> <sub> …` -> (`git <sub> …`, the global options).
+
+    `parts` has had its wrappers peeled and names git. Everything a rule in this
+    module reads -- the subcommand, its paths, its refs -- comes after these, and
+    every rule used to assume nothing came between `git` and the subcommand.
+    """
+    found: list[tuple[str, str | None]] = []
+    i = 1
+    while i < len(parts):
+        token = parts[i]
+        if token == "--" or not token.startswith("-"):
+            break
+        name, eq, value = token.partition("=")
+        if name in _GIT_GLOBAL_WITH_VALUE and not eq:
+            found.append((name, parts[i + 1] if i + 1 < len(parts) else None))
+            i += 2
+            continue
+        found.append((name, value if eq else None))
+        i += 1
+    return ["git", *parts[i:]], found
+
+
+def _normalised(command: str) -> str:
+    """The command with wrappers peeled and git's global options removed.
+
+    For the regex rules only -- quoting is lost, which is fine for "does this
+    say `git push … --force`" and not fine for anything that resolves a path.
+    """
+    rendered: list[str] = []
+    for segment in _shell_segments(command):
+        parts = _peel_wrappers(segment)
+        if parts and Path(parts[0]).name == "git":
+            parts, _ = _git_argv(parts)
+        rendered.append(" ".join(parts))
+    return " ; ".join(rendered)
+
+
+#: git subcommands that only read, for which `-C <dir>` is harmless. With any
+#: other subcommand the paths it names are relative to that directory rather
+#: than to the target root, and nothing here resolves them against it.
+_GIT_READ_ONLY = frozenset({
+    "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "blame",
+    "grep", "describe", "shortlog", "cat-file", "rev-list", "merge-base",
+    "for-each-ref", "show-ref", "name-rev", "whatchanged", "version", "help",
+})
+#: `git config` flags that only read.
+_GIT_CONFIG_READS = frozenset({"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin"})
+
+
+def _git_refusal(command: str) -> str | None:
+    """Why git is being driven in a way no agent needs, or None.
+
+    Global options that set configuration or point git elsewhere are refused
+    outright (see `_GIT_GLOBAL_REFUSED`); `-C` is allowed only for commands that
+    read. `git config` that writes is refused for the same reason `-c` is.
+    """
+    for segment in _shell_segments(command):
+        parts = _peel_wrappers(segment)
+        if not parts or Path(parts[0]).name != "git":
+            continue
+        argv, found = _git_argv(parts)
+        sub = argv[1] if len(argv) > 1 else ""
+        for name, _value in found:
+            if name in _GIT_GLOBAL_REFUSED:
+                return _GIT_GLOBAL_REFUSED[name]
+            if name == "-C" and sub not in _GIT_READ_ONLY:
+                return f"`git -C <dir> {sub}` changes files relative to another directory"
+        if sub == "config" and not any(t.split("=", 1)[0] in _GIT_CONFIG_READS for t in argv[2:]):
+            return "`git config` that writes can make later git commands run arbitrary programs"
     return None
+
+
+def _branches_from_command(command: str) -> list[str]:
+    """Every branch name a command creates or moves, across all its segments.
+
+    Best-effort, for policy matching. It read a single name from the first two
+    tokens of the whole string, so `ls && git checkout -b anything` -- the
+    branch in the second segment -- was never checked, and `git branch -D main`
+    returned nothing because the token after `branch` was a flag.
+    """
+    names: list[str] = []
+    for segment in _shell_segments(command):
+        parts = _peel_wrappers(segment)
+        # Only a git command names a branch. Without this, `-c` was read as
+        # `switch -c` in anything that happens to take one: `python -c '...'` was
+        # refused as "branch 'open(...)' is outside FIXER's patterns", which is
+        # both a wrong answer and an unactionable one.
+        if not parts or Path(parts[0]).name != "git":
+            continue
+        argv, _ = _git_argv(parts)
+        sub = argv[1] if len(argv) > 1 else ""
+        rest = argv[2:]
+        if sub in {"checkout", "switch"}:
+            for i, token in enumerate(rest):
+                if token in {"-b", "-B", "-c", "-C", "--orphan"} and i + 1 < len(rest):
+                    names.append(rest[i + 1])
+            if sub == "switch":
+                positional = [t for t in rest if not t.startswith("-")]
+                created = {rest[i + 1] for i, t in enumerate(rest[:-1]) if t in {"-c", "-C", "--orphan"}}
+                names.extend(p for p in positional[:1] if p not in created)
+        elif sub == "branch":
+            names.extend(t for t in rest if not t.startswith("-"))
+    return names
 
 
 # Human-readable names for the forbidden classes, so a denial explains itself.

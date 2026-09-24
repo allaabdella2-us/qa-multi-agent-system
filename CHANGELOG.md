@@ -2,6 +2,132 @@
 
 ## 0.0.2
 
+### Pre-release review: what the tests could not see
+
+A full review before publishing found a set of defects the 1,126-test suite
+agreed with, mostly because the tests called handlers and guardrails directly
+instead of through the path an agent actually takes. Each fix below has a
+regression test that fails against the code it replaces.
+
+**Agents now see what every tool returns.** The SDK builds the result the model
+reads from `content` and `is_error` only; `structuredContent` is dropped. So
+everything a server put only in its structured payload never reached an agent:
+`impersonate` said "Send header: Authorization: Bearer <token>" while the token
+itself was discarded, `run_single` said "failed in 0.1s" with the failure
+output gone, and a truncated diff carried no sign of it. `ok()` now renders the
+structured payload as a JSON text block as well, and `tests/mcp/test_sdk_wire.py`
+drives a real `tools/call` through the SDK's own bridge.
+
+**The shell door had four ways round it.**
+
+- `git -C . push --force origin HEAD:main` cleared every git rule for every
+  agent holding Bash, including read-only VERIFIER, because every rule read the
+  subcommand as the word after `git`. Git's global options are stripped before
+  a rule looks; `-c`, `--config-env`, `--git-dir` and `--work-tree` are refused
+  outright (git configuration runs commands); `-C` is allowed only for reads.
+- `git push --mirror`, `--all` and `--delete <branch>` named no branch and
+  passed. A push now publishes explicitly named branches inside the agent's
+  patterns and nothing else.
+- On a single-package repository `$backend` is `.`, so FIXER could rewrite
+  `.qaas/config/agents/fixer.yaml`, the ledger, `memory.db` and `.env`. `.qaas/`,
+  `.git/`, `.claude/` and `.env*` are refused to every agent whatever its paths
+  say, and a write path that is a symlink out of the checkout grants nothing.
+- `curl -o`, `wget`, `sort -o`, `awk -i inplace`, `perl -i`, `tar -x`, `unzip`,
+  `chmod` and `git mv` are read for what they write.
+
+**Credentials stay where they belong.**
+
+- `qaas init` now writes `.env`, `targets/` and `scores/` into
+  `.qaas/.gitignore`, and upgrades an existing one. README and MANUAL told users
+  to put `JIRA_API_TOKEN` in `.qaas/.env`, "already gitignored"; in their own
+  repository it was not.
+- A token in a clone URL was stored on the profile when a clone was reused, and
+  in the clone's own `.git/config` always. Both are redacted, as is a
+  `?private_token=` query.
+- Agents' processes inherited this process's whole environment, so a target's
+  `conftest.py` run through Bash read the Jira and GitHub tokens -- the hole
+  `test_runner`'s allowlist closed, open one door over. Credentials the agent
+  does not need are blanked in its environment.
+- The quota preflight ran `claude -p` in the target's directory with default
+  setting sources, loading that repository's `.claude/` hooks. It is isolated
+  the way every agent is.
+- Playwright MCP is pinned (`0.0.82`) instead of `@latest`.
+
+**The fix loop works for more than one ticket.**
+
+- FIXER's §8.2 diff budget was per run, not per fix: after one ticket's fix
+  touched four files, the next ticket's FIXER got one edit, and every later
+  ticket escalated as "wider than the envelope". It is scoped per ticket.
+- `max_diff_lines` was configured, shown and told to FIXER as enforced, and
+  enforced nowhere. It is enforced at commit.
+- A commit took the whole index -- a file the operator had staged, or another
+  finding's leftovers -- and the guardrail checked only the pathspec. It now
+  commits exactly the files staged under its paths, each checked by the same
+  `_check_path` as `Write`.
+- New branches forked from whatever the previous agent left checked out, so
+  every PR after the first carried other findings' commits. REPRODUCER branches
+  from where the run started; FIXER from the ticket's reproduction branch.
+- A fix for a security finding is committed but never pushed or opened as a PR:
+  §8.4 makes that a human's step.
+- `open_pr` defaulted its base to `main` rather than the repository's default.
+
+**The shell runs in an OS sandbox.** The parsed rules above are best-effort by
+construction -- `python foo.py` is arbitrary code, and a `conftest.py` in a cloned
+repository runs whatever it likes under a command that reads as `pytest`. Every
+agent with Bash (FIXER, REPRODUCER, VERIFIER) now runs its shell in Claude
+Code's OS sandbox (Seatbelt on macOS, bubblewrap on Linux), configured per agent
+by the new `qaas/sandbox.py`: writes only inside the checkout and a private temp
+directory, never to `.git/hooks`, `.git/config`, `.claude/`, `.env*` or qaas's
+state; no reads of `~/.ssh`, `~/.config/gh`, `~/.aws`, `.qaas/.env` and other
+credential stores; network only to loopback and the target's own hosts. The
+model cannot opt out (`allowUnsandboxedCommands: false`). A new `sandbox:`
+block in `system.yaml` chooses `auto` (default: sandbox where the OS can, and
+record where it cannot), `required` or `off`; `qaas validate`, `qaas doctor`
+and every `agent_started` line say which applied. On Linux, install
+`bubblewrap` and `socat`.
+
+Every setting was checked against the bundled Claude Code by driving it through
+a scripted stand-in for the API (`tests/fake_anthropic.py`), and
+`tests/test_sandbox_e2e.py` keeps checking it: a script that passes the parser
+cannot write outside the checkout or read a token, while localhost, `git`,
+`pytest` and its `tmp_path` still work. Agents holding the vcs server now commit
+and push only through its tools, which check every file and hold back a
+security fix; `git commit`/`git push` in the shell is refused.
+
+**Every run ends.** Ctrl-C, or an exception during mapping or discovery, left
+`run_started` with no `run_finished`; the dashboard showed such runs as live
+forever, even after a resume. `run()` now always writes `run_finished` (marked
+`interrupted` when it was). An agent in flight when the reserve began could run
+through the whole reserve; finding-phase dispatches are now bounded by the
+reserved clock.
+
+**Memory is partitioned by target, properly.** Only `search_similar` had been
+scoped. `record`, `resolve`, `get_occurrences` and outcomes looked defects up by
+fingerprint alone, so a defect on the same endpoint in another repository came
+back as "already tracked, do not file". The key is now `(target, fingerprint)`;
+existing databases migrate in place after a `memory.db.bak-<epoch>` backup.
+
+**The tracker is scoped.** `create_issue` requires the envelope it files and
+routes security from it; projects are allowlisted; `transition` accepts only the
+statuses each agent's task names; the local tracker allocates keys atomically
+across processes; network errors no longer escape as raw exceptions or file a
+ticket twice.
+
+**Tools report the truth.** `run_single` on a test that does not exist, or a
+suite whose `conftest.py` fails to import, is an error rather than "failed" or
+"0 tests"; a timed-out test run kills its whole process group; non-UTF-8 output
+no longer loses the result; `http_request` never follows a redirect off the
+target (it reports the 3xx); `impersonate` works on `external` targets.
+
+**The dashboard and the CLI.** `?version=` on the map route no longer reads
+arbitrary `.json` files; the override route never writes into site-packages and
+honours `--config`; `.env` values quoted and followed by a comment parse
+correctly. Ordinary mistakes -- a mistyped `--mode`, a broken profile, an unknown
+run id -- exit non-zero with a message, not a traceback or a fake success.
+`qaas run` with no target profile, and `qaas sweep` against an unusable one, now
+refuse; `--dry-run` really assembles every agent's options; `qaas --version`
+exists; run state is found by walking up to the project, as everything else is.
+
 ### The ticket cap stops throttling findings you already paid for
 
 **Behaviour change.** `max_tickets_per_run` was 10, in both

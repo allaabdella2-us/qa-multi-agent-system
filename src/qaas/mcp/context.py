@@ -8,6 +8,7 @@ already lives, with no serialisation boundary to reason about.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,18 +36,26 @@ class ToolContext:
     target_root: Path
     map_version: str | None = None
     counters: dict[str, int] = field(default_factory=dict)
+    #: What this dispatch is working on -- a ticket key for FIXER -- so the §8.2
+    #: diff budget bounds one fix rather than the whole run. None is the run.
+    scope: str | None = None
+    #: Where a new branch starts when the agent names no base: the ticket's
+    #: reproduction branch for FIXER, the ref the run started on otherwise.
+    #: None falls back to whatever is checked out.
+    base_ref: str | None = None
 
     @property
     def touched_files(self) -> set[str]:
-        """Files this agent has modified in this *run*, for the §8.2 diff budget.
+        """Files this agent has modified for this piece of work (§8.2).
 
         It used to be a field on this context, which is rebuilt per dispatch — so
-        FIXER's "at most 5 files per run" reset on every FIXER/REVIEWER round
-        trip and again for every ticket. A budget that resets whenever the thing
-        it is bounding loops is not a budget. The store is the per-run object, so
-        it holds the set and the budget counts what the policy says it counts.
+        FIXER's budget reset on every FIXER/REVIEWER round trip. A budget that
+        resets whenever the thing it is bounding loops is not a budget, so the
+        store holds the set. It is keyed by `scope` too: without that, the one
+        set was shared by every *ticket* in the run, which bounded the run rather
+        than the diff §8.2 is about.
         """
-        return self.store.touched_files(self.agent.name)
+        return self.store.touched_files(self.agent.name, self.scope)
 
     def bump(self, key: str) -> int:
         counters = self._run_counters()
@@ -69,12 +78,62 @@ class ToolContext:
         return getter(self.agent.name) if callable(getter) else self.counters
 
 
+#: Largest JSON block `ok()` will append. A run_suite over a large repository
+#: can carry thousands of rows, and an unbounded block would spend an agent's
+#: context on one tool result.
+STRUCTURED_TEXT_LIMIT = 60_000
+
+#: A string this long that already appears in the text is not repeated in the
+#: JSON block -- `vcs.diff` returns the patch as its text and would otherwise
+#: pay for it twice.
+_DUPLICATE_MIN_CHARS = 200
+
+
 def ok(text: str, **structured: Any) -> dict[str, Any]:
-    """A successful MCP tool result."""
+    """A successful MCP tool result.
+
+    The structured payload is also rendered into the *text*, and that is the
+    fix rather than redundancy. The SDK's `run_tool` builds the result the model
+    sees from `content` and `is_error` only -- `structuredContent` is dropped on
+    the floor (the same fact `registry._was_held` already works around for one
+    flag). So everything a server put only in `structured` never reached an
+    agent: `impersonate` said "Send header: Authorization: Bearer <token>" while
+    the token itself was discarded, `run_single` said "failed in 0.1s" with the
+    failure output gone, and a truncated diff carried no sign of it. Every test
+    read the handler's dict directly, which is how 200 tests agreed with a tool
+    surface the model never saw. `structuredContent` stays for any reader that
+    speaks the wire format.
+    """
     result: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
     if structured:
         result["structuredContent"] = structured
+        block = structured_text(text, structured)
+        if block:
+            result["content"].append({"type": "text", "text": block})
     return result
+
+
+def structured_text(text: str, structured: dict[str, Any]) -> str:
+    """The structured payload as a JSON text block the model can read."""
+    shown = {
+        key: value
+        for key, value in structured.items()
+        if not (
+            isinstance(value, str)
+            and len(value) >= _DUPLICATE_MIN_CHARS
+            and value in text
+        )
+    }
+    if not shown:
+        return ""
+    rendered = json.dumps(shown, default=str, ensure_ascii=False)
+    if len(rendered) > STRUCTURED_TEXT_LIMIT:
+        rendered = (
+            rendered[:STRUCTURED_TEXT_LIMIT]
+            + f"\n[structured result truncated: {len(rendered)} chars, "
+            f"showing the first {STRUCTURED_TEXT_LIMIT}]"
+        )
+    return "Structured result (JSON):\n" + rendered
 
 
 def err(text: str) -> dict[str, Any]:

@@ -15,8 +15,12 @@ list in memory, rather than scanning it once per kind of interest.
 
 from __future__ import annotations
 
+import json
+import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
 from qaas.store import LedgerEntry, LedgerKind, RunStore
@@ -74,6 +78,114 @@ def read_ledger(store: RunStore) -> list[LedgerEntry]:
 POLL_INTERVAL_S = 0.5
 
 
+# -- is anything still writing this? ----------------------------------------
+#
+# "More `run_started` than `run_finished`" is how every reader decides a run is
+# live, and it is right for every run that ended in Python. It is wrong for one
+# that ended in the operating system: a ^C'd, OOM-killed or closed-laptop run
+# never wrote its closing line, so its ledger said "live" forever -- the
+# dashboard pulsed over it, picked it as *the* live run ahead of the one
+# actually running, and `qaas trace --follow` polled it until someone pressed
+# ^C again. The router now closes interrupted runs itself, but the ledgers
+# already on disk are what people open, so the reader needs its own answer.
+#
+# The answer is the file's age. `_dispatch` preempts at the run's wall-clock
+# cap and filing and reporting run against the same cap, so no run can go on
+# writing for longer than `wall_clock_s` -- a ledger that has been silent for
+# longer than that, plus a margin, is not being written by anything.
+
+#: Slack past a run's own wall-clock cap before its silence means it is dead:
+#: the finalising work after the cap (outcomes, the report, `run_finished`
+#: itself) and a clock that is not quite the router's.
+STALE_MARGIN_S = 600
+
+#: The silence that means dead when the run recorded no cap at all -- a ledger
+#: from before `run_started` carried `wall_clock_s`. The longest cap any shipped
+#: mode sets (`system.yaml`: 28800s), so no run that could still be alive is
+#: called dead on this rule.
+STALE_WITHOUT_CAP_S = 8 * 3600
+
+
+def stale_after_s(wall_clock_s: Any) -> float:
+    """How long a ledger may sit unwritten and still belong to a live run."""
+    numeric = isinstance(wall_clock_s, (int, float)) and not isinstance(wall_clock_s, bool)
+    if numeric and wall_clock_s > 0:
+        return float(wall_clock_s) + STALE_MARGIN_S
+    return float(STALE_WITHOUT_CAP_S)
+
+
+def is_stale(path: Path, wall_clock_s: Any = None, *, now: float | None = None) -> bool:
+    """Whether a ledger has been silent too long to have a live writer.
+
+    Says nothing about whether the run *finished* -- that is the count of
+    `run_started` against `run_finished`. This is the second question, asked of
+    a run the count calls live: is anything actually still writing it. A file
+    that does not exist is not stale; following a run that has not started yet
+    is the normal case (see `tail`).
+    """
+    try:
+        mtime = Path(path).stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() if now is None else now) - mtime > stale_after_s(wall_clock_s)
+
+
+#: `{"at":"<timestamp>"` -- how every ledger line opens, because `LedgerEntry`
+#: declares `at` first and `model_dump_json` writes fields in declaration order.
+#: Checked in front of a `kind` match so a *nested* `"kind":"run_started"` in
+#: some tool call's arguments is not counted as a run starting.
+_LINE_HEAD_RE = re.compile(rb'\{"at":"[^"\n]*"')
+
+
+def run_edges(data: bytes) -> tuple[list[int], list[int]]:
+    """Line offsets of every top-level `run_started` and `run_finished` in `data`.
+
+    Raw bytes, deliberately. Asking "is this run live" or "which mode did it
+    resume as" by validating every line through pydantic is what made `/api/runs`
+    take 3.2s over forty 30k-line ledgers and freeze every SSE stream while it
+    did. `bytes.find` over the same data is milliseconds, and there are only a
+    handful of these lines per ledger to confirm.
+    """
+
+    def find(kind: bytes) -> list[int]:
+        needle = b'","kind":"' + kind + b'"'
+        found: list[int] = []
+        pos = data.find(needle)
+        while pos != -1:
+            start = data.rfind(b"\n", 0, pos) + 1
+            if _LINE_HEAD_RE.fullmatch(data, start, pos + 1):
+                found.append(start)
+            pos = data.find(needle, pos + 1)
+        return found
+
+    return find(b"run_started"), find(b"run_finished")
+
+
+def line_at(data: bytes, start: int) -> dict[str, Any] | None:
+    """The JSON object on the line beginning at `start`, or None if it will not parse."""
+    end = data.find(b"\n", start)
+    try:
+        parsed = json.loads(data[start : end if end != -1 else len(data)])
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def last_wall_clock(path: Path, upto: int | None = None) -> Any:
+    """`wall_clock_s` from the last `run_started` in the first `upto` bytes."""
+    try:
+        with Path(path).open("rb") as handle:
+            data = handle.read() if upto is None else handle.read(upto)
+    except OSError:
+        return None
+    starts, _ = run_edges(data)
+    if not starts:
+        return None
+    line = line_at(data, starts[-1]) or {}
+    detail = line.get("detail")
+    return detail.get("wall_clock_s") if isinstance(detail, dict) else None
+
+
 def tail(
     store: RunStore,
     *,
@@ -82,6 +194,7 @@ def tail(
     stop_on_finish: bool = True,
     timeout_s: float | None = None,
     start_offset: int | None = None,
+    stale_after: float | None = None,
 ) -> Iterator[LedgerEntry]:
     """Yield ledger entries as they are appended, for `qaas trace --follow`.
 
@@ -95,9 +208,12 @@ def tail(
 
     The file may not exist yet. Following a run that is still starting is the
     normal case, not an error, so a missing ledger is waited for.
-    """
-    import time
 
+    With `stop_on_finish`, a ledger that has gone stale (`is_stale`) ends the
+    follow as `run_finished` would. `stale_after` is that silence in seconds
+    when the caller already knows it; otherwise it is read from the run's own
+    `run_started`.
+    """
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
     offset = 0
     if start_offset is not None:
@@ -111,27 +227,37 @@ def tail(
         offset = start_offset
     elif not from_start and store.ledger_path.exists():
         offset = store.ledger_path.stat().st_size
-    pending = ""
+    # Bytes, not text. This read the file in text mode and took `tell()` as the
+    # next offset, so a poll landing inside a multi-byte character decoded half
+    # of it as U+FFFD, advanced past it, and decoded the other half as another
+    # U+FFFD next time: the entry arrived with its prose mangled. And the
+    # dashboard hands this a *byte* offset from its replay, which only means the
+    # same thing to a binary read. Lines are split on b"\n" and decoded whole.
+    pending = b""
     #: Runs started minus runs finished, over what this reader has actually
     #: seen. With `from_start=False` the earlier session's `run_started` is
     #: behind the seek, so this stays at 0 and the next `run_finished` still
     #: ends the follow -- which is right, because that is the run ending.
     open_runs = 0
+    if stale_after is None and offset > 0:
+        # The run's `run_started` is behind the seek, so its cap has to be read
+        # from the part of the file this reader is not going to yield.
+        stale_after = stale_after_s(last_wall_clock(store.ledger_path, offset))
 
     while True:
+        chunk = b""
         if store.ledger_path.exists():
-            with store.ledger_path.open("r", encoding="utf-8", errors="replace") as handle:
+            with store.ledger_path.open("rb") as handle:
                 handle.seek(offset)
                 chunk = handle.read()
-                offset = handle.tell()
+            offset += len(chunk)
             pending += chunk
-            lines = pending.split("\n")
-            pending = lines.pop()  # the tail with no newline yet: not an entry
-            for line in lines:
-                if not line.strip():
+            *lines, pending = pending.split(b"\n")  # the tail with no newline yet: not an entry
+            for raw in lines:
+                if not raw.strip():
                     continue
                 try:
-                    entry = LedgerEntry.model_validate_json(line)
+                    entry = LedgerEntry.model_validate_json(raw.decode("utf-8", errors="replace"))
                 except Exception:
                     # A line this reader cannot parse is a line a future version
                     # wrote. Skipping it keeps the follow alive; killing the
@@ -146,10 +272,26 @@ def tail(
                 # because the old line was already in the file.
                 if entry.kind == LedgerKind.RUN_STARTED:
                     open_runs += 1
+                    # A resume restarts the clock and may run under a different
+                    # mode's cap; the newest `run_started` is the one in force.
+                    stale_after = stale_after_s(entry.detail.get("wall_clock_s"))
                 elif entry.kind == LedgerKind.RUN_FINISHED:
                     open_runs -= 1
                     if stop_on_finish and open_runs <= 0:
                         return
+        # A run killed by the operating system never writes `run_finished`, so
+        # the count above never reaches zero and this polled a dead file until
+        # someone pressed ^C. Silence longer than the run's own cap allows is
+        # the run ending too. Checked only on a poll that read nothing, so it is
+        # one `stat` per idle poll and never delays an entry.
+        if stop_on_finish and not chunk and store.ledger_path.exists():
+            limit = stale_after if stale_after is not None else stale_after_s(None)
+            try:
+                silent_for = time.time() - store.ledger_path.stat().st_mtime
+            except OSError:
+                silent_for = 0.0
+            if silent_for > limit:
+                return
         if deadline is not None and time.monotonic() >= deadline:
             return
         time.sleep(poll)
@@ -377,5 +519,18 @@ def summarise(store: RunStore, entries: Sequence[LedgerEntry] | None = None) -> 
     # lines: `put_result` writes one file per invocation precisely so repeated
     # agents (REPRODUCER, FIXER) are not under-counted, and this must agree with
     # `qaas runs`.
-    summary.cost_usd = store.total_cost_usd()
+    try:
+        summary.cost_usd = store.total_cost_usd()
+    except Exception:
+        # A run killed mid-`put_result` leaves a truncated `results/*.json`, and
+        # validating it raised straight out of `qaas show` -- the header of
+        # exactly the run someone was trying to find out about. `put_result`
+        # logs `agent_finished` with the same cost, so the ledger answers
+        # instead; it is the survivor for the same reason on the dashboard.
+        summary.cost_usd = sum(
+            float(e.detail.get("cost_usd") or 0.0)
+            for e in entries
+            if e.kind == LedgerKind.AGENT_FINISHED
+            and isinstance(e.detail.get("cost_usd"), (int, float))
+        )
     return summary

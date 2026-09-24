@@ -27,6 +27,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,21 @@ OUTPUT_TAIL = 6_000
 _EXIT_NO_TESTS = 5
 _EXIT_USAGE_ERROR = 4
 
+#: pytest's "the run never reached the test": 2 is an interrupted session (a
+#: collection error), 3 an internal error, 4 a usage error -- which is also
+#: what a `conftest.py` that does not import exits with. `_outcome_of` fell
+#: back to "failed" for all three, so a passing test in a repository whose
+#: conftest raised ImportError was reported as a failing one, and REPRODUCER
+#: would have cited that as a reproduction.
+_EXIT_DID_NOT_RUN = frozenset({2, 3, 4})
+
+_EXIT_MEANING = {
+    1: "tests failed",
+    2: "interrupted, usually by a collection error",
+    3: "pytest internal error",
+    4: "usage error: a conftest.py that does not import, or a path or option pytest refused",
+}
+
 _OUTCOMES = {
     "PASSED": "passed",
     "FAILED": "failed",
@@ -82,7 +98,11 @@ _DURATION_RE = re.compile(r"^(?P<seconds>\d+\.\d+)s\s+(?:call|setup|teardown)\s+
 
 # pytest reports an unknown nodeid as a usage error, not as "no tests ran", so
 # the two have to be told apart by the message rather than by the exit code.
-_NOT_FOUND_RE = re.compile(r"^ERROR: not found: ", re.MULTILINE)
+# A bare name that is not a nodeid ("test_does_not_exist") is reported as
+# "file or directory not found" instead, which this did not match -- so it fell
+# through to the exit-code fallback and came back "failed", a test failure for
+# a test that does not exist.
+_NOT_FOUND_RE = re.compile(r"^ERROR: (?:file or directory )?not found: ", re.MULTILINE)
 _UNKNOWN_OPTION_RE = re.compile(r"unrecognized (arguments|option)", re.IGNORECASE)
 
 _FAILURE_HEADER_RE = re.compile(r"^=+ (FAILURES|ERRORS) =+$", re.MULTILINE)
@@ -108,7 +128,60 @@ class _Completed:
 def _decode(raw: str | bytes | None) -> str:
     if raw is None:
         return ""
-    return raw if isinstance(raw, str) else raw.decode(errors="replace")
+    return raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
+
+
+#: `start_new_session` and `killpg` are POSIX. On Windows the child is killed
+#: alone, which is what every platform got before.
+_POSIX = os.name == "posix"
+
+#: How long to wait for the pipes to close once the group has been killed.
+_DRAIN_S = 5
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the child and everything it started.
+
+    `subprocess.run(timeout=)` killed the child and nothing else, so a test that
+    spawned a server, `npx` and the node it runs, pytest-xdist's workers, and
+    each of `run_n_times`' up-to-twenty runs all kept running after the tool
+    had reported a timeout -- still holding ports and the database the next
+    run needed. The child is started in its own session, so its process group
+    is exactly what it started.
+    """
+    if _POSIX:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _drain(proc: subprocess.Popen, expired: subprocess.TimeoutExpired) -> tuple[str, str]:
+    """Everything the killed group wrote, without waiting on a pipe forever.
+
+    A second `communicate` returns the whole of both streams, including what
+    the first one read before it timed out. It can only hang if something
+    outside the group -- a process that called setsid itself -- still holds a
+    pipe, so it is bounded too, and the partial output on the first exception
+    is the answer then.
+    """
+    try:
+        out, errout = proc.communicate(timeout=_DRAIN_S)
+    except subprocess.TimeoutExpired:
+        out, errout = expired.stdout, expired.stderr
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+        try:
+            proc.wait(timeout=_DRAIN_S)
+        except subprocess.TimeoutExpired:
+            pass
+    return _decode(out), _decode(errout)
 
 
 #: Environment variables a child process legitimately needs. Everything else is
@@ -160,34 +233,68 @@ def _child_env(env_extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def _run(argv: list[str], cwd: Path, timeout_s: int, env_extra: dict[str, str] | None = None) -> _Completed:
+def _run(
+    argv: list[str],
+    cwd: Path,
+    timeout_s: int,
+    env_extra: dict[str, str] | None = None,
+    *,
+    on_start: Any = None,
+) -> _Completed:
     """Run argv under a hard timeout, returning partial output if it expires.
 
     `subprocess.run` kills the child and hands the partial streams back on the
     exception, which is the difference between "the suite hung, here is how far
-    it got" and an agent staring at nothing.
+    it got" and an agent staring at nothing. It is `Popen` now so the kill can
+    reach the whole process group (`_kill_group`); `_drain` keeps the partial
+    streams.
+
+    Decoded as UTF-8 with replacement. `text=True` decoded strictly, so one
+    Latin-1 byte anywhere in a test's output raised UnicodeDecodeError out of
+    `subprocess.run` and the tool raised instead of returning -- every row
+    lost for one stray byte in a log line.
     """
     env = _child_env(env_extra)
 
     started = time.monotonic()
     try:
-        proc = subprocess.run(
-            argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout_s, check=False
-        )
-    except subprocess.TimeoutExpired as exc:
-        return _Completed(
-            argv, -1, _decode(exc.stdout), _decode(exc.stderr), time.monotonic() - started, True
+        proc = subprocess.Popen(
+            argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", errors="replace", start_new_session=_POSIX,
         )
     except OSError as exc:
         return _Completed(argv, -1, "", f"could not start {argv[0]}: {exc}", 0.0, False, started=False)
+    if on_start is not None:
+        on_start(proc)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        _kill_group(proc)
+        stdout, stderr = _drain(proc, exc)
+        return _Completed(argv, -1, stdout, stderr, time.monotonic() - started, True)
     return _Completed(
-        argv, proc.returncode, proc.stdout, proc.stderr, time.monotonic() - started, False
+        argv, proc.returncode, stdout or "", stderr or "", time.monotonic() - started, False
     )
 
 
 async def _run_async(argv: list[str], cwd: Path, timeout_s: int, env_extra: dict[str, str] | None = None) -> _Completed:
-    """Off the event loop: a 300s suite must not block the other tools."""
-    return await asyncio.to_thread(_run, argv, cwd, timeout_s, env_extra)
+    """Off the event loop: a 300s suite must not block the other tools.
+
+    The child has its own session now (see `_kill_group`), so a Ctrl-C at the
+    terminal no longer reaches it, and a cancelled tool call -- the router's
+    wall clock preempting an agent, or the operator stopping the run -- would
+    leave it running while the worker thread waited out its whole timeout.
+    Cancellation kills the group instead.
+    """
+    live: list[subprocess.Popen] = []
+    try:
+        return await asyncio.to_thread(
+            _run, argv, cwd, timeout_s, env_extra, on_start=live.append
+        )
+    except asyncio.CancelledError:
+        for proc in live:
+            _kill_group(proc)
+        raise
 
 
 def _resolve_cwd(ctx: ToolContext, raw: str | None) -> tuple[Path | None, str | None]:
@@ -232,6 +339,17 @@ def _selector_refusal(ctx: ToolContext, cwd: Path, selector: str) -> str | None:
             f"selector '{selector}' may not start with '-': pytest reads it as an "
             "option rather than a test to run. Name a path, a nodeid, or a -k "
             "expression without a leading dash."
+        )
+    # pytest expands `@file` into arguments read from that file -- its own
+    # argsfile feature, and the same door as a leading dash one step removed:
+    # `run_single("@args.txt")` loaded `-p no:terminal` out of the file and ran
+    # a test outside the root, past every check below, because none of them
+    # can see what the file says.
+    if selector.startswith("@"):
+        return (
+            f"selector '{selector}' may not start with '@': pytest reads it as a "
+            "file of extra arguments rather than a test to run. Name a path, a "
+            "nodeid, or a -k expression."
         )
     root = ctx.target_root.resolve()
     resolved = _selector_head(cwd, selector)
@@ -292,10 +410,15 @@ def _single_selectors(cwd: Path, test_id: str) -> list[str]:
     runner = _detect_runner(cwd)
     if runner not in _JS_RUNNERS:
         return [test_id]
+    # One token, `--testNamePattern=<title>`, never `-t <title>`. The title is
+    # the part after `::`, which `_selector_refusal` never sees the start of,
+    # so `file.test.ts::--rootDir=..` became `-t --rootDir=..` and the runner
+    # read the title as a flag of its own. Joined, it is the value of the
+    # pattern whatever it starts with.
     file, _, title = test_id.partition("::")
     if title:
-        return [file, _KEYWORD_FLAG[runner], title]
-    return [_KEYWORD_FLAG[runner], test_id]
+        return [file, f"--testNamePattern={title}"]
+    return [f"--testNamePattern={test_id}"]
 
 
 def _selector_head(cwd: Path, selector: str) -> Path:
@@ -628,8 +751,48 @@ def _matched_nothing(proc: _Completed) -> bool:
     )
 
 
+def _never_ran(proc: _Completed, rows: list[dict[str, Any]], found: bool) -> bool:
+    """Whether the run produced no result for what it was asked about.
+
+    `found` is whether a result row answers the question -- the row for the
+    one test `run_single` wanted, or any row at all for a suite. A timeout is
+    not this: it has its own outcome and its partial results are real.
+
+    Before this, both shapes came back as ordinary results. A `conftest.py`
+    raising ImportError exits 4 with no rows, which `run_suite` reported as a
+    successful "0 tests: none run" and `run_single` -- on a test that passes --
+    as "failed", from the exit-code fallback. Neither is an outcome of the
+    test; the suite never reached it.
+    """
+    if proc.timed_out or not proc.started:
+        return False
+    if not found and proc.returncode in _EXIT_DID_NOT_RUN:
+        return True
+    return not rows and proc.returncode != 0
+
+
+def _never_ran_reason(proc: _Completed, what: str, note: str = "") -> str:
+    """The `err()` text for a run that never reached `what`, with its output."""
+    meaning = _EXIT_MEANING.get(proc.returncode, "no result was reported")
+    return (
+        f"{what} did not run: the runner exited {proc.returncode} ({meaning}) and "
+        "reported no result for it. This is not a test outcome -- do not record it "
+        "as a failure or a pass. Fix what the output below names, then run again."
+        + (f" {note}" if note else "")
+        + "\n\n"
+        + (_tail(proc) or "(no output)")
+    )
+
+
 def _outcome_of(rows: list[dict[str, Any]], test_id: str, proc: _Completed) -> str:
-    """One test's outcome, falling back to the exit code if parsing missed it."""
+    """One test's outcome, falling back to the exit code if parsing missed it.
+
+    The fallback is for a row the terminal parser missed in a run that really
+    happened. "failed" used to be what everything else fell through to, so a
+    run that never reached the test -- a conftest that does not import, a
+    usage error -- read as a test failure. That is "not_run" now, and every
+    caller turns it into an `err()` before an agent sees it.
+    """
     for row in rows:
         if row["nodeid"] == test_id or row["nodeid"].endswith(test_id):
             return row["outcome"]
@@ -637,6 +800,8 @@ def _outcome_of(rows: list[dict[str, Any]], test_id: str, proc: _Completed) -> s
         return "timeout"
     if _matched_nothing(proc):
         return "not_collected"
+    if _never_ran(proc, rows, found=False):
+        return "not_run"
     if proc.returncode == 0:
         return "passed"
     return "failed"
@@ -710,6 +875,8 @@ def build_tools(ctx: ToolContext) -> list:
                 f"No tests matched {selector or 'the default collection'} in {cwd}. "
                 "Check the selector against the files that exist."
             )
+        if _never_ran(proc, rows, found=bool(rows)):
+            return err(_never_ran_reason(proc, f"The suite in {cwd}"))
 
         totals = _totals(rows)
         structured = {
@@ -784,6 +951,8 @@ def build_tools(ctx: ToolContext) -> list:
                 "full test title'."
                 + (f" Titles in range: {titles}" if titles else "")
             )
+        if _never_ran(proc, rows, found=row is not None):
+            return err(_never_ran_reason(proc, f"'{test_id}'"))
         outcome = _outcome_of(rows, test_id, proc)
         detail = _failure_detail(proc.stdout)
         structured = {
@@ -861,9 +1030,24 @@ def build_tools(ctx: ToolContext) -> list:
                 return err(proc.stderr)
             if attempt == 0 and _matched_nothing(proc):
                 return err(f"'{test_id}' matched no test in {cwd}.")
+            row = next((r for r in rows if r["nodeid"] == test_id or r["nodeid"].endswith(test_id)), None)
+            # The JS runners' `-t` matching nothing skips every test and exits
+            # 0, which `run_single` already refuses to read as "passed" and
+            # this loop still did -- twenty times, as "stable (passed)".
+            if attempt == 0 and row is None and _detect_runner(cwd) in _JS_RUNNERS:
+                return err(f"'{test_id}' matched no test in {cwd}.")
+            # A run that never reached the test is not a sample of it. Counted,
+            # a broken conftest came back "stable (failed)" over twenty runs;
+            # mixed in, it would move the flake rate REPRODUCER's verdict
+            # turns on. Either way the number is about the harness, not the
+            # test, so the investigation stops and says why.
+            if _never_ran(proc, rows, found=row is not None):
+                return err(_never_ran_reason(
+                    proc, f"'{test_id}' (run {attempt + 1} of {n})",
+                    note=f"Runs before it: {outcomes}." if outcomes else "",
+                ))
             outcome = _outcome_of(rows, test_id, proc)
             outcomes.append(outcome)
-            row = next((r for r in rows if r["nodeid"] == test_id or r["nodeid"].endswith(test_id)), None)
             if row and row.get("message"):
                 messages.append(f"run {attempt + 1}: {row['message']}")
 
@@ -932,11 +1116,17 @@ def build_tools(ctx: ToolContext) -> list:
         # "a fix inside a shared helper breaks its consumers, not itself" -- and
         # `_score_tests` scores it zero, because it compares filenames and the
         # consumer's filename has nothing to do with the changed one.
-        derived, unreadable = await asyncio.to_thread(_graph_tests, cwd, paths)
+        derived, unreadable, truncated = await asyncio.to_thread(_graph_tests, cwd, paths)
         # What the graph could not read travels with both answers. "Nothing
         # imports the changed file" and "I cannot read this language" are
         # different facts and the second one is only knowable here.
-        tail = f"\n{unreadable}" if unreadable else ""
+        # So does where it stopped reading: past `importgraph.MAX_MODULES` the
+        # graph is partial, and that flag was never read, so a partial ranking
+        # -- or a fallback forced by a changed file the graph never reached --
+        # was presented as the complete answer.
+        tail = "".join(
+            f"\n{note}" for note in (unreadable, _truncation_note(truncated)) if note
+        )
         if derived:
             return ok(
                 "Covering tests by import graph, nearest first: "
@@ -952,6 +1142,7 @@ def build_tools(ctx: ToolContext) -> list:
                 heuristic=False,
                 method="import-graph",
                 unreadable=unreadable,
+                truncated=truncated,
             )
 
         scored = await asyncio.to_thread(_score_tests, cwd, paths, candidates)
@@ -963,6 +1154,7 @@ def build_tools(ctx: ToolContext) -> list:
                 heuristic=True,
                 method="filename-heuristic",
                 unreadable=unreadable,
+                truncated=truncated,
             )
         return ok(
             "Likely covering tests, best first: "
@@ -976,6 +1168,7 @@ def build_tools(ctx: ToolContext) -> list:
             method="filename-heuristic",
             searched=len(candidates),
             unreadable=unreadable,
+            truncated=truncated,
         )
 
     @tool(
@@ -1086,7 +1279,18 @@ def _collect_test_files(root: Path) -> list[Path]:
     return [p for p in importgraph.source_files(root) if importgraph.is_test_file(p)]
 
 
-def _graph_tests(root: Path, changed: list[str]) -> tuple[list[dict[str, Any]], str | None]:
+def _truncation_note(truncated: bool) -> str | None:
+    """One sentence saying the graph stopped at its cap, or None."""
+    if not truncated:
+        return None
+    return (
+        f"The import graph stopped at {importgraph.MAX_MODULES} source files, so it "
+        "is incomplete: a test outside what it read is missing from this answer, "
+        "not unaffected. Run the full suite before concluding nothing broke."
+    )
+
+
+def _graph_tests(root: Path, changed: list[str]) -> tuple[list[dict[str, Any]], str | None, bool]:
     """Covering tests from the import graph, plus what the graph could not read.
 
     Empty is the honest answer in three cases and the caller must fall back in
@@ -1099,15 +1303,21 @@ def _graph_tests(root: Path, changed: list[str]) -> tuple[list[dict[str, Any]], 
 
     Never raises -- the fallback exists precisely so a ranking failure is never
     a verification failure.
+
+    The note also says when the graph was *truncated*. `importgraph` stops at
+    `MAX_MODULES` and records it -- "reported rather than silently applied",
+    its own comment says -- and nothing here read the flag, so on a repository
+    past the cap a partial ranking was presented as the complete one.
     """
     try:
         graph = importgraph.build(root)
         note = graph.unreadable_note
+        truncated = bool(getattr(graph, "truncated", False))
         if not graph:
-            return [], note
+            return [], note, truncated
         rows = graph.affected_tests(changed)
     except Exception:  # noqa: BLE001 — a ranking is never worth failing a phase for
-        return [], None
+        return [], None, False
     return [
         {
             "test_file": r["test_file"],
@@ -1119,7 +1329,7 @@ def _graph_tests(root: Path, changed: list[str]) -> tuple[list[dict[str, Any]], 
             ),
         }
         for r in rows
-    ], note
+    ], note, truncated
 
 
 def _conventional_names(stem: str) -> set[str]:

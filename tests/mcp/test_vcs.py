@@ -417,3 +417,119 @@ def test_an_agent_whose_sandbox_is_its_work_is_unaffected(repo: Path, tmp_path: 
     result = asyncio.run(tools["commit"]({"message": "Pin the defect"}))
     assert not result.get("is_error"), result["content"][0]["text"]
     assert "qa/repro/failing.test.ts" in git(repo, "show", "--name-only", "--format=", "HEAD")
+
+
+# -- what a commit contains, and where a branch starts ---------------------------
+
+
+def _fixer_ctx(repo: Path, tmp_path: Path, **policy) -> ToolContext:
+    ctx = make_ctx("FIXER", repo, tmp_path)
+    spec = ctx.agent.model_copy(deep=True)
+    spec.policy.write_paths = ["src", "qa/repro"]
+    spec.policy.scratch_paths = ["qa/repro"]
+    spec.policy.forbidden_paths = ["*auth*"]
+    for field, value in policy.items():
+        setattr(spec.policy, field, value)
+    ctx.agent = spec
+    ctx.scope = "CORVID-1"
+    return ctx
+
+
+async def test_a_commit_takes_only_its_own_paths_not_the_whole_index(repo, tmp_path):
+    """`git commit` commits the index. A `secret.env` the operator staged before
+    the run went into REPRODUCER's commit, and from there onto a pushed branch."""
+    (repo / "secret.env").write_text("TOKEN=x\n")
+    git(repo, "add", "secret.env")
+    tools = tools_for(make_ctx("REPRODUCER", repo, tmp_path))
+    await tools["create_branch"]({"name": "qa/repro/one"})
+    (repo / "qa" / "repro" / "test_one.py").write_text("def test_x(): assert False\n")
+    result = await tools["commit"]({"message": "repro"})
+    assert not result.get("is_error"), result
+    committed = git(repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert committed == ["qa/repro/test_one.py"]
+    assert git(repo, "diff", "--cached", "--name-only").split() == ["secret.env"]
+
+
+async def test_a_file_changed_behind_the_guardrail_is_checked_at_commit(repo, tmp_path):
+    """The pathspec `src` passed `_check_path`; the `src/auth.py` it staged never did."""
+    ctx = _fixer_ctx(repo, tmp_path)
+    tools = tools_for(ctx)
+    await tools["create_branch"]({"name": "fix/CORVID-1"})
+    (repo / "src" / "auth.py").write_text("ALLOW_ALL = True\n")  # e.g. via a script in Bash
+    result = await tools["commit"]({"message": "fix"})
+    assert result.get("is_error")
+    assert "autonomy envelope" in result["content"][0]["text"]
+    assert git(repo, "diff", "--cached", "--name-only").strip() == ""
+
+
+async def test_the_file_budget_counts_what_a_commit_stages(repo, tmp_path):
+    ctx = _fixer_ctx(repo, tmp_path, max_diff_files=2)
+    tools = tools_for(ctx)
+    await tools["create_branch"]({"name": "fix/CORVID-1"})
+    for i in range(4):
+        (repo / "src" / f"m{i}.py").write_text("x = 1\n")
+    result = await tools["commit"]({"message": "fix"})
+    assert result.get("is_error")
+    assert "(§8.2)" in result["content"][0]["text"]
+
+
+async def test_the_line_budget_is_enforced_at_commit(repo, tmp_path):
+    """`max_diff_lines` was told to FIXER as enforced, and nothing enforced it."""
+    ctx = _fixer_ctx(repo, tmp_path, max_diff_lines=10)
+    tools = tools_for(ctx)
+    await tools["create_branch"]({"name": "fix/CORVID-1"})
+    (repo / "src" / "app.py").write_text("".join(f"V{i} = {i}\n" for i in range(30)))
+    result = await tools["commit"]({"message": "too wide"})
+    assert result.get("is_error")
+    assert "(§8.2)" in result["content"][0]["text"]
+    assert any("(§8.2)" in d.get("reason", "") for d in denials(ctx))
+
+
+async def test_scratch_lines_do_not_count_and_a_small_fix_commits(repo, tmp_path):
+    ctx = _fixer_ctx(repo, tmp_path, max_diff_lines=10)
+    tools = tools_for(ctx)
+    await tools["create_branch"]({"name": "fix/CORVID-1"})
+    (repo / "src" / "app.py").write_text("VALUE = 2\n")
+    (repo / "qa" / "repro" / "probe.py").write_text("".join(f"# {i}\n" for i in range(200)))
+    result = await tools["commit"]({"message": "fix", "paths": ["src", "qa/repro"]})
+    assert not result.get("is_error"), result
+    assert ctx.store.committed_lines("FIXER", "CORVID-1") == 2
+
+
+async def test_a_new_branch_starts_from_the_base_not_from_what_is_checked_out(repo, tmp_path):
+    """The tree is shared across findings, so "the current HEAD" was wherever the
+    previous agent had left it -- and every later PR carried its commits."""
+    ctx = make_ctx("REPRODUCER", repo, tmp_path)
+    ctx.base_ref = "main"
+    tools = tools_for(ctx)
+    await tools["create_branch"]({"name": "qa/repro/first"})
+    (repo / "qa" / "repro" / "test_first.py").write_text("x = 1\n")
+    await tools["commit"]({"message": "first"})
+    await tools["create_branch"]({"name": "qa/repro/second"})
+    files = git(repo, "diff", "--name-only", "main", "HEAD").split()
+    assert "qa/repro/test_first.py" not in files
+
+
+async def test_a_security_fix_is_committed_but_never_published(repo, tmp_path):
+    """The tracker keeps a security finding out of a readable backlog; nothing kept
+    its fix off a public remote as a branch and a PR describing the hole."""
+    from qaas.envelope import DefectEnvelope
+
+    ctx = _fixer_ctx(repo, tmp_path)
+    ctx.agent.policy.may_open_pr = True
+    ctx.store.put_envelope(DefectEnvelope(
+        run_id=ctx.store.run_id, discovered_by="AUDITOR", domain="security",
+        **{"class": "vulnerability"}, title="IDOR on orders", summary="s",
+        severity="critical", confidence=0.9, jira={"key": "CORVID-1"},
+    ))
+    tools = tools_for(ctx)
+    await tools["create_branch"]({"name": "fix/CORVID-1"})
+    for name, args in (("push", {}), ("open_pr", {"title": "t", "body": "b", "ticket": "CORVID-1"})):
+        result = await tools[name](args)
+        assert result.get("is_error"), name
+        assert "security" in result["content"][0]["text"].lower(), name
+
+
+def test_open_pr_leaves_the_base_to_the_repository_when_none_is_named(monkeypatch):
+    monkeypatch.delenv("GITHUB_DEFAULT_BRANCH", raising=False)
+    assert GitHubVcs.default_base(object.__new__(GitHubVcs)) is None

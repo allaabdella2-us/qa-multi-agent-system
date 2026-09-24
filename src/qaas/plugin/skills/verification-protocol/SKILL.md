@@ -28,7 +28,7 @@ Do not write a new, more forgiving test. Do not edit the existing one. Do not ac
 
 ## Three verdicts, no fourth
 
-- **VERIFIED** — original test passes, nothing else broke. Ticket to done, PR ready for a human to merge.
+- **VERIFIED** — original test passes, nothing else broke. Ticket to `resolved`, PR ready for a human to merge.
 - **NOT_FIXED** — original test still fails. Reopen with the exact delta between expected and observed. Be specific; the next agent works only from this.
 - **REGRESSED** — original passes, something else broke. Block and escalate, naming what broke.
 

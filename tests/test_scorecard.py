@@ -663,3 +663,52 @@ def test_ui_08_is_a_defect_and_reporting_it_is_not_a_false_positive():
     assert all(n.why_correct for n in ledger.not_defects), (
         "every not_defects entry must say why the code is correct"
     )
+
+
+# -- a ledger that cannot be scored against says so ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "said"),
+    [
+        ("", "empty"),
+        ("# nothing but a comment\n", "empty"),
+        ("- API-01\n- API-02\n", "list"),
+        ("just a string\n", "str"),
+        ("defects: 5\n", "defects"),
+        ("defects:\n  - not a mapping\n", "defects[0]"),
+        ("defects:\n  - {id: X-1, domain: api, title: t}\n", "severity"),
+        ("not_defects:\n  - {title: no id}\n", "id"),
+        ("defects: [unclosed\n", "YAML"),
+    ],
+)
+def test_a_malformed_ledger_is_a_typed_error_naming_the_file(tmp_path, text, said):
+    """An empty or non-mapping `defects.yaml` was `AttributeError: 'NoneType'
+    object has no attribute 'get'` -- a traceback out of `qaas score` and a 500
+    on the Score tab, neither naming the file."""
+    from qaas.scorecard import GoldenLedgerError
+
+    path = tmp_path / "defects.yaml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(GoldenLedgerError) as caught:
+        GoldenLedger.load(path)
+    assert str(path) in str(caught.value) or "X-1" in str(caught.value)
+    assert said in str(caught.value)
+
+
+def test_the_typed_error_is_still_a_value_error(tmp_path):
+    """Callers that caught the enum errors as ValueError keep catching these."""
+    from qaas.scorecard import GoldenLedgerError
+
+    assert issubclass(GoldenLedgerError, ValueError)
+
+
+def test_a_ledger_with_no_not_defects_section_still_loads(tmp_path):
+    path = tmp_path / "defects.yaml"
+    path.write_text(
+        "defects:\n  - {id: X-1, domain: api, severity: major, title: t}\nnot_defects:\n",
+        encoding="utf-8",
+    )
+    ledger = GoldenLedger.load(path)
+    assert [d.id for d in ledger.defects] == ["X-1"]
+    assert ledger.not_defects == []

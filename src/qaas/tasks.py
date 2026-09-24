@@ -416,8 +416,10 @@ For each one, in this order:
 2. Score severity against the rubric, by consequence to users.
 3. {owners}
 4. Compose the ticket in the house format, with REPRODUCER's steps verbatim and the
-   failing test as the acceptance criterion.
-5. Route by class. Security findings go to the restricted project.
+   failing test as the acceptance criterion, and file it with
+   `create_issue(envelope_id=<that finding's id>, ...)` -- one ticket per envelope.
+5. Routing is read from the envelope: security findings go to the restricted project
+   whatever project you name, and a finding that already carries a ticket is refused.
 6. `record` the defect in memory with its ticket key, so the next run dedupes
    against it.
 

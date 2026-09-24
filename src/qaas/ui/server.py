@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -107,11 +108,13 @@ class RunWatcher:
     def start(self) -> None:
         if self._thread is not None or self.done:
             return
-        if self.view.completed:
+        if self.view.completed or self.view.interrupted:
             # Nothing to tail. `tail(from_start=False)` seeks to EOF, and this
             # run's `run_finished` is already behind that offset -- so the
             # thread would poll a file that will never change again, forever,
-            # for every finished run anyone opened.
+            # for every finished run anyone opened. An interrupted run is the
+            # same file with no `run_finished` in it: the same forever, minus
+            # even the line that would have ended it.
             self.done = True
             return
         # EOF is taken *here*, on the caller's thread, not inside `_tail`.
@@ -120,8 +123,18 @@ class RunWatcher:
         # seek and absent from the view -- dropped from the live stream with
         # nothing reporting it. On a loaded CI runner that window is wide enough
         # to lose a line reliably.
+        #
+        # And not from `stat()` either, when the replay can say. `stat()` after
+        # the replay still left a window -- a line appended between the read and
+        # the stat was in neither half -- and it put the offset past a
+        # half-written last line the replay had skipped, so the tail skipped it
+        # too. Both were lost for good, in the view cached for every tab. The
+        # replay's own offset is the last newline it parsed (`state.replay`).
         path = self.view.store.ledger_path
-        self._start_offset = path.stat().st_size if path.exists() else 0
+        if self.view.offset is not None:
+            self._start_offset = self.view.offset
+        else:
+            self._start_offset = path.stat().st_size if path.exists() else 0
         self._thread = threading.Thread(target=self._tail, daemon=True)
         self._thread.start()
         self._drain = asyncio.get_running_loop().create_task(self._pump())
@@ -134,6 +147,9 @@ class RunWatcher:
             for entry in trace.tail(
                 self.view.store, from_start=False, poll=self.poll, stop_on_finish=True,
                 start_offset=self._start_offset,
+                # The view already read the run's cap, so the tail need not
+                # re-read the file to learn when silence means death.
+                stale_after=trace.stale_after_s(self.view.wall_clock_s),
             ):
                 self._inbox.put(entry)
         finally:
@@ -160,7 +176,20 @@ class RunWatcher:
                 continue
             if entry is None:
                 self.done = True
-                self._broadcast("done", {"run_id": self.view.run_id, "completed": True})
+                # The tail also ends when the ledger goes stale (a killed run
+                # never writes `run_finished`). Announcing `completed: True`
+                # for that told the page a run had finished cleanly when it had
+                # died; the view says which it was.
+                if not self.view.completed:
+                    self.view.interrupted = True
+                self._broadcast(
+                    "done",
+                    {
+                        "run_id": self.view.run_id,
+                        "completed": self.view.completed,
+                        "interrupted": self.view.interrupted,
+                    },
+                )
                 return
             before = {n: a.status for n, a in self.view.agents.items()}
             self.view.apply(entry)
@@ -192,6 +221,7 @@ class RunWatcher:
                 "phase_status": view.phase_status,
                 "counts": view.counts,
                 "completed": view.completed,
+                "interrupted": view.interrupted,
                 "stopped_early": view.stopped_early,
                 "escalations": view.escalations,
                 "agents": moved,
@@ -240,6 +270,8 @@ class Dashboard:
         poll: float = trace.POLL_INTERVAL_S,
         cfg: Any = None,
         config_dirs: list[Path] | None = None,
+        state_root: Path | str | None = None,
+        target_root: Path | str | None = None,
     ) -> None:
         self.root = Path(root)
         self.specs = dict(specs or {})
@@ -250,14 +282,49 @@ class Dashboard:
         self.cfg = cfg
         #: The config search path, nearest first. The override file is written
         #: to the nearest writable layer, which is the project's own `.qaas`.
+        #:
+        #: *This* list, everywhere on the page: the override route validates and
+        #: writes against it and `/api/config` reports it. `/api/config` used to
+        #: re-resolve the workspace from the cwd instead, so a dashboard started
+        #: with `--config` showed one search path and wrote to another.
         self.config_dirs = list(config_dirs or [])
+        #: Where `.qaas/config` is created when no layer on the path may take an
+        #: override -- see `config_write.override_layer`. The run root by
+        #: default, which is the state directory the page is reading.
+        self.state_root = Path(state_root) if state_root is not None else self.root
         self.min_confidence = min_confidence
         #: The golden ledger of the active target, when it has one. Most targets
         #: never will -- it is a property of a calibration app, not of an
         #: application (cli.py:1229-1237).
         self.ledger_path = ledger_path
+        #: The application that golden ledger describes. A run records the root
+        #: it ran against, and one against any other application is refused a
+        #: score rather than measured against the wrong oracle (`_score`).
+        if target_root is None and cfg is not None:
+            try:
+                profile = getattr(cfg, "profile", None)
+                target_root = profile.root_path() if profile is not None else None
+            except Exception:
+                target_root = None
+        self.target_root = Path(target_root) if target_root is not None else None
         self.poll = poll
         self.watchers: dict[str, RunWatcher] = {}
+
+    def workspace(self):
+        """The resolved workspace, with this dashboard's config path in it."""
+        import dataclasses
+
+        from qaas.paths import Workspace
+
+        workspace = Workspace.resolve()
+        # The state root shown is the one this page reads runs from, which is
+        # not the cwd's `.qaas` when `--root` said otherwise.
+        workspace = dataclasses.replace(workspace, state_root=self.state_root.resolve())
+        if self.config_dirs:
+            workspace = dataclasses.replace(
+                workspace, config_dirs=tuple(Path(d) for d in self.config_dirs)
+            )
+        return workspace
 
     def store(self, run_id: str) -> RunStore | None:
         store = RunStore(run_id, root=self.root, create=False)
@@ -339,12 +406,15 @@ async def _index(request: Request) -> Response:
 async def _runs(request: Request) -> Response:
     dash: Dashboard = request.app.state.dash
     limit = _int_param(request.query_params.get("limit"), 50, low=1, high=1000)
-    return _ok(state.list_runs_summary(dash.root, limit))
+    # Off the event loop. This is file I/O across every listed run, and while it
+    # ran inline every SSE stream on the page stopped delivering -- a frozen
+    # live view is indistinguishable from a stalled run.
+    return _ok(await asyncio.to_thread(state.list_runs_summary, dash.root, limit))
 
 
 async def _live(request: Request) -> Response:
     dash: Dashboard = request.app.state.dash
-    run_id = state.pick_run(dash.root)
+    run_id = await asyncio.to_thread(state.pick_run, dash.root)
     if run_id is None:
         return _err("no runs yet — qaas run --mode pr-check")
     return _ok({"run_id": run_id})
@@ -447,9 +517,32 @@ async def _score(request: Request) -> Response:
         return _err(
             "this target has no golden ledger, so there is nothing to score against"
         )
-    from qaas.scorecard import GoldenLedger, score as score_run
+    # The golden ledger is the *configured* target's, and a run records the
+    # target it actually ran against. They differ for every `qaas run --repo`
+    # run, and this scored all of them against the demo's `defects.yaml` anyway:
+    # recall and precision measured against another application's defect list,
+    # rendered as metric tiles. A wrong oracle is worse than none, because its
+    # numbers look like numbers -- the same reason `qaas score` grew `--target`.
+    ran_against = state.run_started_detail(store).get("target_root")
+    if dash.target_root is not None and ran_against:
+        if not _same_path(ran_against, dash.target_root):
+            return _err(
+                f"this run was against {ran_against}, but the golden ledger belongs "
+                f"to the configured target at {dash.target_root}. Scoring one "
+                "application's findings against another's defect list would produce "
+                "numbers that mean nothing. Score it with `qaas score "
+                f"{store.run_id} --target <profile>` using that application's own "
+                "profile, if it has a ledger.",
+                409,
+            )
+    from qaas.scorecard import GoldenLedger, GoldenLedgerError, score as score_run
 
-    golden = GoldenLedger.load(Path(dash.ledger_path))
+    try:
+        golden = GoldenLedger.load(Path(dash.ledger_path))
+    except (GoldenLedgerError, ValueError, OSError) as exc:
+        # A hand-edited `defects.yaml` that is empty or not a mapping was an
+        # AttributeError here, and a 500 with nothing on the tab.
+        return _err(f"the golden ledger at {dash.ledger_path} cannot be read: {exc}", 422)
     card = score_run(store.envelopes(), golden, cost_usd=store.total_cost_usd())
     payload = card.summary()
     payload["matches"] = [
@@ -471,9 +564,21 @@ async def _score(request: Request) -> Response:
     return _ok(payload)
 
 
+def _same_path(a: str | Path, b: str | Path) -> bool:
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return str(a) == str(b)
+
+
 async def _map(request: Request) -> Response:
     dash: Dashboard = request.app.state.dash
-    payload = state.system_map(dash.root, request.query_params.get("version"))
+    try:
+        payload = state.system_map(dash.root, request.query_params.get("version"))
+    except state.UnknownMapVersion as exc:
+        # `?version=../../secret` returned `<root>/../secret.json`. A version is
+        # now one the map store lists, or it is refused.
+        return _err(str(exc), 404)
     return _ok(payload) if payload is not None else _err("no system map yet — run MAPPER")
 
 
@@ -485,16 +590,20 @@ async def _stream(request: Request) -> Response:
     watcher = dash.watcher(run_id)
     if watcher is None:
         return _err("no such run")
+    # Attach and snapshot together, with no `await` between them. The snapshot
+    # used to be serialised later, inside the generator, after the response had
+    # started -- and `_pump` runs on this loop, so every entry it applied in
+    # that gap was both in the snapshot *and* already queued for this client as
+    # a delta. The page then pushed it twice: a doubled feed line, a finding
+    # listed twice. On one loop turn nothing can be applied between the two.
     client = watcher.attach()
+    snapshot = json.dumps(watcher.view.to_json(), default=_json_default)
 
     async def events():
         try:
             # The snapshot comes from the view the watcher already holds, so a
             # tab joining at line 40,000 costs one serialisation, not one reparse.
-            yield {
-                "event": "snapshot",
-                "data": json.dumps(watcher.view.to_json(), default=_json_default),
-            }
+            yield {"event": "snapshot", "data": snapshot}
             # A run that is already over has nothing further to say, and the
             # stream must *end* rather than idle: an EventSource held open on a
             # finished run is a connection per tab that never closes, and the
@@ -526,7 +635,7 @@ async def _config(request: Request) -> Response:
     from qaas.ui.config_view import ConfigView
 
     dash: Dashboard = request.app.state.dash
-    return JSONResponse(ConfigView(dash.cfg).to_json())
+    return JSONResponse(ConfigView(dash.cfg, dash.workspace()).to_json())
 
 
 async def _set_override(request: Request) -> Response:
@@ -540,7 +649,7 @@ async def _set_override(request: Request) -> Response:
     here at all, and `test_the_write_route_cannot_touch_a_policy` is what keeps
     it true.
     """
-    from qaas.ui.config_write import OverrideError, reset, set_values
+    from qaas.ui.config_write import OverrideError, effective_dirs, reset, set_values
 
     dash: Dashboard = request.app.state.dash
     if not dash.config_dirs:
@@ -549,19 +658,41 @@ async def _set_override(request: Request) -> Response:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "expected a JSON body"}, status_code=400)
+    # `[]`, `"x"` and `null` are all valid JSON, and `body.get` on them was an
+    # AttributeError and a 500. The shape is checked here and the field types in
+    # `set_values`, so a malformed request is always a 400 that says why.
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": "expected a JSON object: {section, agent, values} or {reset: true}"},
+            status_code=400,
+        )
+    if "reset" in body and not isinstance(body["reset"], bool):
+        return JSONResponse({"error": "reset must be true or false"}, status_code=400)
 
+    values = body.get("values")
     try:
         if body.get("reset"):
-            data = reset(dash.config_dirs)
+            data = reset(dash.config_dirs, state_root=dash.state_root)
         else:
             data = set_values(
                 dash.config_dirs,
-                section=str(body.get("section") or ""),
+                section=body.get("section") or "",
                 key=body.get("agent"),
-                values=dict(body.get("values") or {}),
+                values={} if values is None else values,
+                state_root=dash.state_root,
             )
     except OverrideError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    except OSError as exc:
+        # Unwritable is a fact about this machine, not a crash: say which file.
+        return JSONResponse(
+            {"error": f"could not write the overrides file: {exc}"}, status_code=500
+        )
+
+    # The layer written to may be one this list did not have yet -- the
+    # `<state_root>/config` a first override creates -- and the reload below and
+    # `/api/config` must both see it.
+    dash.config_dirs = effective_dirs(dash.config_dirs, state_root=dash.state_root)
 
     # Reload so the response is what a run would now see, not what was asked
     # for. They differ whenever a nearer layer still shadows the field.
@@ -602,9 +733,35 @@ def build_app(dash: Dashboard) -> Starlette:
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1", "0.0.0.0"})
 
 
+def _host_name(host: str) -> str:
+    """The name in a Host header or an origin's netloc, without its port.
+
+    An IPv6 literal is bracketed precisely so its colons are not a port
+    separator -- `[::1]:7777`. This split on a single colon only, so a
+    bracketed address with a port kept its port, matched nothing in the set,
+    and a dashboard served on `--host ::1` answered its own page with 421.
+    """
+    host = host.strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        # Only a port may follow the bracket: `[::1].evil.example` is a name,
+        # not the loopback literal it starts with.
+        if end == -1 or not _PORT_RE.fullmatch(host[end + 1 :]):
+            return host
+        return host[1:end]
+    if host.count(":") == 1:
+        name, _, port = host.partition(":")
+        return name if _PORT_RE.fullmatch(":" + port) else host
+    return host  # a bare IPv6 literal, or a name with no port
+
+
+#: What may follow a host name in a Host header: nothing, or `:<digits>`.
+_PORT_RE = re.compile(r"(?::\d*)?")
+
+
 def _host_is_loopback(host: str) -> bool:
-    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
-    return name.lower() in _LOOPBACK_HOSTS or host.lower() in _LOOPBACK_HOSTS
+    name = _host_name(host)
+    return name in _LOOPBACK_HOSTS or host.lower() in _LOOPBACK_HOSTS
 
 
 class LocalOnly(BaseHTTPMiddleware):

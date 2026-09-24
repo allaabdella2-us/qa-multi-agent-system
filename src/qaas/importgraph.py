@@ -49,6 +49,7 @@ import ast
 import json
 import posixpath
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -145,7 +146,13 @@ class ImportGraph:
     #: whose source does not parse produces a thin graph, and a caller reporting
     #: "no affected tests" should be able to say why.
     unparsed: list[str] = field(default_factory=list)
+    #: True when the walk stopped at `module_cap` with source files still
+    #: unread. The graph is then a subset, and "no test reaches this change"
+    #: may only mean the test was in the part not read -- `truncated_note` is
+    #: the sentence a caller passes on, as `unreadable_note` is for languages.
     truncated: bool = False
+    #: The cap the walk was held to (`build(max_modules=...)`).
+    module_cap: int = MAX_MODULES
     #: Extension -> how many files carrying it were walked past because this
     #: reads Python, TypeScript and JavaScript and nothing else. The difference
     #: between "nothing imports that" and "I cannot read this language", which
@@ -175,6 +182,22 @@ class ImportGraph:
         return (
             "This graph reads Python, TypeScript and JavaScript; it walked past "
             f"{listed} file(s), so nothing written in those languages is in it."
+        )
+
+    @property
+    def truncated_note(self) -> str | None:
+        """One sentence saying the graph stopped at its module cap, or None.
+
+        The cap is a latency bound, and a caller that ranks against a capped
+        graph without saying so reports "I looked at all of it" when it looked
+        at the first N. Worded here for the same reason `unreadable_note` is.
+        """
+        if not self.truncated:
+            return None
+        return (
+            f"The import graph stopped at its cap of {self.module_cap} source files, "
+            "so files past it are not in it and a test that reaches the change "
+            "only through them was not found."
         )
 
     def dependents_of(self, changed: list[str], *, max_depth: int = 6) -> dict[str, int]:
@@ -228,7 +251,7 @@ def build(root: Path | str, *, max_modules: int = MAX_MODULES) -> ImportGraph:
     files that exist, which is the same fact in the shape that language needs.
     """
     root = Path(root).resolve()
-    graph = ImportGraph(root=root)
+    graph = ImportGraph(root=root, module_cap=max_modules)
 
     files: list[Path] = []
     configs: list[Path] = []
@@ -238,10 +261,13 @@ def build(root: Path | str, *, max_modules: int = MAX_MODULES) -> ImportGraph:
             continue
         suffix = path.suffix.lower()
         if suffix in SOURCE_SUFFIXES:
-            files.append(path)
+            # Checked before the append, not after: stopping on reaching the cap
+            # flagged a repository of *exactly* `max_modules` files as truncated
+            # when every one of them had been read.
             if len(files) >= max_modules:
                 graph.truncated = True
                 break
+            files.append(path)
         elif suffix in OTHER_SOURCE_SUFFIXES:
             graph.unreadable[suffix] = graph.unreadable.get(suffix, 0) + 1
     if not files:
@@ -381,7 +407,14 @@ def _parse(path: Path) -> ast.AST | None:
     if text is None:
         return None
     try:
-        return ast.parse(text, filename=str(path))
+        # Warnings silenced for the parse. The target's `"\d"` in a regex
+        # string is a SyntaxWarning on 3.12, and `ast.parse` printed one per
+        # occurrence to this process's stderr -- the terminal of whoever ran
+        # the command, filled with complaints about somebody else's code while
+        # nothing had gone wrong.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return ast.parse(text, filename=str(path))
     except (SyntaxError, ValueError, RecursionError):
         # A file that does not parse is a file this cannot speak for. Python 2
         # left behind, a template with placeholders in it, something generated.
@@ -509,7 +542,12 @@ def _alias_tables(configs: list[Path], root: Path) -> list[_Aliases]:
     """
     merged: dict[str, _Aliases] = {}
     for path in configs:
-        options = _compiler_options(path, set())
+        try:
+            options = _compiler_options(path, set())
+        except (OSError, ValueError, RecursionError, RuntimeError):
+            # Belt to the braces inside: whatever one tsconfig does, it costs
+            # that config's aliases and never the graph.
+            continue
         if not options:
             continue
         config_dir = posixpath.dirname(_rel(path, root))
@@ -584,12 +622,21 @@ def _compiler_options(path: Path, seen: set[str]) -> dict:
     # A package extends (`@tsconfig/next/tsconfig.json`) lives in node_modules,
     # which is not walked and not read; only a relative one is followed.
     if isinstance(parent, str) and parent.startswith("."):
-        candidate = (path.parent / parent).resolve()
-        if candidate.is_dir():
-            candidate = candidate / "tsconfig.json"
-        elif candidate.suffix != ".json":
-            candidate = candidate.with_name(candidate.name + ".json")
-        if candidate.is_file():
+        # The string is someone else's, and the filesystem calls below raise on
+        # the ones it cannot represent: `"extends": "./\u0000x"` is valid JSON
+        # and made `resolve()` raise `ValueError: embedded null byte` straight
+        # out of `build()`, which promises never to raise. An `extends` that
+        # cannot be followed is an `extends` not followed.
+        try:
+            candidate = (path.parent / parent).resolve()
+            if candidate.is_dir():
+                candidate = candidate / "tsconfig.json"
+            elif candidate.suffix != ".json":
+                candidate = candidate.with_name(candidate.name + ".json")
+            followable = candidate.is_file()
+        except (OSError, ValueError, RuntimeError):
+            followable = False
+        if followable:
             inherited = _compiler_options(candidate, seen)
             # The child wins, which is what `extends` means.
             inherited.update(options)

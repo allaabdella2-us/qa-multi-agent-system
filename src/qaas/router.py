@@ -351,6 +351,13 @@ class Budget:
     def spend(self, amount: float) -> None:
         self.spent += amount
 
+    def seconds_left(self, *, reserve: bool = False) -> float:
+        """Clock remaining before the cap -- the reserved cap for the finding phases."""
+        limit = self.max_seconds
+        if reserve and self.reserve_fraction:
+            limit = self.max_seconds * (1.0 - self.reserve_fraction)
+        return limit - self.elapsed
+
     def check(self, *, reserve: bool = False) -> None:
         # `max_usd is None` means no spend ceiling -- the shipped config sets
         # none, because a dollar figure bakes one vendor's pricing into a tool
@@ -408,6 +415,8 @@ class Router:
         #: costs ten times as much as verifying one, and during development you
         #: almost always want one.
         self.tickets = set(tickets) if tickets else None
+        #: The ref this run started on -- see `_run_base`. Set by `run()`.
+        self._base_ref: str | None = None
 
     def _target_root(self) -> Path | None:
         """The checkout under examination, or None when nothing is configured.
@@ -425,7 +434,9 @@ class Router:
         if self.on_event:
             self.on_event(kind, detail)
 
-    def _context(self, store: RunStore, spec: AgentSpec, map_version: str | None) -> ToolContext:
+    def _context(
+        self, store: RunStore, spec: AgentSpec, map_version: str | None, scope: str | None = None
+    ) -> ToolContext:
         return ToolContext(
             store=store,
             maps=self.maps,
@@ -433,6 +444,7 @@ class Router:
             agent=spec,
             target_root=self.target_root,
             map_version=map_version,
+            scope=scope,
         )
 
     # -- the run ----------------------------------------------------------
@@ -459,91 +471,154 @@ class Router:
             wall_clock_s=run_mode.max_wall_clock_s,
             **target_revision(self._target_root()),
         )
+        self._base_ref = self._run_base(store)
         self._emit("run_started", run_id=store.run_id, mode=mode, agents=sorted(specs))
 
         map_version = self.maps.latest_version()
         #: Set by whichever phase hit the wall. Filing, verifying and reporting
         #: are skipped when it is set -- see `_stop_on_quota`.
         quota: QuotaExhausted | None = None
+        #: A Ctrl-C, a SIGTERM turned into cancellation, a SystemExit.
+        interrupted: BaseException | None = None
         try:
-            # The finding phases run against the reserved clock, so that running
-            # out of time means "stop looking" rather than "throw away what was
-            # found". Filing, verifying and reporting run against the full cap
-            # below, outside this try.
-            map_version = await self._phase_map(specs, store, budget, report)
-            await self._phase_discover(specs, store, budget, report, mode, map_version)
-            await self._phase_synthesise(specs, store, budget, report, mode, map_version)
-            # Reproduction is scheduled by whoever will consume the test.
-            #
-            # It ran here for every finding above the floor, and on a real run
-            # that meant twenty contexts producing twenty committed failing
-            # tests of which **three** were ever executed: seven findings became
-            # tickets, three of those reached a fix cycle, and the other
-            # seventeen tests cost ~$56 of a $76 run and were opened by nothing.
-            # Worse, they spent the wall clock the fix loop then ran out of --
-            # 87% of a three-hour cap to prepare work, twenty minutes to do it.
-            #
-            # So when the roster has a fix loop, `_verify_loop` reproduces the
-            # ticket it is about to work on, one at a time, and a ticket that
-            # never reaches remediation never pays for a test nobody reads.
-            #
-            # When it does *not* -- `pr-check` and `nightly` carry REPRODUCER
-            # without VERIFIER -- the committed failing test is the deliverable
-            # rather than an input, and there is no fix loop for it to starve.
-            # That run still reproduces eagerly, which is why this is a change
-            # of *scheduling* and not of behaviour.
-            if specs.get("VERIFIER") is None:
-                await self._phase_reproduce(specs, store, budget, report, map_version)
-        except QuotaExhausted as exc:
-            quota = exc
-        except BudgetExceeded as exc:
-            report.stopped_early = str(exc)
-            report.escalations.append(str(exc))
-            store.log("escalation", reason=str(exc))
-            self._emit("stopped", reason=str(exc))
+            try:
+                # The finding phases run against the reserved clock, so that
+                # running out of time means "stop looking" rather than "throw
+                # away what was found". Filing, verifying and reporting run
+                # against the full cap below.
+                map_version = await self._phase_map(specs, store, budget, report)
+                await self._phase_discover(specs, store, budget, report, mode, map_version)
+                await self._phase_synthesise(specs, store, budget, report, mode, map_version)
+                # Reproduction is scheduled by whoever will consume the test.
+                #
+                # It ran here for every finding above the floor, and on a real run
+                # that meant twenty contexts producing twenty committed failing
+                # tests of which **three** were ever executed: seven findings became
+                # tickets, three of those reached a fix cycle, and the other
+                # seventeen tests cost ~$56 of a $76 run and were opened by nothing.
+                # Worse, they spent the wall clock the fix loop then ran out of --
+                # 87% of a three-hour cap to prepare work, twenty minutes to do it.
+                #
+                # So when the roster has a fix loop, `_verify_loop` reproduces the
+                # ticket it is about to work on, one at a time, and a ticket that
+                # never reaches remediation never pays for a test nobody reads.
+                #
+                # When it does *not* -- `pr-check` and `nightly` carry REPRODUCER
+                # without VERIFIER -- the committed failing test is the deliverable
+                # rather than an input, and there is no fix loop for it to starve.
+                # That run still reproduces eagerly, which is why this is a change
+                # of *scheduling* and not of behaviour.
+                if specs.get("VERIFIER") is None:
+                    await self._phase_reproduce(specs, store, budget, report, map_version)
+            except QuotaExhausted as exc:
+                quota = exc
+            except BudgetExceeded as exc:
+                self._stopped(report, store, str(exc))
+            except Exception as exc:  # noqa: BLE001 -- see the matching clause below
+                # The second half of this method caught everything and this half
+                # did not, so the very case its comment describes -- a task
+                # builder raising `ValueError` because no profile is loaded --
+                # still escaped from here, during the map or discovery phase,
+                # and left `run_started` with no `run_finished`. Findings already
+                # on disk are still worth filing, so the run carries on to file.
+                self._stopped(report, store, f"{type(exc).__name__}: {exc}")
 
-        try:
-            # The reserve exists so that a run which stops early still files what
-            # it found -- and it reserves *clock*, which buys nothing when the
-            # wall is the provider's. There is no point dispatching TRIAGE into
-            # the limit that just killed discovery; in the run this comes from
-            # it did exactly that, and took ten REPRODUCER invocations with it.
-            if quota is not None:
-                raise quota
-            if run_mode.files_tickets:
-                await self._phase_file(specs, store, budget, report, map_version)
-            else:
-                store.log("skipped", reason="mode does not file tickets", mode=mode)
-            await self._phase_verify(specs, store, budget, report, map_version)
-            await self._phase_report(specs, store, budget, report, mode, map_version)
-        except QuotaExhausted as exc:
-            quota = exc
-        except BudgetExceeded as exc:
-            report.stopped_early = str(exc)
-            report.escalations.append(str(exc))
-            store.log("escalation", reason=str(exc))
-            self._emit("stopped", reason=str(exc))
-        except Exception as exc:  # noqa: BLE001 — see below
-            # `run()` caught only `BudgetExceeded`, so anything else -- a task
-            # builder raising `ValueError` because no profile is loaded, an
-            # OSError from a full disk -- propagated out of a run that had
-            # already written `run_started`. The ledger then held an opening line
-            # with no closing one, which `qaas runs`, `qaas show` and the
-            # dashboard all read as "still running", forever. A run that died
-            # has to say so.
-            note = f"{type(exc).__name__}: {exc}"
-            report.stopped_early = note
-            report.escalations.append(note)
-            store.log("escalation", reason=note)
-            self._emit("stopped", reason=note)
-
-        if quota is not None:
-            self._stop_on_quota(store, report, mode, quota)
-
-        self._record_outcomes(store, mode)
-        store.log("run_finished", **report.summary())
-        self._emit("run_finished", **report.summary())
+            try:
+                # The reserve exists so that a run which stops early still files
+                # what it found -- and it reserves *clock*, which buys nothing
+                # when the wall is the provider's. There is no point dispatching
+                # TRIAGE into the limit that just killed discovery; in the run
+                # this comes from it did exactly that, and took ten REPRODUCER
+                # invocations with it.
+                if quota is not None:
+                    raise quota
+                if run_mode.files_tickets:
+                    await self._phase_file(specs, store, budget, report, map_version)
+                else:
+                    store.log("skipped", reason="mode does not file tickets", mode=mode)
+                await self._phase_verify(specs, store, budget, report, map_version)
+                await self._phase_report(specs, store, budget, report, mode, map_version)
+            except QuotaExhausted as exc:
+                quota = exc
+            except BudgetExceeded as exc:
+                self._stopped(report, store, str(exc))
+            except Exception as exc:  # noqa: BLE001 — see below
+                # `run()` caught only `BudgetExceeded`, so anything else -- a task
+                # builder raising `ValueError` because no profile is loaded, an
+                # OSError from a full disk -- propagated out of a run that had
+                # already written `run_started`. The ledger then held an opening line
+                # with no closing one, which `qaas runs`, `qaas show` and the
+                # dashboard all read as "still running", forever. A run that died
+                # has to say so.
+                self._stopped(report, store, f"{type(exc).__name__}: {exc}")
+        except BaseException as exc:
+            # Ctrl-C is how most long runs end early, and it arrives here as
+            # `CancelledError` -- a `BaseException`, which neither clause above
+            # catches. It left `run_started` with no `run_finished`, and every
+            # reader counts the two: the dashboard showed the run as live
+            # forever, and after a successful `--run-id` resume it was *still*
+            # live (two starts, one finish), so `qaas trace --follow` on it never
+            # exited. The run is recorded as stopped, then the interrupt goes on.
+            interrupted = exc
+            resume = f"qaas run --mode {mode} --run-id {store.run_id}"
+            report.resume_command = resume
+            report.stopped_early = f"interrupted ({type(exc).__name__}). Resume with: {resume}"
+            raise
+        finally:
+            try:
+                if quota is not None:
+                    self._stop_on_quota(store, report, mode, quota)
+                self._record_outcomes(store, mode)
+                summary = report.summary()
+                if interrupted is not None:
+                    summary["interrupted"] = True
+                store.log("run_finished", **summary)
+                self._emit("run_finished", **summary)
+            except Exception:  # noqa: BLE001
+                # Only swallowed when something else is already propagating: a
+                # failure to write the closing line must not replace the
+                # interrupt that caused it.
+                if interrupted is None:
+                    raise
         return report
+
+    @staticmethod
+    def _run_base(store: RunStore) -> str | None:
+        """The ref a new branch starts from when an agent names none.
+
+        Read from the run's *first* `run_started`, so a resumed run keeps the
+        base it began with rather than whatever branch the last invocation left
+        checked out. The branch name when there was one, the sha otherwise.
+        """
+        first = next(iter(store.ledger("run_started")), None)
+        if first is None:
+            return None
+        branch = first.detail.get("target_branch")
+        if branch and branch != "HEAD":
+            return str(branch)
+        sha = first.detail.get("target_sha")
+        return str(sha) if sha else None
+
+    def _existing_ref(self, ref: str | None) -> str | None:
+        """`ref` if the target has it, else None. Never raises."""
+        if not ref or self.target_root is None:
+            return None
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(self.target_root), "rev-parse", "--verify", "--quiet",
+                 f"{ref}^{{commit}}"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return ref if proc.returncode == 0 else None
+
+    def _stopped(self, report: RunReport, store: RunStore, note: str) -> None:
+        """A phase ended the run's work early. Recorded once, in one place."""
+        report.stopped_early = note
+        report.escalations.append(note)
+        store.log("escalation", reason=note)
+        self._emit("stopped", reason=note)
 
     def _stop_on_quota(
         self, store: RunStore, report: RunReport, mode: str, exc: QuotaExhausted
@@ -654,8 +729,13 @@ class Router:
                 # `defect_memory` server. So the highest-value thing this system
                 # can say was unreachable in every configuration it ships with.
                 try:
+                    # Scoped to this target: memory is keyed (target,
+                    # fingerprint), and an unscoped resolve marked only the
+                    # pre-target `''` partition, so the regression loop never
+                    # fired for a named target.
                     defect_memory.resolve(
-                        self.root, envelope.fingerprint(), envelope.jira.key, store.run_id
+                        self.root, envelope.fingerprint(), envelope.jira.key, store.run_id,
+                        target=target,
                     )
                 except (sqlite3.Error, OSError):
                     pass
@@ -703,7 +783,9 @@ class Router:
 
         budget.check(reserve=True)
         before = self.maps.latest_version()
-        outcome = await self._dispatch(spec, store, budget, report, tasks.mapper(self.config), None)
+        outcome = await self._dispatch(
+            spec, store, budget, report, tasks.mapper(self.config), None, reserve=True
+        )
 
         version = self.maps.latest_version()
         if version == before or version is None:
@@ -827,7 +909,7 @@ class Router:
             budget.check(reserve=True)
             await self._dispatch(
                 spec, store, budget, report,
-                tasks.synthesis(self.config, mode, len(findings)), map_version,
+                tasks.synthesis(self.config, mode, len(findings)), map_version, reserve=True,
             )
 
     async def _phase_report(self, specs, store, budget, report, mode, map_version) -> None:
@@ -1080,9 +1162,13 @@ class Router:
             return fresh
 
         budget.check()
+        # `reserve=False`: this runs inside the verify phase, which has the full
+        # cap. `_gather` defaults to the reserved clock, so past 85% of a run
+        # the first ticket that needed a test raised `BudgetExceeded` here and
+        # abandoned verify *and* report with the reserve still unspent.
         await self._gather(
             [(spec, tasks.reproducer(fresh, self.config, self.config.thresholds.flake_runs))],
-            store, budget, report, map_version, concurrency=1,
+            store, budget, report, map_version, concurrency=1, reserve=False,
         )
         return next((e for e in store.envelopes() if e.id == fresh.id), fresh)
 
@@ -1216,6 +1302,9 @@ class Router:
             return False
 
         fixer = _with_protected_test(fixer, envelope)
+        # FIXER's branch starts where the failing test is, so the test that
+        # defines success is on the branch VERIFIER will check.
+        repro_base = self._existing_ref(envelope.reproduction.environment.branch or None)
         guidance = _human_guidance(answer)
         feedback = _join(guidance, observed)
 
@@ -1223,8 +1312,11 @@ class Router:
             budget.check()
             vcs_mark = len(list(store.ledger("vcs")))
             deny_mark = len(list(store.ledger("denial")))
+            # Scoped to the ticket: §8.2's budget bounds this fix, and every
+            # round trip on it, but not the fixes for the tickets after it.
             await self._dispatch(fixer, store, budget, report,
-                                 tasks.fixer(ticket, envelope, feedback=feedback), map_version)
+                                 tasks.fixer(ticket, envelope, feedback=feedback), map_version,
+                                 scope=ticket, base_ref=repro_base)
 
             # FIXER reporting success having changed nothing is the failure mode
             # this system keeps producing, and every time it has been caught by
@@ -1432,7 +1524,8 @@ class Router:
                     return
                 try:
                     await self._dispatch(
-                        spec, store, budget, report, task, map_version, slots=in_flight
+                        spec, store, budget, report, task, map_version, slots=in_flight,
+                        reserve=reserve,
                     )
                 except QuotaExhausted as exc:
                     # Caught here rather than let out of `gather`: without
@@ -1447,9 +1540,11 @@ class Router:
             raise stopped[0]
 
     async def _dispatch(
-        self, spec, store, budget, report, task, map_version, *, slots: int = 1
+        self, spec, store, budget, report, task, map_version, *, slots: int = 1,
+        scope: str | None = None, base_ref: str | None = None, reserve: bool = False,
     ) -> RunOutcome:
-        ctx = self._context(store, spec, map_version)
+        ctx = self._context(store, spec, map_version, scope)
+        ctx.base_ref = base_ref or self._base_ref
         allowance = budget.allowance(spec, slots=slots)
 
         self._emit("agent_started", agent=spec.name, budget=allowance)
@@ -1461,7 +1556,14 @@ class Router:
         # bound it could not keep. Bounded by what is left of the run's clock, so
         # no agent can outlive the run; floored so a nearly-exhausted budget
         # still gives the agent long enough to record what it has.
-        deadline = max(30.0, budget.max_seconds - budget.elapsed)
+        #
+        # A finding-phase agent is bounded by the *reserved* clock. Bounded by
+        # the full cap, an agent dispatched a minute before the reserve began
+        # could run on through it -- the reserve was only ever checked before a
+        # dispatch -- and TRIAGE then found the whole clock gone: the one thing
+        # `reserve_fraction` exists to guarantee, lost to any agent that
+        # happened to be in flight when discovery ran long.
+        deadline = max(30.0, budget.seconds_left(reserve=reserve))
         try:
             outcome = await asyncio.wait_for(
                 run_agent(spec, ctx, task, max_budget_usd=allowance, on_event=self.on_event),
@@ -1472,7 +1574,14 @@ class Router:
             # the MCP tools as they happen, not at the end.
             error = f"exceeded the run's remaining wall clock ({deadline:.0f}s)"
             store.log("agent_error", agent=spec.name, error=error)
-            result = AgentResult(agent=spec.name, subtype="timeout", error=error)
+            # Charged its allowance, flagged as estimated -- the rule `run_agent`
+            # already applies to a stream that dropped. An agent that ran until
+            # the clock stopped it spent money; recording $0.00 told the governor,
+            # and a resume reading `already_spent` back, that it had not.
+            result = AgentResult(
+                agent=spec.name, subtype="timeout", error=error,
+                cost_usd=allowance or 0.0, cost_estimated=allowance is not None,
+            )
             store.put_result(result)
             outcome = RunOutcome(result=result)
 

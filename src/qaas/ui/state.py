@@ -13,8 +13,10 @@ default offline suite whether or not starlette is installed.
 from __future__ import annotations
 
 import json
+import re
+import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -75,8 +77,12 @@ def read_ledger(store: RunStore) -> list[LedgerEntry]:
     path = store.ledger_path
     if not path.exists():
         return []
+    return _parse_lines(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _parse_lines(text: str) -> list[LedgerEntry]:
     entries: list[LedgerEntry] = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:
@@ -84,6 +90,28 @@ def read_ledger(store: RunStore) -> list[LedgerEntry]:
         except Exception:
             continue
     return entries
+
+
+def replay(store: RunStore) -> tuple[list[LedgerEntry], int]:
+    """Every whole line in the ledger, and the byte offset just past the last one.
+
+    The offset is what a live tail must start from, and it has to come from
+    *this* read. The watcher used to replay the file and then `stat()` it for
+    the tail's start, so a line appended between the two was behind the offset
+    and in neither half -- and half of a line being written when the replay ran
+    was skipped by the replay as unparseable and skipped again by the tail,
+    which started past it. Both losses were permanent: the damaged view was the
+    one cached in `dash.watchers` and served to every tab until the process
+    exited. Reading the bytes once and stopping at the last newline makes the
+    two halves meet exactly, whatever is appended in between.
+    """
+    path = store.ledger_path
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return [], 0
+    end = data.rfind(b"\n") + 1
+    return _parse_lines(data[:end].decode("utf-8", errors="replace")), end
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -262,6 +290,16 @@ class RunView:
     budget_usd: float | None = None
     #: Always set, and the only honest denominator this view has.
     wall_clock_s: int | None = None
+    #: Not finished, and not being written either: the run was killed before it
+    #: could log `run_finished` (see `trace.is_stale`). Without it such a run
+    #: rendered as "live" with its clock ticking, forever.
+    interrupted: bool = False
+    #: When the last entry was written. An interrupted run's clock stops here
+    #: rather than running on to now.
+    last_at: datetime | None = None
+    #: Bytes of the ledger this view has applied, when it was built by reading
+    #: the file -- where a live tail must pick up. See `replay`.
+    offset: int | None = None
 
     roster: list[str] = field(default_factory=list)
     agents: dict[str, AgentView] = field(default_factory=dict)
@@ -289,8 +327,13 @@ class RunView:
     def elapsed_s(self) -> float:
         if self.started is None:
             return 0.0
-        end = self.finished or datetime.now(timezone.utc)
+        stopped = self.last_at if self.interrupted else None
+        end = self.finished or stopped or datetime.now(timezone.utc)
         return max(0.0, (end - self.started).total_seconds())
+
+    @property
+    def live(self) -> bool:
+        return not self.completed and not self.interrupted
 
     @property
     def cost_usd(self) -> float:
@@ -369,6 +412,10 @@ class RunView:
         kind, detail, agent = entry.kind, entry.detail, entry.agent
         self.counts[str(kind)] = self.counts.get(str(kind), 0) + 1
         self.seq += 1
+        self.last_at = entry.at
+        # A line arriving is proof something is writing this run, whatever an
+        # earlier look at the file's age concluded.
+        self.interrupted = False
         self.recent.append(
             {
                 "seq": self.seq,
@@ -582,6 +629,8 @@ class RunView:
             "started": _iso(self.started),
             "finished": _iso(self.finished),
             "completed": self.completed,
+            "interrupted": self.interrupted,
+            "live": self.live,
             "stopped_early": self.stopped_early,
             "target_name": self.target_name,
             "target_root": self.target_root,
@@ -624,12 +673,101 @@ def load(
         specs=dict(specs or {}),
         min_confidence=min_confidence,
     )
-    for entry in entries if entries is not None else read_ledger(store):
+    if entries is None:
+        entries, view.offset = replay(store)
+    for entry in entries:
         view.apply(entry)
+    # Decided once the replay has told us the run's own cap. A view built from
+    # entries handed in by a caller has no file age to go on and stays as-is.
+    if view.offset is not None and not view.completed:
+        view.interrupted = trace.is_stale(store.ledger_path, view.wall_clock_s)
     return view
 
 
-def is_live(store: RunStore) -> bool:
+# -- scanning a ledger without parsing it ------------------------------------
+
+
+@dataclass
+class _Scan:
+    """What the run rail needs from one ledger, kept between requests.
+
+    The ledger is append-only, so a scan can resume where the last one stopped:
+    a finished run is read once for the life of the process, and a live one
+    costs only the bytes written since the rail last looked.
+    """
+
+    offset: int = 0
+    #: The bytes just before `offset`, compared on the next read. A file that no
+    #: longer carries them was rewritten rather than appended to, and is
+    #: rescanned from the start instead of being trusted.
+    signature: bytes = b""
+    starts: int = 0
+    finishes: int = 0
+    #: The newest `run_started` line, parsed; the oldest line of any kind, for a
+    #: ledger that has none.
+    last_start: dict[str, Any] | None = None
+    first: dict[str, Any] | None = None
+
+
+_SCANS: dict[str, _Scan] = {}
+#: `/api/runs` runs on a worker thread, and so can two of them at once.
+_SCANS_LOCK = threading.Lock()
+
+
+def _scan(path: Path) -> _Scan | None:
+    key = str(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        with _SCANS_LOCK:
+            _SCANS.pop(key, None)
+        return None
+    with _SCANS_LOCK:
+        scan = _SCANS.get(key)
+        try:
+            with path.open("rb") as handle:
+                if scan is not None and size < scan.offset:
+                    scan = None
+                elif scan is not None:
+                    handle.seek(scan.offset - len(scan.signature))
+                    if handle.read(len(scan.signature)) != scan.signature:
+                        scan = None
+                if scan is None:
+                    scan = _Scan()
+                    handle.seek(0)
+                data = handle.read()
+        except OSError:
+            return None
+        end = data.rfind(b"\n") + 1
+        data = data[:end]
+        if data:
+            starts, finishes = trace.run_edges(data)
+            scan.starts += len(starts)
+            scan.finishes += len(finishes)
+            if starts:
+                scan.last_start = trace.line_at(data, starts[-1]) or scan.last_start
+            if scan.offset == 0 and scan.first is None:
+                scan.first = trace.line_at(data, 0)
+            scan.offset += end
+            scan.signature = (scan.signature + data[-64:])[-64:]
+        _SCANS[key] = scan
+        # A copy: the cached one is updated in place by the next caller, and
+        # a reader must not see its counts half-way through that.
+        return replace(scan)
+
+
+def _detail(line: dict[str, Any] | None) -> dict[str, Any]:
+    detail = (line or {}).get("detail")
+    return detail if isinstance(detail, dict) else {}
+
+
+def run_started_detail(store: RunStore) -> dict[str, Any]:
+    """The newest `run_started`'s detail, from the raw scan. Empty if there is none."""
+    scan = _scan(store.ledger_path)
+    return _detail(scan.last_start) if scan is not None else {}
+
+
+def is_live(store: RunStore, *, now: float | None = None) -> bool:
     """Whether this run is still being written.
 
     Not "does the ledger contain `run_finished`" -- `qaas run --run-id` appends a
@@ -640,15 +778,27 @@ def is_live(store: RunStore) -> bool:
 
     There is no "current run" pointer anywhere, and deliberately not: the ledger
     is the only thing that knows, and it knows without being told.
+
+    Except when the run was killed. A ^C'd run never wrote its `run_finished`,
+    so the count called it live for ever -- the rail pulsed over it and
+    `pick_run` opened it ahead of the run actually going. So a count that says
+    "live" is checked against the file's age: silent for longer than the run's
+    own wall-clock cap allows, and nothing is writing it (`trace.is_stale`).
     """
-    if not store.ledger_path.exists():
+    scan = _scan(store.ledger_path)
+    if scan is None or scan.starts <= scan.finishes:
         return False
-    text = store.ledger_path.read_text(encoding="utf-8", errors="replace")
-    return text.count('"kind":"run_started"') > text.count('"kind":"run_finished"')
+    wall_clock = _detail(scan.last_start).get("wall_clock_s")
+    return not trace.is_stale(store.ledger_path, wall_clock, now=now)
 
 
 def pick_run(root: Path | str = DEFAULT_ROOT, run_id: str | None = None) -> str | None:
-    """Which run to open: the one asked for, else the live one, else the newest."""
+    """Which run to open: the one asked for, else the live one, else the newest.
+
+    "Live" is `is_live`'s, which already refuses a killed run whose ledger only
+    *claims* to be open -- so a stale one from last week no longer wins over the
+    run that is actually going, and with none going the newest is opened.
+    """
     if run_id:
         return run_id
     ids = list_runs(root)
@@ -660,12 +810,28 @@ def pick_run(root: Path | str = DEFAULT_ROOT, run_id: str | None = None) -> str 
     return ids[0]
 
 
+def _started_iso(line: dict[str, Any] | None) -> str | None:
+    raw = (line or {}).get("at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw).isoformat()
+    except ValueError:
+        return raw
+
+
 def list_runs_summary(root: Path | str = DEFAULT_ROOT, limit: int = 50) -> list[dict[str, Any]]:
     """One row per run for the run rail. Cheap: no full ledger parse.
 
     `qaas runs` reports an envelope count and an invocation count and stops
     short of the cost, though `total_cost_usd()` is right there (cli.py:860-878).
     The rail shows it.
+
+    "Cheap" was the docstring and not the code: it validated every line of every
+    listed ledger through pydantic, then read each one a second time for
+    `is_live`. Forty runs of 30k lines took 3.2s, on the event loop, and every
+    SSE stream froze while it ran. Now each ledger is scanned as raw bytes, and
+    only from where the previous scan stopped (`_scan`).
     """
     rows: list[dict[str, Any]] = []
     for run_id in list_runs(root)[:limit]:
@@ -677,14 +843,13 @@ def list_runs_summary(root: Path | str = DEFAULT_ROOT, limit: int = 50) -> list[
             pass
         # The *last* `run_started`, not the first: a resumed run has two, and the
         # rail disagreeing with the header it opens is worse than either answer.
-        entries = read_ledger(store)
-        starts = [e for e in entries if e.kind == LedgerKind.RUN_STARTED]
-        first = starts[-1] if starts else (entries[0] if entries else None)
+        scan = _scan(store.ledger_path)
+        first = (scan.last_start or scan.first) if scan is not None else None
         rows.append(
             {
                 "run_id": run_id,
-                "mode": (first.detail.get("mode") if first else None),
-                "started": _iso(first.at) if first else None,
+                "mode": _detail(first).get("mode"),
+                "started": _started_iso(first),
                 "live": is_live(store),
                 "cost_usd": round(sum(r.cost_usd for r in results), 4),
                 "agents": len({r.agent for r in results}),
@@ -696,11 +861,47 @@ def list_runs_summary(root: Path | str = DEFAULT_ROOT, limit: int = 50) -> list[
     return rows
 
 
+#: What a system-map version may look like: the store names them
+#: `<timestamp>-<hex>`, and nothing it writes contains a separator.
+_MAP_VERSION_RE = re.compile(r"[\w.-]+")
+
+
+class UnknownMapVersion(ValueError):
+    """A `?version=` that is not one of the maps on disk."""
+
+
 def system_map(root: Path | str = DEFAULT_ROOT, version: str | None = None) -> dict[str, Any] | None:
+    """A system map by version, or the latest. None when there is none yet.
+
+    `version` arrives from a query string, and it went straight into
+    `SystemMapStore.get`, which joined it into a path: `?version=../../secret`
+    read `<root>/../secret.json` -- any JSON file the user could read, served to
+    whatever page could reach the port. It is now accepted only if it names a
+    map the store actually lists; anything else raises `UnknownMapVersion`.
+    """
     from qaas.store import SystemMapStore
 
+    # `create=False`: this is a reader, and constructing the store used to mkdir
+    # `.qaas/system-map/` in whatever directory the dashboard was started from.
+    maps = SystemMapStore(root, create=False)
+    version = version or None          # `?version=` with nothing after it means latest
     try:
-        return SystemMapStore(root).get(version)
+        known = set(maps.versions())
+        chosen = version if version is not None else maps.latest_version()
+    except OSError:
+        return None
+    if chosen is None:
+        return None
+    # The `latest` pointer is a file on disk too, so it is held to the same rule.
+    if not _MAP_VERSION_RE.fullmatch(chosen) or chosen not in known:
+        if version is None:
+            return None
+        raise UnknownMapVersion(
+            f"no system map version {version!r}"
+            + (f"; known versions: {', '.join(sorted(known)[-5:])}" if known else "")
+        )
+    try:
+        return maps.get(chosen)
     except Exception:
         return None
 

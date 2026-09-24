@@ -761,3 +761,14 @@ def test_show_says_how_to_answer_what_it_prints(runner, tmp_path):
     assert result.exit_code == 0, result.output
     assert "escalations" in result.output
     assert "qaas answer" in result.output
+
+
+@pytest.mark.parametrize("content", ["", "- just\n- a list\n", "defects: [\n"])
+def test_a_malformed_golden_ledger_is_an_error_not_a_traceback(tmp_path, content):
+    import typer
+
+    ledger = tmp_path / "defects.yaml"
+    ledger.write_text(content)
+    with pytest.raises(typer.Exit) as exited:
+        cli._golden_or_exit(ledger)
+    assert exited.value.exit_code == 1

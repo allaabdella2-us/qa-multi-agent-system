@@ -186,7 +186,12 @@ async def test_a_recurrence_after_resolution_is_a_regression_not_a_duplicate(ctx
     # in the shipped roster calls `mark_resolved` -- VERIFIER, the only one that
     # closes a ticket, has no `defect_memory` server at all, which is why the
     # regression branch was unreachable until the router started writing it.
-    defect_memory.resolve(ctx.store.root, a.fingerprint(), "CORVID-1", ctx.store.run_id)
+    # With the run's target, as the router passes it: without one this resolved
+    # the `''` partition and missed the row `record` wrote under 'corvid'.
+    defect_memory.resolve(
+        ctx.store.root, a.fingerprint(), "CORVID-1", ctx.store.run_id,
+        target=ctx.config.target or "",
+    )
 
     # It comes back, reported by a different agent in different words.
     b = make_envelope(ctx, discovered_by="BROWSER", **REPORT_B)
@@ -208,7 +213,10 @@ async def test_a_recurrence_after_resolution_is_a_regression_not_a_duplicate(ctx
 async def test_search_flags_a_resolved_match_as_a_regression_risk(ctx, tools):
     a = make_envelope(ctx, **REPORT_A)
     await tools["record"]({"envelope_id": a.id, "ticket_key": "CORVID-1"})
-    defect_memory.resolve(ctx.store.root, a.fingerprint(), None, ctx.store.run_id)
+    defect_memory.resolve(
+        ctx.store.root, a.fingerprint(), None, ctx.store.run_id,
+        target=ctx.config.target or "",
+    )
 
     result = await tools["search_similar"](_search_args(REPORT_B))
     assert result["structuredContent"]["candidates"][0]["resolved"] is True

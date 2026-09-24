@@ -70,6 +70,36 @@ class PlantedNonDefect:
     paths: tuple[str, ...] = ()
 
 
+class GoldenLedgerError(ValueError):
+    """A golden ledger that cannot be scored against, and why.
+
+    A `ValueError`, so every caller that already caught the enum errors
+    `_enum_or_die` raises catches these too.
+    """
+
+
+def _entries(raw: dict[str, Any], section: str, path: Path) -> list[dict[str, Any]]:
+    """One section's entries, each a mapping carrying the keys scoring reads."""
+    entries = raw.get(section)
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        raise GoldenLedgerError(
+            f"{path}: `{section}` is a {type(entries).__name__}, expected a list of entries."
+        )
+    required = ("id", "domain", "severity", "title") if section == "defects" else ("id", "title")
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise GoldenLedgerError(
+                f"{path}: {section}[{index}] is a {type(entry).__name__}, expected a mapping."
+            )
+        missing = [key for key in required if key not in entry]
+        if missing:
+            label = entry.get("id", f"{section}[{index}]")
+            raise GoldenLedgerError(f"{path}: {label} has no {', '.join(missing)}.")
+    return entries
+
+
 @dataclass
 class GoldenLedger:
     defects: list[GoldenDefect]
@@ -77,10 +107,29 @@ class GoldenLedger:
 
     @classmethod
     def load(cls, path: Path | str) -> "GoldenLedger":
-        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        """Read a golden ledger, or raise `GoldenLedgerError` saying what is wrong.
+
+        An empty `defects.yaml` parses to None and a list-shaped one to a list,
+        and `raw.get` was an AttributeError on both -- a traceback out of `qaas
+        score` and a 500 on the dashboard's Score tab, neither naming the file.
+        Every shape problem is now a sentence with the path in it.
+        """
+        path = Path(path)
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise GoldenLedgerError(f"{path} is not valid YAML: {exc}") from exc
+        except (OSError, UnicodeDecodeError) as exc:
+            raise GoldenLedgerError(f"{path} cannot be read: {exc}") from exc
+        if not isinstance(raw, dict):
+            what = "empty" if raw is None else f"a {type(raw).__name__}"
+            raise GoldenLedgerError(
+                f"{path} is {what}; a golden ledger is a mapping with a `defects:` "
+                "list (and optionally `not_defects:`)."
+            )
         return cls(
-            defects=[_golden(d) for d in raw.get("defects", [])],
-            not_defects=[_planted(d) for d in raw.get("not_defects", [])],
+            defects=[_golden(d) for d in _entries(raw, "defects", path)],
+            not_defects=[_planted(d) for d in _entries(raw, "not_defects", path)],
         )
 
     def for_phase(self, phase: int) -> list[GoldenDefect]:
@@ -108,7 +157,7 @@ def _enum_or_die(kind: type[Domain] | type[Severity], value: Any, defect_id: str
         return kind(value).value
     except ValueError:
         allowed = ", ".join(sorted(m.value for m in kind))
-        raise ValueError(
+        raise GoldenLedgerError(
             f"{defect_id}: {field} '{value}' is not a {kind.__name__}. Use one of: {allowed}."
         ) from None
 

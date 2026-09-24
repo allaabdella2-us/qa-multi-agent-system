@@ -88,6 +88,37 @@ def test_the_demo_conventions_still_apply_when_the_profile_is_silent():
     assert env_control._default_fixture(ctx) == "fixtures.sql"
 
 
+def test_a_yaml_error_in_a_profile_names_the_file(tmp_path):
+    """Parsed from a string, PyYAML reported the error as being in
+    `"<unicode string>"`, which is no file anybody can open."""
+    import yaml
+
+    from qaas.target import load_target
+
+    (tmp_path / "app.yaml").write_text("name: app\nroot: app\nenvironment:\n  mode: [oops\n")
+    with pytest.raises(yaml.YAMLError) as caught:
+        load_target("app", tmp_path)
+    assert str(tmp_path / "app.yaml") in str(caught.value)
+    assert "<unicode string>" not in str(caught.value)
+
+
+def test_a_schema_error_in_a_profile_names_the_file(tmp_path):
+    from qaas.target import load_target
+
+    (tmp_path / "app.yaml").write_text("name: app\nroot: app\nbogus: 1\n")
+    with pytest.raises(ValueError, match="extra_forbidden") as caught:
+        load_target("app", tmp_path)
+    assert str(tmp_path / "app.yaml") in str(caught.value)
+
+
+def test_a_profile_that_is_not_a_mapping_is_a_sentence(tmp_path):
+    from qaas.target import load_target
+
+    (tmp_path / "app.yaml").write_text("- just\n- a list\n")
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_target("app", tmp_path)
+
+
 def test_no_profile_at_all_does_not_crash():
     ctx = _Ctx(None)
     assert env_control._compose_path(ctx).name == "docker-compose.yml"

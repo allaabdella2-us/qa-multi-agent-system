@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -60,9 +61,21 @@ _STOPWORDS = frozenset(
     """.split()
 )
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS defects (
-    fingerprint         TEXT PRIMARY KEY,
+# The two tables are templates over their own name because the key migration
+# (`_KEYS`) has to create each one a second time under a scratch name and copy
+# into it. One definition serves both, so a rebuilt table cannot drift from a
+# fresh one.
+#
+# Keyed by (target, fingerprint). It was keyed by fingerprint alone, and the
+# fingerprint does not include the target, so the `target` column filtered
+# `search_similar` and nothing else: target A recorded `GET /v1/users` as
+# SHOP-7, and in target B a different defect on the same endpoint was told
+# "looks new" by `search_similar` and then "already tracked as SHOP-7. Add
+# evidence there; do not file again" by `record`. One project's ticket
+# suppressing another project's defect, persisted, in every future run.
+_DEFECTS_TABLE = """
+CREATE TABLE IF NOT EXISTS {name} (
+    fingerprint         TEXT NOT NULL,
     title               TEXT NOT NULL,
     summary             TEXT NOT NULL DEFAULT '',
     domain              TEXT NOT NULL,
@@ -77,8 +90,28 @@ CREATE TABLE IF NOT EXISTS defects (
     last_seen           TEXT NOT NULL,
     last_run_id         TEXT,
     resolved_at         TEXT,
-    resolved_ticket_key TEXT
-);
+    resolved_ticket_key TEXT,
+    target              TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (target, fingerprint)
+)"""
+
+# Keyed with the target for the same reason. The column was always here and no
+# read ever consulted it, so `search_similar` rendered one project's "could NOT
+# be reproduced" or "was verified" beside another project's defect.
+_OUTCOMES_TABLE = """
+CREATE TABLE IF NOT EXISTS {name} (
+    fingerprint TEXT NOT NULL,
+    target      TEXT NOT NULL DEFAULT '',
+    run_id      TEXT NOT NULL,
+    at          TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    agent       TEXT,
+    detail      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (target, fingerprint, run_id, outcome)
+)"""
+
+_SCHEMA = f"""
+{_DEFECTS_TABLE.format(name="defects")};
 CREATE INDEX IF NOT EXISTS defects_domain ON defects(domain);
 
 -- What happened to a defect after it was reported. The table that turns memory
@@ -90,16 +123,7 @@ CREATE INDEX IF NOT EXISTS defects_domain ON defects(domain);
 -- precision without finding anything, which is the same failure mode as an
 -- agent that can retire an entry from the golden ledger. Agents read this
 -- through `search_similar` and cannot reach it any other way.
-CREATE TABLE IF NOT EXISTS outcomes (
-    fingerprint TEXT NOT NULL,
-    target      TEXT NOT NULL DEFAULT '',
-    run_id      TEXT NOT NULL,
-    at          TEXT NOT NULL,
-    outcome     TEXT NOT NULL,
-    agent       TEXT,
-    detail      TEXT NOT NULL DEFAULT '',
-    PRIMARY KEY (fingerprint, run_id, outcome)
-);
+{_OUTCOMES_TABLE.format(name="outcomes")};
 CREATE INDEX IF NOT EXISTS outcomes_fingerprint ON outcomes(fingerprint);
 """
 
@@ -115,6 +139,16 @@ _MIGRATIONS = {
     # run. `''` means "recorded before this column existed" and stays visible, so
     # no existing memory is orphaned.
     "defects": [("target", "TEXT NOT NULL DEFAULT ''")],
+}
+
+#: Primary keys changed after release, and the table each is declared by.
+#: SQLite cannot alter a primary key, so these are applied by rebuilding the
+#: table (`_rekey`) when `PRAGMA table_info` reports a different key. Adding the
+#: `target` column alone left `fingerprint` the whole key, so the partition
+#: existed for `search_similar` and for no write -- see `_DEFECTS_TABLE`.
+_KEYS: dict[str, tuple[tuple[str, ...], str]] = {
+    "defects": (("target", "fingerprint"), _DEFECTS_TABLE),
+    "outcomes": (("target", "fingerprint", "run_id", "outcome"), _OUTCOMES_TABLE),
 }
 
 #: What `record_outcome` accepts. A closed set for the same reason `LedgerKind`
@@ -167,8 +201,14 @@ def connect(root: Path | str) -> sqlite3.Connection:
     root.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(root / MEMORY_DB)
     conn.row_factory = sqlite3.Row
-    conn.executescript(_SCHEMA)
-    _migrate(conn)
+    try:
+        conn.executescript(_SCHEMA)
+        _migrate(conn)
+    except BaseException:
+        # A migration that rolled back raises out of here; the caller never gets
+        # the connection to close, so close it rather than leak the handle.
+        conn.close()
+        raise
     return conn
 
 
@@ -179,13 +219,124 @@ def _migrate(conn: sqlite3.Connection) -> None:
     memory deliberately outlives a release -- dedupe across runs is the whole
     point of it -- so a schema change that orphaned an existing file would throw
     away the thing the file exists for.
+
+    The one exception is a primary key (`_KEYS`), which SQLite cannot alter:
+    that table is rebuilt, every row copied, `target = ''` rows included and
+    unchanged. So the rebuild is the first migration here that drops a table,
+    and it gets two protections the additive ones never needed: the whole of
+    `_migrate` runs in one `BEGIN IMMEDIATE` transaction, and the file is copied
+    to `memory.db.bak-<epoch>` first -- the name the one hand-made backup in
+    this checkout's `.qaas/` already uses, and one `memory.db*` in
+    `STATE_GITIGNORE` already ignores.
+
+    Checked without a lock first, because `connect` runs on every tool call and
+    the ordinary answer is "nothing to do"; checked again under the lock,
+    because several agents open the memory at once and only one of them should
+    migrate it.
     """
+    if not _missing_columns(conn) and not _stale_keys(conn):
+        return
+    # Taken before the lock, not under it: `Connection.backup` from a
+    # connection holding its own write transaction never finishes -- it waits
+    # on a lock it holds itself.
+    #
+    # Never deleted afterwards, even when another process turns out to have
+    # migrated first: the first copy taken is always from before any rebuild
+    # committed, and a same-second second copy is skipped rather than written
+    # over it, so cleaning up "our redundant one" could delete the only real one.
+    if _stale_keys(conn):
+        _backup(conn)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for table, columns in _MIGRATIONS.items():
+            have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for name, ddl in columns:
+                if name not in have:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+        # After the columns, so the copy has a `target` to carry across.
+        for table in _stale_keys(conn):
+            _rekey(conn, table)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _missing_columns(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    missing = []
     for table, columns in _MIGRATIONS.items():
         have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-        for name, ddl in columns:
-            if name not in have:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
-    conn.commit()
+        missing += [(table, name) for name, _ in columns if name not in have]
+    return missing
+
+
+def _primary_key(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+    """The table's primary key as declared, in key order (`pk` is 1-based)."""
+    info = [r for r in conn.execute(f"PRAGMA table_info({table})") if r["pk"]]
+    return tuple(r["name"] for r in sorted(info, key=lambda r: r["pk"]))
+
+
+def _stale_keys(conn: sqlite3.Connection) -> list[str]:
+    return [table for table, (key, _) in _KEYS.items() if _primary_key(conn, table) != key]
+
+
+def _rekey(conn: sqlite3.Connection, table: str) -> None:
+    """Rebuild `table` under its current key. Must run inside a transaction.
+
+    SQLite's documented procedure for a change ALTER cannot make: create the new
+    table, copy the rows, drop the old table, rename the new one into place,
+    recreate its indexes. A plain INSERT, not OR IGNORE: the new key is the old
+    key plus `target`, so no two old rows can collide, and if they somehow did
+    the right answer is a rollback, not a silently shorter memory.
+    """
+    _, template = _KEYS[table]
+    scratch = f"{table}__rekey"
+    indexes = [
+        r["sql"]
+        for r in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? "
+            "AND sql IS NOT NULL",
+            (table,),
+        )
+    ]
+    conn.execute(f"DROP TABLE IF EXISTS {scratch}")
+    conn.execute(template.format(name=scratch))
+    have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    columns = ", ".join(
+        r["name"] for r in conn.execute(f"PRAGMA table_info({scratch})") if r["name"] in have
+    )
+    conn.execute(f"INSERT INTO {scratch} ({columns}) SELECT {columns} FROM {table}")
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {scratch} RENAME TO {table}")
+    for sql in indexes:
+        conn.execute(sql)
+
+
+def _backup(conn: sqlite3.Connection) -> Path | None:
+    """Copy the memory aside before a migration that drops a table.
+
+    Best-effort. The transaction is what makes the rebuild safe against a crash;
+    this is for a rebuild that commits and turns out wrong. A backup that cannot
+    be written is not a reason to keep a schema that suppresses defects across
+    projects, so failing here migrates anyway rather than refusing to open.
+    """
+    main = next((r["file"] for r in conn.execute("PRAGMA database_list") if r["name"] == "main"), "")
+    if not main:
+        return None  # in-memory: nothing on disk to lose
+    source = Path(main)
+    dest = source.with_name(f"{source.name}.bak-{int(time.time())}")
+    if dest.exists():
+        return None  # someone else's copy from this same second; not ours to replace
+    try:
+        copy = sqlite3.connect(dest)
+        try:
+            conn.backup(copy)
+        finally:
+            copy.close()
+    except (sqlite3.Error, OSError):
+        dest.unlink(missing_ok=True)
+        return None
+    return dest
 
 
 # -- the write path Python owns ---------------------------------------------
@@ -210,15 +361,29 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def resolve(
-    root: Path | str, fingerprint: str, ticket_key: str | None, run_id: str
+    root: Path | str,
+    fingerprint: str,
+    ticket_key: str | None,
+    run_id: str,
+    *,
+    target: str = "",
 ) -> bool:
-    """Mark a defect fixed. Returns whether anything was known by that fingerprint."""
+    """Mark a defect fixed in `target`'s memory. Returns whether that target
+    knew anything by that fingerprint.
+
+    `target` is the run's (`''` for a run with no named target), the same value
+    `record_outcome` is given. Unscoped, a VERIFIED in one project resolved every
+    project's row with that fingerprint, so another project's next sighting of
+    its own open defect was announced as "REGRESSION of <the first project's
+    ticket>". A legacy `''` row is not touched from a named target: it may be
+    another project's, and `record` no longer lets it speak for this one.
+    """
     conn = connect(root)
     try:
         cursor = conn.execute(
             "UPDATE defects SET resolved_at = ?, resolved_ticket_key = COALESCE(?, ticket_key), "
-            "last_run_id = ? WHERE fingerprint = ?",
-            (_utcnow_iso(), ticket_key, run_id, fingerprint),
+            "last_run_id = ? WHERE target = ? AND fingerprint = ?",
+            (_utcnow_iso(), ticket_key, run_id, target or "", fingerprint),
         )
         conn.commit()
         return cursor.rowcount > 0
@@ -236,7 +401,8 @@ def record_outcome(
     agent: str | None = None,
     detail: str = "",
 ) -> None:
-    """Persist what became of one finding. Idempotent per (fingerprint, run, outcome)."""
+    """Persist what became of one finding. Idempotent per (target, fingerprint,
+    run, outcome): `INSERT OR REPLACE` against exactly that primary key."""
     if outcome not in OUTCOMES:
         raise ValueError(f"unknown outcome '{outcome}'; expected one of {sorted(OUTCOMES)}")
     conn = connect(root)
@@ -251,13 +417,27 @@ def record_outcome(
         conn.close()
 
 
-def outcomes_for(root: Path | str, fingerprint: str) -> list[dict[str, Any]]:
-    """Everything this system has learned about one defect, newest first."""
+def outcomes_for(
+    root: Path | str, fingerprint: str, *, target: str | None = None
+) -> list[dict[str, Any]]:
+    """Everything this system has learned about one defect, newest first.
+
+    With `target` (`''` included), only what `record_outcome` wrote under that
+    target. Without one, every target's, each row carrying its `target` -- this
+    is a reader for Python and for a person, and no agent reaches it. What an
+    agent reads is `search_similar`, which is always scoped to its own target.
+    """
     conn = connect(root)
     try:
-        rows = conn.execute(
-            "SELECT * FROM outcomes WHERE fingerprint = ? ORDER BY at DESC", (fingerprint,)
-        ).fetchall()
+        if target is None:
+            rows = conn.execute(
+                "SELECT * FROM outcomes WHERE fingerprint = ? ORDER BY at DESC", (fingerprint,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM outcomes WHERE target = ? AND fingerprint = ? ORDER BY at DESC",
+                (target, fingerprint),
+            ).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
@@ -350,7 +530,21 @@ def _probe_fingerprint(ctx: ToolContext, args: dict[str, Any]) -> str | None:
     return probe.fingerprint()
 
 
-def _row_view(row: sqlite3.Row, score: float | None = None) -> dict[str, Any]:
+#: How a legacy row reads to an agent. It is still shown, because the memory
+#: deliberately outlives a release, and it is labelled, because it is the one
+#: kind of match that may be another project's.
+_LEGACY_NOTE = "recorded before targets were tracked, so it may belong to another project"
+
+
+def _is_legacy(row: sqlite3.Row, target: str) -> bool:
+    """A `target = ''` row, seen from a named target. From an unnamed one it is
+    simply that target's own memory."""
+    return bool(target) and row["target"] == ""
+
+
+def _row_view(
+    row: sqlite3.Row, score: float | None = None, *, legacy: bool = False
+) -> dict[str, Any]:
     view: dict[str, Any] = {
         "fingerprint": row["fingerprint"],
         "title": row["title"],
@@ -367,6 +561,7 @@ def _row_view(row: sqlite3.Row, score: float | None = None) -> dict[str, Any]:
             "ui_route": row["ui_route"],
             "paths": json.loads(row["paths"] or "[]"),
         },
+        "legacy": legacy,
     }
     if score is not None:
         view["similarity"] = score
@@ -416,6 +611,7 @@ def build_tools(ctx: ToolContext) -> list:
         query["fingerprint"] = _probe_fingerprint(ctx, args)
         limit = int(args.get("limit") or DEFAULT_LIMIT)
 
+        target = _target(ctx)
         conn = connect(root)
         try:
             # Scoped to this target, plus the legacy rows that predate the
@@ -425,17 +621,31 @@ def build_tools(ctx: ToolContext) -> list:
             # back as "already tracked as PROJ-N, do not file again". A
             # suppression, persisted, repeating every run.
             rows = conn.execute(
-                "SELECT * FROM defects WHERE target IN (?, '')", (_target(ctx),)
+                "SELECT * FROM defects WHERE target IN (?, '')", (target,)
             ).fetchall()
+            # This target's outcomes only. This read was unscoped after the
+            # defects read above was fixed, so a candidate from *this* project
+            # was rendered with "an earlier report of this could NOT be
+            # reproduced" learned in a different project -- a soft suppression
+            # by the same route as the hard one.
             learned = {
                 r["fingerprint"]: r
                 for r in conn.execute(
                     "SELECT fingerprint, outcome, at, agent, detail FROM outcomes "
-                    "ORDER BY at ASC"
+                    "WHERE target = ? ORDER BY at ASC",
+                    (target,),
                 )
             }
         finally:
             conn.close()
+
+        # Once this target has recorded a fingerprint for itself, the legacy row
+        # of the same fingerprint is superseded here: `record` created the scoped
+        # row precisely because the legacy one could not be trusted to be ours.
+        # Keyed by (target, fingerprint), both rows exist, and without this the
+        # same defect came back as two candidates with two different histories.
+        own = {r["fingerprint"] for r in rows if r["target"] == target}
+        rows = [r for r in rows if r["target"] == target or r["fingerprint"] not in own]
 
         scored = [(similarity(query, dict(r)), r) for r in rows]
         matches = sorted(
@@ -453,7 +663,7 @@ def build_tools(ctx: ToolContext) -> list:
 
         candidates = []
         for s, r in matches:
-            view = _row_view(r, s)
+            view = _row_view(r, s, legacy=_is_legacy(r, target))
             # What the system learned about this defect *after* it was reported.
             # Without it memory can only say "seen before", which tells an agent
             # nothing about whether reporting it was right.
@@ -468,7 +678,12 @@ def build_tools(ctx: ToolContext) -> list:
                 f"x{c['occurrence_count']}  last seen {c['last_seen']}  {c['title']}"
             )
             if c["resolved"]:
-                line += "  [RESOLVED — a recurrence is a regression]"
+                # Not "a recurrence is a regression" for a legacy row: `record`
+                # will not call it one, because the fix may have been another
+                # project's.
+                line += "  [RESOLVED]" if c["legacy"] else "  [RESOLVED — a recurrence is a regression]"
+            if c["legacy"]:
+                line += f"\n      ({_LEGACY_NOTE}; check the ticket is this repository's before using it)"
             if c["last_outcome"]:
                 line += f"\n      last outcome: {_OUTCOME_NOTES.get(c['last_outcome']['outcome'], c['last_outcome']['outcome'])}"
                 if c["last_outcome"]["detail"]:
@@ -533,11 +748,35 @@ def build_tools(ctx: ToolContext) -> list:
         fp = envelope.fingerprint()
         ticket_key = args.get("ticket_key") or None
         now = _utcnow_iso()
+        target = _target(ctx)
 
         conn = connect(root)
         try:
-            row = conn.execute("SELECT * FROM defects WHERE fingerprint = ?", (fp,)).fetchone()
+            # This target's row and no other. It was `WHERE fingerprint = ?`, and
+            # the fingerprint carries no target, so after target A recorded
+            # `GET /v1/users` as SHOP-7, a different defect on that endpoint in
+            # target B was answered "already tracked as SHOP-7. Add evidence
+            # there; do not file again" -- one sentence after `search_similar`,
+            # which *was* scoped, had told the same agent it looked new.
+            row = conn.execute(
+                "SELECT * FROM defects WHERE target = ? AND fingerprint = ?", (target, fp)
+            ).fetchone()
             if row is None:
+                # A legacy row (recorded before targets were tracked) is never
+                # counted as this target's: it may be another project's, and
+                # counting it would bring back the "do not file again"
+                # suppression and the false REGRESSION with it. So this target
+                # gets a row of its own, occurrence 1, and the legacy row is left
+                # exactly as it was -- it is still shown, labelled, by
+                # `search_similar`, and still the answer for a run with no named
+                # target. Its ticket is named below as a lead to check, not an
+                # instruction: the agent holding this tool also holds the
+                # tracker, and every ticket carries its repository's label.
+                legacy = None
+                if target:
+                    legacy = conn.execute(
+                        "SELECT * FROM defects WHERE target = '' AND fingerprint = ?", (fp,)
+                    ).fetchone()
                 conn.execute(
                     "INSERT INTO defects (fingerprint, title, summary, domain, defect_class, "
                     "service, endpoint, ui_route, paths, ticket_key, occurrence_count, "
@@ -557,7 +796,7 @@ def build_tools(ctx: ToolContext) -> list:
                         now,
                         now,
                         ctx.store.run_id,
-                        _target(ctx),
+                        target,
                     ),
                 )
                 conn.commit()
@@ -565,14 +804,33 @@ def build_tools(ctx: ToolContext) -> list:
                     "defect_memory", agent=ctx.agent.name, action="new",
                     fingerprint=fp, envelope_id=envelope.id, ticket_key=ticket_key,
                 )
-                return ok(
+                text = (
                     f"New defect recorded. Fingerprint {fp}, occurrence 1"
-                    + (f", ticket {ticket_key}." if ticket_key else ", no ticket yet."),
+                    + (f", ticket {ticket_key}." if ticket_key else ", no ticket yet.")
+                )
+                legacy_match = None
+                if legacy is not None:
+                    legacy_match = {
+                        "ticket_key": legacy["ticket_key"],
+                        "occurrence_count": legacy["occurrence_count"],
+                        "last_seen": legacy["last_seen"],
+                        "resolved": legacy["resolved_at"] is not None,
+                    }
+                    text += (
+                        f" The same fingerprint was also {_LEGACY_NOTE}, under "
+                        f"{legacy['ticket_key'] or 'no ticket'}"
+                        + (" (marked resolved)" if legacy["resolved_at"] else "")
+                        + ". It was not counted as this target's. If that ticket carries "
+                        "this repository's label, link to it; otherwise file as new."
+                    )
+                return ok(
+                    text,
                     fingerprint=fp,
                     occurrence_count=1,
                     ticket_key=ticket_key,
                     regression=False,
                     first_time=True,
+                    legacy_match=legacy_match,
                 )
 
             was_resolved = row["resolved_at"] is not None
@@ -582,8 +840,8 @@ def build_tools(ctx: ToolContext) -> list:
             conn.execute(
                 "UPDATE defects SET occurrence_count = ?, last_seen = ?, last_run_id = ?, "
                 "ticket_key = COALESCE(?, ticket_key), resolved_at = NULL "
-                "WHERE fingerprint = ?",
-                (count, now, ctx.store.run_id, ticket_key, fp),
+                "WHERE target = ? AND fingerprint = ?",
+                (count, now, ctx.store.run_id, ticket_key, target, fp),
             )
             conn.commit()
             known_ticket = ticket_key or row["ticket_key"]
@@ -635,11 +893,23 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def get_occurrences(args: dict[str, Any]) -> dict[str, Any]:
+        target = _target(ctx)
         conn = connect(root)
         try:
+            # This target's history, falling back to a legacy row -- the same
+            # visibility `search_similar` has, so a candidate it showed can be
+            # looked up. It was `WHERE fingerprint = ?`, which returned whichever
+            # project had recorded the fingerprint and presented that project's
+            # count and ticket as this one's.
             row = conn.execute(
-                "SELECT * FROM defects WHERE fingerprint = ?", (args["fingerprint"],)
+                "SELECT * FROM defects WHERE target = ? AND fingerprint = ?",
+                (target, args["fingerprint"]),
             ).fetchone()
+            if row is None and target:
+                row = conn.execute(
+                    "SELECT * FROM defects WHERE target = '' AND fingerprint = ?",
+                    (args["fingerprint"],),
+                ).fetchone()
         finally:
             conn.close()
         if row is None:
@@ -647,11 +917,13 @@ def build_tools(ctx: ToolContext) -> list:
                 f"Fingerprint {args['fingerprint']} is not in defect memory. "
                 "Either it is genuinely new, or you have the wrong fingerprint."
             )
+        legacy = _is_legacy(row, target)
         state = "resolved" if row["resolved_at"] else "open"
         return ok(
             f"{row['occurrence_count']} occurrence(s), first {row['first_seen']}, "
-            f"last {row['last_seen']}, ticket {row['ticket_key'] or 'none'} ({state}).",
-            **_row_view(row),
+            f"last {row['last_seen']}, ticket {row['ticket_key'] or 'none'} ({state})."
+            + (f" This was {_LEGACY_NOTE}." if legacy else ""),
+            **_row_view(row, legacy=legacy),
         )
 
     @tool(
@@ -677,16 +949,26 @@ def build_tools(ctx: ToolContext) -> list:
         fp = args["fingerprint"]
         ticket_key = args.get("ticket_key") or None
         now = _utcnow_iso()
+        target = _target(ctx)
         conn = connect(root)
         try:
-            row = conn.execute("SELECT * FROM defects WHERE fingerprint = ?", (fp,)).fetchone()
+            # This target's row only, never a legacy one: resolving is what makes
+            # the next sighting a REGRESSION, and it resolved every project's row
+            # with this fingerprint, so a fix in one project announced a false
+            # regression in another.
+            row = conn.execute(
+                "SELECT * FROM defects WHERE target = ? AND fingerprint = ?", (target, fp)
+            ).fetchone()
             if row is None:
-                return err(f"Fingerprint {fp} is not in defect memory; nothing to resolve.")
+                return err(
+                    f"Fingerprint {fp} is not in defect memory for this target; nothing to "
+                    "resolve. Record it first if this target has seen it."
+                )
             resolved_under = ticket_key or row["ticket_key"]
             conn.execute(
                 "UPDATE defects SET resolved_at = ?, resolved_ticket_key = ?, "
-                "ticket_key = COALESCE(?, ticket_key) WHERE fingerprint = ?",
-                (now, resolved_under, ticket_key, fp),
+                "ticket_key = COALESCE(?, ticket_key) WHERE target = ? AND fingerprint = ?",
+                (now, resolved_under, ticket_key, target, fp),
             )
             conn.commit()
         finally:

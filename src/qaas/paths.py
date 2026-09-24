@@ -37,6 +37,7 @@ Layering granularity differs by kind, and that difference is deliberate:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -123,28 +124,69 @@ def packaged_skills() -> Path:
     return packaged_plugin() / "skills"
 
 
+#: A top-level `system.yaml` is qaas's only if it declares run modes. Matched as
+#: text rather than parsed: a qaas user's own file with a YAML typo in it must
+#: still be *their* config -- and fail loudly in `load_config` -- rather than
+#: quietly stop marking the project and hand them the packaged defaults instead.
+_QAAS_SYSTEM_YAML = re.compile(r"^run_modes\s*:", re.M)
+
+
+def is_qaas_config_dir(project: Path) -> bool:
+    """Whether `<project>/config/` is qaas configuration rather than the user's own.
+
+    `config/` is about the most common directory name there is. Treating any
+    `config/system.yaml` or `config/targets/` as ours meant a repository whose
+    `config/system.yaml` held `database: ...` was taken for a qaas project:
+    `qaas init .` copied that file into `.qaas/config/system.yaml`, and from then
+    on `validate` failed and `run` died on `extra_forbidden` -- the tool's first
+    act in someone's repository was to mistake their file for its own. And the
+    directory stayed a config *layer* after init, so their `config/agents/` or
+    `config/targets/` would have been read as ours too.
+
+    Two markers, either sufficient:
+
+      * a qaas source checkout -- `src/qaas/defaults/config` beside it. This
+        repository keeps the demo profile in `config/targets/` and nothing else,
+        so without this its own tests stop finding `corvid`.
+      * a `system.yaml` that declares `run_modes:`. That key is what makes a
+        system config usable at all (it is taken whole, never merged), so a
+        user who keeps qaas config at the top level has it.
+    """
+    config = project / PROJECT_CONFIG
+    if not config.is_dir():
+        return False
+    if (project / "src" / "qaas" / "defaults" / "config").is_dir():
+        return True
+    system = config / "system.yaml"
+    try:
+        return system.is_file() and bool(
+            _QAAS_SYSTEM_YAML.search(system.read_text(encoding="utf-8", errors="replace"))
+        )
+    except OSError:
+        return False
+
+
 def find_project(start: Path | None = None) -> Path | None:
     """Walk up looking for a qaas project. Returns None if there is not one.
 
-    Three shapes count:
+    Two shapes count:
 
-      * `<dir>/.qaas/config/`      what `qaas init` writes
-      * `<dir>/config/system.yaml` a user who keeps config at the top level
-      * `<dir>/config/targets/`    this repository, whose `system.yaml` now
-                                   ships inside the package and whose `config/`
-                                   holds only the bundled demo profile
+      * `<dir>/.qaas/config/`  what `qaas init` writes
+      * `<dir>/config/`        only when `is_qaas_config_dir` says it is ours:
+                               a user who keeps config at the top level, or
+                               this repository, whose `system.yaml` ships inside
+                               the package and whose `config/` holds only the
+                               bundled demo profile
 
-    The third looks incidental and is not: without it, developing qaas in its
-    own checkout stops finding the demo target the moment the defaults move
-    into the wheel.
+    The second used to be any `config/system.yaml` or `config/targets/` at all,
+    which claimed every repository with a `config/` directory of its own -- see
+    `is_qaas_config_dir` for what that did.
     """
     here = (start or Path.cwd()).resolve()
     for parent in [here, *here.parents][:MAX_WALK_UP]:
         if (parent / STATE_DIRNAME / PROJECT_CONFIG).is_dir():
             return parent
-        if (parent / PROJECT_CONFIG / "system.yaml").is_file():
-            return parent
-        if (parent / PROJECT_CONFIG / "targets").is_dir():
+        if is_qaas_config_dir(parent):
             return parent
     return None
 
@@ -234,7 +276,13 @@ class Workspace:
             explicit_path,
             home_path / PROJECT_CONFIG if home_path else None,
             proj_state / PROJECT_CONFIG if proj_state else None,
-            project / PROJECT_CONFIG if project else None,
+            # Only when it is ours. A project found through `.qaas/config` kept
+            # `<project>/config/` as a layer unconditionally, so after `qaas
+            # init` in a repository with a `config/` of its own, that
+            # repository's `config/agents/` and `config/targets/` were read as
+            # qaas agents and profiles, and its `system.yaml` became the
+            # fallback the moment `.qaas/config/system.yaml` went missing.
+            project / PROJECT_CONFIG if project and is_qaas_config_dir(project) else None,
             packaged_config(),
         )
         prompt_dirs = _existing(

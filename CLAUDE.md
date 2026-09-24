@@ -26,7 +26,7 @@ that outdates this file usually outdates those too.
 uv venv && uv pip install -e ".[dev]"    # setup
 npx playwright install chromium          # only for UI (BROWSER, GUIDE) runs
 
-pytest                                   # 1104 tests, no API calls, no network
+pytest                                   # 1522 tests, no API calls, no network
 pytest tests/test_guardrails.py::test_name -x
 pytest -m docker                         # needs target-app running
 pytest -m 'llm or github or jira'        # tiers excluded by default in pyproject
@@ -59,7 +59,7 @@ linter or formatter configured, so these three are the whole gate:
 ```bash
 pytest -q                                # offline, free, no API key
 qaas validate                            # config, prompts and allowlists cohere
-qaas run --mode pr-check --dry-run       # every agent's options assemble
+qaas run --mode pr-check --dry-run       # builds every agent's real options; exit 1 if any fail
 ```
 
 CI adds two checks on the packaging job: the wheel must **not** contain
@@ -74,9 +74,11 @@ clears `QAAS_TRACKER`, `QAAS_VCS`, `QAAS_CONFIG_DIR` and `QAAS_HOME` and blanks
 `tests/mcp/conftest.py` calls `load_config` during collection, so a
 session-scoped autouse fixture runs too late for the module that needs it most.
 
-`qaas dashboard` needs the `[ui]` extra and reads `.qaas/` **relative to the
-working directory** — run it from the target project's checkout, not from here,
-or you will be looking at the demo app's runs.
+`qaas dashboard` needs the `[ui]` extra and reads the `.qaas/` of the project
+it is run in (found by walking up, like every other command) — run it from the
+target project's checkout, not from here, or you will be looking at the demo
+app's runs. It binds loopback only: a non-loopback `--host` is refused, because
+the Host check that stops DNS rebinding cannot protect a public bind.
 
 ## Architecture
 
@@ -221,6 +223,31 @@ so `Guardrail._protected_path` always returned `False`.
 ticket's test: per-invocation because which test is protected depends on which
 ticket is being fixed, deep-copied because the roster is shared across the run.
 
+**The fix loop is per ticket, not per run.** Five more facts, all found by a
+pre-release review rather than a run, because the suite drove one ticket at a
+time:
+
+- FIXER's §8.2 budget is keyed by `(agent, scope)` on the store, and the router
+  passes `scope=<ticket>` to FIXER's dispatch. Keyed by agent alone it was
+  shared across every ticket in the run, so the second ticket's FIXER got one
+  file and every later ticket escalated as "wider than the envelope" -- in the
+  mode `--from-board` hands ten tickets.
+- `max_diff_lines` is enforced at `mcp/vcs.py:commit`, the one place a line
+  count is both knowable and final; it had been configured and advertised and
+  enforced nowhere. Scratch paths are exempt, as for the file budget.
+- `commit` commits exactly the files staged under the agent's paths (`git commit
+  -- <files>`), and runs each through `_check_path` with the budget counted. A
+  bare `git commit` took the whole index -- the operator's staged `secret.env`,
+  or another finding's leftovers -- and only the *pathspec* had been checked.
+- A new branch starts from `ToolContext.base_ref`, never from whatever is
+  checked out: the ref the run started on (the *first* `run_started`, so a
+  resume keeps it) for REPRODUCER, the ticket's reproduction branch for FIXER so
+  the failing test is on the branch VERIFIER checks. From "the current HEAD",
+  every PR after the first carried other findings' commits.
+- A fix for a security finding is committed and never pushed or opened as a PR
+  (`_security_refusal`): the tracker keeps the finding out of a readable
+  backlog, and a pushed branch describing the hole undid that. §8.4.
+
 **Escalation is a designed ending, and it now has an answer.** `qaas escalations`
 lists what is blocked across runs; `qaas answer <TICKET> --decision proceed|hold
 --note "..."` ends one. Four properties are the design:
@@ -274,15 +301,25 @@ is a control working rather than an error. Three properties are worth knowing:
   keep.
 
 `RunMode.reserve_fraction` (default 0.15) holds back enough clock that a run
-which stops early still files what it found. `BudgetExceeded` used to unwind past
+which stops early still files what it found. It holds for agents already in
+flight too: a finding-phase dispatch is bounded by `Budget.seconds_left(reserve=True)`,
+not by the full cap -- an agent started a minute before the reserve used to run
+straight through it and leave TRIAGE nothing. `_reproduce_for` runs inside the
+verify phase and so checks the full cap. `BudgetExceeded` used to unwind past
 file, verify and report, leaving envelopes on disk, no ticket, no report, and
 whoever scheduled it looking at a run that cost money and produced nothing
 actionable. The finding phases check with `reserve=True`; filing and reporting
 run against the full cap.
 
-`run()` also catches non-`BudgetExceeded` exceptions and still writes
-`run_finished`. Without that, a ledger held an opening line with no closing one,
-which every reader treats as "still running", forever.
+`run()` always writes `run_finished`: it catches non-`BudgetExceeded`
+exceptions in *both* halves (the first half once did not, so a task builder
+raising during discovery escaped), and a `BaseException` -- Ctrl-C arrives as
+`CancelledError` -- is recorded with `interrupted: true` and the resume command
+before it propagates. Without that, a ledger held an opening line with no
+closing one, which every reader treats as "still running", forever; after a
+resume it was still "running" (two starts, one finish). Readers also treat a
+"live" ledger that has not been written for longer than its wall clock plus ten
+minutes as interrupted, which covers ledgers written before this.
 
 **A provider quota is the third wall, and it is not `BudgetExceeded`.**
 `is_quota_error` classifies an agent's error text (one phrase list, shared with
@@ -445,6 +482,27 @@ shapes now:
   `fnmatch` on POSIX is case-sensitive, and macOS is not — so `api/app/Auth.py`
   named the file `*auth*` exists to protect and matched nothing.
 
+**Git is read past its global options.** Every git rule read the subcommand as
+the word after `git`, so `git -C . push --force origin HEAD:main` cleared all of
+them for every agent with Bash, read-only VERIFIER included. `_git_argv` strips
+the global options first and every rule runs on the raw *and* the normalised
+command; `-c`, `--config-env`, `--git-dir`, `--work-tree` and a writing `git
+config` are refused (git configuration runs commands); `-C` is allowed only for
+reads. A push publishes explicitly named branches inside the agent's patterns --
+`--mirror`, `--all`, `--delete`, `--prune`, `-f` in any cluster, and a push
+naming no branch are refused. `gh api` and repository administration are
+forbidden; the vcs tools are the way to GitHub. Writers that name their
+destination behind an option (`curl -o`, `wget -O`, `sort -o`) are read, and
+ones that choose it themselves (`wget` with no `-O`, `tar -x`, `unzip`,
+`awk -i inplace`, `perl -i`) are refused.
+
+**Some paths are nobody's.** `_state_path` refuses `.qaas/`, `.git/`, `.claude/`
+and `.env*` (not `.env.example`) to every agent, whatever its `write_paths`
+expand to. A single-package repo profiles as `backend: ["."]`, so `$backend`
+was the whole checkout -- FIXER's own policy file, the ledger and `memory.db`
+included. A write root that resolves out of the target (a `qa/repro` symlink to
+`~`) is dropped rather than trusted.
+
 A glob `write_path` is contained before it is matched. The directory branch
 proves containment with `is_relative_to`; the glob branch only matched a string,
 and `relative` falls back to the absolute path when the target is outside the
@@ -455,6 +513,43 @@ One residual limit, stated because it is a decision: `python foo.py` and
 `python -m pytest` are arbitrary code and are **allowed**. Refusing them was
 tried and it refuses how FIXER and VERIFIER run the suite; a guardrail that
 blocks the system's own happy path is one that gets switched off.
+
+**The kernel bounds that residual.** Every agent with Bash (FIXER, REPRODUCER,
+VERIFIER) runs its shell in Claude Code's OS sandbox — Seatbelt on macOS,
+bubblewrap on Linux — configured by `sandbox.py` from the agent and the target:
+writes only inside the checkout and a private temp dir, never to `.git/hooks`,
+`.git/config`, `.claude/`, `.env*` or qaas's state; no reads of credential
+stores (`~/.ssh`, `~/.config/gh`, `~/.aws`, `.qaas/.env`, …); network only to
+loopback and the profile's own hosts. So what a script does is bounded even
+where the parser cannot read it; *where inside the checkout* is still the
+parser's and the commit check's job. Three settings are load-bearing and each
+was found by driving the bundled CLI through `tests/fake_anthropic.py` rather
+than reasoned about:
+
+- `allowUnsandboxedCommands: false`. The default lets a refused command be
+  retried with `dangerouslyDisableSandbox`, and Bash is allowlisted here, so the
+  retry would be auto-approved.
+- `allowLocalBinding: true`. Without it a direct connection to localhost is
+  refused on macOS even with loopback allowed, and no test can reach the app.
+- A private `CLAUDE_CODE_TMPDIR` **also on `allowWrite`**. The CLI makes only a
+  subdirectory of it writable, so `TMPDIR` pointed somewhere unwritable and
+  Python's `tempfile` — pytest's `tmp_path` with it — fell back to the checkout.
+
+`sandbox.mode` in `system.yaml`: `auto` (default) sandboxes where the OS can and
+records `sandbox: unavailable …` on `agent_started` where it cannot (Linux
+without `bubblewrap`/`socat`, Windows); `required` passes `failIfUnavailable`,
+so the agent fails instead; `off` leaves the parser alone.
+`sandbox.allowed_domains` adds hosts. `qaas validate` and `qaas doctor` say
+which applies on this machine, and `tests/test_sandbox_e2e.py` proves the
+escape, the credential read and the happy path against the real binary
+(skipped where the OS cannot sandbox). The PreToolUse hook still sees every
+sandboxed call — verified there too.
+
+Because the kernel now holds the line outside the checkout, Bash `git commit`
+and `git push` are refused to agents that hold the `vcs` server and pointed at
+`mcp__vcs__commit` / `mcp__vcs__push` — the tools that check every committed
+file against the matrix and hold a security fix back. The shell would have
+skipped both.
 
 Anything an agent supplies that becomes argv is a flag until proven otherwise.
 `_reject_flaglike` refuses a leading `-`, and `_reject_refspec` also refuses `:`
@@ -515,7 +610,13 @@ patterns, `defect_memory.record` and `mark_resolved` are gated by policy.
 Playwright is the one stdio subprocess, declared in `registry.STDIO_SERVERS`.
 
 Tool results use `ok()`/`err()` from `mcp/context.py`: errors are **returned, not
-raised**, so the agent reads the reason and corrects itself. `err()` sets **both**
+raised**, so the agent reads the reason and corrects itself. `ok(text, **structured)`
+also renders the structured payload as a JSON text block, because the SDK's
+`run_tool` forwards only `content` and `is_error` -- `structuredContent` never
+reaches the model. Before that, `impersonate`'s token, `run_single`'s failure
+output and every `truncated` flag were invisible to the agent they were for.
+`tests/mcp/test_sdk_wire.py` drives a real `tools/call` through the SDK's
+`SdkMcpBridge`; a test that reads the handler's dict tests the double. `err()` sets **both**
 `isError` and `is_error`, and that is the bug rather than belt-and-braces. The
 MCP wire format spells it `isError`; the SDK reads the handler's dict with
 `result.get("is_error", False)` and drops anything else. Every refusal from all
@@ -532,6 +633,14 @@ unless the profile says `compose`. Checking only "does a compose file exist and
 is docker on PATH" meant a compose file left lying in a repository was enough to
 destroy a shared staging environment declared `external`.
 
+`http_request` never follows a redirect: it returns the 3xx and its `Location`,
+because following one sent the `Authorization` header to whatever host the
+target redirected to, and hid the redirect an agent may be testing for.
+`impersonate` needs a reachable base URL, not lifecycle ownership, so it works
+on `external` targets, and supports `auth.mode: token`. With no profile at all
+the lifecycle tools refuse. A timed-out test or compose call kills its whole
+process group.
+
 `env_control.http_request` exists because API, AUDITOR and LOAD are all told that
 observation is the evidence bar — "a finding you have not observed is a
 hypothesis, not a defect" — and none of them held a tool that could issue an HTTP
@@ -546,6 +655,14 @@ test suite — someone else's code, cloned from a pasted URL under
 `qaas run --repo` — ran with this user's `ANTHROPIC_API_KEY`, `JIRA_API_TOKEN`
 and `GITHUB_TOKEN` in scope. A `conftest.py` reading `os.environ` is the whole
 exploit, and running the target's tests is this server's purpose.
+
+The same exploit had a second door. The SDK starts Claude Code with this
+process's whole environment, and FIXER, REPRODUCER and VERIFIER may run
+`python -m pytest` through Bash on purpose. `registry.scrubbed_credentials`
+blanks every credential-shaped variable in the agent's environment except the
+ones Claude Code itself needs (`ANTHROPIC_*`, `CLAUDE_*`, `AWS_*`) and
+`QAAS_TARGET_*`, the documented route for a target's own test credentials.
+Jira and GitHub are reached from this process, so the child never needed them.
 
 A project can declare more servers in `system.yaml` under `mcp_servers:`.
 Declaring one grants nothing — an agent receives it only by naming it in its own
@@ -688,8 +805,11 @@ said nothing.
 a profile through the same helper as `qaas init` (`_provision_target`). Keep it
 one code path — two ways to decide what is under test is two sets of rules about
 where someone else's code lands on disk. A credential embedded in the URL is
-redacted before it is printed or stored on the profile; it reaches `git clone`
-and nothing else. Reusing a same-named profile compares what it points at first,
+redacted before it is printed or stored on the profile -- on the reuse path as
+well as the clone path -- and stripped from the clone's `.git/config` by `git
+remote set-url` once the clone succeeds. A `?private_token=` query is dropped the
+same way and never names the target. A later push from that clone needs a
+credential helper or `gh auth`, which is where a token belongs. Reusing a same-named profile compares what it points at first,
 because the name is the repository's *basename* and two checkouts called `api`
 collide.
 
@@ -709,7 +829,9 @@ is the whole vocabulary; `policy`, `mcp_servers`, `builtin_tools`, `skills` and
 as this user must not be a second, quieter door onto the §8.1 matrix. A refused
 field is named in the error rather than dropped, the candidate is validated
 through a real `load_config` in a scratch copy before anything lands, and
-deleting the file undoes all of it. It writes to the layer
+deleting the file undoes all of it. It never writes into the packaged config
+directory (site-packages, or the source tree the next wheel is built from); with
+no project layer it creates `<state>/config`. It writes to the layer
 `config._apply_overrides` will actually *read* — that loader takes the nearest
 layer already containing an `overrides.yaml`, and writing unconditionally to
 `config_dirs[0]` silently discarded every override in force.
@@ -762,7 +884,11 @@ and one clobbered result file.
 
 ### Runtime state
 
-`.qaas/` (gitignored):
+`.qaas/` -- found by walking up to the project like everything else, not
+relative to the working directory. `qaas init`, `run --repo` and every run write
+or upgrade `.qaas/.gitignore` to ignore run state, `targets/` (clones), `scores/`
+and `.env`; the old template left `.env` committable in the user's own
+repository while the docs called it gitignored:
 
 - `.env` — credentials, read before every command. Anything already exported
   wins, and `QAAS_ENV_FILE=` disables the whole mechanism. Found from the
@@ -865,8 +991,14 @@ has no `defect_memory` server. So the most valuable thing a system with a memory
 can say could never be said. The fix is not to grant VERIFIER the server: it is
 for the router to write the fact it already has in hand.
 
-**Memory is partitioned by target.** It was one `memory.db` per state root with an
-unfiltered `SELECT * FROM defects`, and `qaas run --repo` puts every clone under
+**Memory is partitioned by target.** The `defects` table is keyed
+`(target, fingerprint)` and `outcomes` `(target, fingerprint, run_id, outcome)`;
+every read and write is scoped, and the router passes `target=` to `resolve`.
+Only `search_similar` had been scoped at first, so `record` still answered a
+different repository's defect on the same endpoint with "already tracked". An
+older database is rebuilt in place (SQLite cannot alter a key) inside one
+transaction, after a `memory.db.bak-<epoch>` copy. It was one `memory.db` per
+state root with an unfiltered `SELECT * FROM defects`, and `qaas run --repo` puts every clone under
 that one root — so one project's memory answered another's, and a close-enough
 match from an unrelated codebase came back as "already tracked as PROJ-N, do not
 file again". A suppression, persisted, repeating every run. The column migrates
@@ -924,6 +1056,12 @@ vs `matcher=/hooks=`) — trust the installed package, not the docs.
   `.claude/settings.json`, hooks and MCP servers into a process holding
   Anthropic, Jira and GitHub credentials. It must be an explicit `[]`, not None.
 - No merge path exists anywhere, and force-push is not a parameter. Merge is a
-  human decision (§8.4), and `FORBIDDEN_BASH` enforces it.
+  human decision (§8.4), and `FORBIDDEN_BASH` plus `_refspec_refusal` enforce it
+  -- on the command with git's global options stripped, not only as typed.
+- The quota preflight is isolated the same way (`--setting-sources=`,
+  `--strict-mcp-config`, a scratch cwd): it once ran in the target's directory
+  with default sources. Playwright MCP is pinned (`PLAYWRIGHT_MCP_VERSION`), not
+  `@latest` -- `npx -y` executes what npm serves, in a process holding
+  credentials.
 - A test double that reads a different field from the real consumer tests the
   double. If a helper interprets a result, point it at the key production reads.

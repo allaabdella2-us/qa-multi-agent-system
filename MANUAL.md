@@ -58,7 +58,14 @@ your numbers came from.
 ```bash
 npx playwright install chromium   # only for UI exploration (the BROWSER agent)
 pip install 'qaas-python[ui]'     # only for `qaas dashboard`
+sudo apt-get install bubblewrap socat   # Linux only: sandboxes the agents' shell
 ```
+
+On **Linux**, `bubblewrap` and `socat` let the agents that run shell commands
+(FIXER, REPRODUCER, VERIFIER) do so inside an OS sandbox. macOS needs nothing:
+its sandbox is built in. Without them the run still works — it says so in
+`qaas doctor` and in the ledger, and the shell is held by the parsed guardrails
+alone. See [What agents may and may not do](#️-what-agents-may-and-may-not-do).
 
 The `[ui]` extra pulls `starlette`, `uvicorn` and `sse-starlette`. All three
 already arrive with the Claude Agent SDK, so in practice it installs nothing
@@ -234,6 +241,7 @@ enforces it before every dispatch.
 ```bash
 qaas init <path-or-url> [--name N] [--api-url U] [--web-url U] [--force]
 qaas targets                    # profiles available, and which is active
+qaas --version                  # which release is installed
 qaas doctor [--target N]        # what this target makes possible, per agent
 qaas validate                   # config, prompts, skills, allowlists, budgets
 ```
@@ -247,7 +255,8 @@ substituting a weaker static read.
 ```bash
 qaas run --mode <mode> [options]
 
-  --dry-run              render every agent's options, call nothing
+  --dry-run              build every agent's real options, call nothing;
+                         exits 1 if any agent's options fail to assemble
   --only AGENT           restrict to these agents (repeatable)
   --target NAME          override the active profile
   --repo URL             clone a repository and run against it
@@ -328,7 +337,7 @@ refusal the guardrails issued as it happens.
 | flag | |
 |---|---|
 | `--port N` | default 7777; the next few are tried if it is taken |
-| `--host H` | default `127.0.0.1`. Leave it there — the ledger carries agent task previews, refused command lines and your target's paths |
+| `--host H` | default `127.0.0.1`. Loopback only (`127.0.0.1`, `::1`, `localhost`); anything else is refused — the ledger carries agent task previews, refused command lines and your target's paths, and the page's DNS-rebinding defence cannot protect a public bind |
 | `--no-open` | do not open a browser |
 
 Two things it shows that the CLI does not. A **skipped** agent says why it was
@@ -341,9 +350,10 @@ Ctrl-c stops the view and never the run, exactly like `--follow`. The one thing
 it can write is `overrides.yaml` — see [Overriding a value](#overriding-a-value).
 
 > [!IMPORTANT]
-> It reads `.qaas/` relative to the directory you start it in. From your
-> application's checkout you get that application's runs; from the qaas checkout
-> you get the demo app's.
+> It reads the `.qaas/` of the project you start it in — found by walking up
+> from the current directory, like every other command. From your application's
+> checkout you get that application's runs; from the qaas checkout you get the
+> demo app's.
 
 `qaas run --dashboard` serves from a background thread, so the page ends with the
 run. Start `qaas dashboard` in its own terminal to keep watching afterwards.
@@ -516,8 +526,9 @@ status — make a column called `Ready for Fix`, or reuse one you have — and:
 qaas run --mode fix-cycle --from-board "Ready for Fix"
 ```
 
-It takes every ticket carrying **this repository's label** that currently sits
-in that status, finds the run that produced each finding, and runs the fix cycle
+It needs a target profile, because the label is what scopes it — without one
+it refuses rather than picking up every repository's tickets. It takes every
+ticket carrying **this repository's label** that currently sits in that status, finds the run that produced each finding, and runs the fix cycle
 on exactly those. Drag a card into the column and the next run picks it up. Put
 that line on a cron or a timer and "drag a card, an agent starts work" is
 literally true:
@@ -612,7 +623,7 @@ Notes worth having:
 
 ```bash
 qaas prompts list              # which prompt is in force, and from where
-qaas prompts eject API     # copy to .qaas/prompts/ and edit
+qaas prompts eject API     # copy to .qaas/prompts/ and edit (inside a `qaas init`ed project)
 qaas prompts diff              # what you changed vs. what shipped
 ```
 
@@ -656,9 +667,27 @@ Enforced in code, not requested in a prompt:
 | **Ticket rate limit** | Over the per-run cap the call is denied and the run escalates. |
 | **Immutable test** | The agent fixing a defect may not edit the test that defines it. |
 | **No filesystem settings** | A repository qaas inspects cannot inject settings, hooks or MCP servers into the process running it. |
+| **Sandboxed shell** | FIXER, REPRODUCER and VERIFIER run shell commands inside an OS sandbox: writes stay in the checkout, `~/.ssh`, `~/.config/gh` and other credential stores are unreadable, and the network reaches only the target and localhost. The agents' environment carries no Jira or GitHub token. |
+| **Commits and pushes through the tools** | Those agents commit and push with the vcs tools, which check every file against the rails above and never publish a fix for a security finding; `git commit`/`git push` in the shell is refused. |
 
 A denial returns a reason and is logged; it never kills the turn. See them with
 `qaas trace <run-id> --kind denial`.
+
+The sandbox is configured in `system.yaml`:
+
+```yaml
+sandbox:
+  mode: auto          # auto | required | off
+  allowed_domains: [] # extra hosts a sandboxed command may reach
+```
+
+`auto` sandboxes wherever the OS can and records `sandbox: unavailable …` on each
+agent's `agent_started` line where it cannot. `required` makes an agent fail
+rather than run its shell unsandboxed — the setting for CI and shared machines.
+`off` disables it. Add a host to `allowed_domains` only if agents genuinely need
+it (a package registry, say): every entry is somewhere code from the target
+repository can send data. `qaas validate` and `qaas doctor` both print which
+applies on this machine.
 
 ---
 

@@ -1,7 +1,7 @@
 # Understanding qaas-python, end to end
 
 A single answer sheet for the twelve questions, written against the source as it
-stands today (16 agents, 7 in-process MCP servers, 30 skills, 1,126 tests).
+stands today (16 agents, 7 in-process MCP servers, 30 skills, 1,522 tests).
 
 Where a number or a name appears here it came out of the code, not out of a
 design document. `ARCHITECTURE.md` walks the code, `MANUAL.md` is the command
@@ -44,7 +44,7 @@ used only for intra-agent fan-out, and even that is capped — see §11.)
 ```
                       ┌──────────────────────────────────────────────┐
   CLI  cli.py ───────►│  ROUTER  router.py     (Python state machine) │
-  2,700 lines         │  phases · concurrency · budget · escalation   │
+  3,120 lines         │  phases · concurrency · budget · escalation   │
                       └───────────────┬──────────────────────────────┘
                                       │ one dispatch = one agent
                       ┌───────────────▼──────────────────────────────┐
@@ -245,25 +245,26 @@ Four facts here are bug-derived and worth knowing:
 ```
 qa-multi-agent-system/
 ├── src/qaas/                      ← everything an installed run needs
-│   ├── cli.py            2,700    the whole command surface (typer)
-│   ├── router.py         1,508    THE STATE MACHINE — phases, budget, loops
+│   ├── cli.py            3,120    the whole command surface (typer)
+│   ├── router.py         1,617    THE STATE MACHINE — phases, budget, loops
 │   ├── runner.py           233    one agent = one query(); records cost
-│   ├── registry.py         585    AgentSpec ──► ClaudeAgentOptions; hooks
-│   ├── guardrails.py       914    §8.1 write matrix, enforced in code
-│   ├── config.py           656    layering, validation, layout tokens
-│   ├── paths.py            340    where qaas's resources vs the user's state live
-│   ├── target.py           349    TargetProfile: what a repo makes possible
+│   ├── registry.py         632    AgentSpec ──► ClaudeAgentOptions; hooks
+│   ├── guardrails.py     1,279    §8.1 write matrix, enforced in code
+│   ├── config.py           682    layering, validation, layout tokens
+│   ├── paths.py            388    where qaas's resources vs the user's state live
+│   ├── target.py           363    TargetProfile: what a repo makes possible
 │   ├── discover.py         242    dumb pattern-match to draft a profile
 │   ├── envelope.py         331    the ONLY inter-agent type
-│   ├── store.py            452    ledger, envelopes, artifacts, results
-│   ├── trace.py            381    the read side of the ledger
-│   ├── importgraph.py      745    real parsing: Python AST + TS/JS scanner
-│   ├── scorecard.py        603    recall / precision vs the golden ledger
-│   ├── envfile.py          130    .env loading, project-root-relative
-│   ├── sdk_compat.py        52    fails loudly when the SDK renames hook events
+│   ├── store.py            541    ledger, envelopes, artifacts, results
+│   ├── trace.py            536    the read side of the ledger
+│   ├── importgraph.py      792    real parsing: Python AST + TS/JS scanner
+│   ├── scorecard.py        652    recall / precision vs the golden ledger
+│   ├── envfile.py          151    .env loading, project-root-relative
+│   ├── sdk_compat.py        70    fails loudly when the SDK renames hook events
+│   ├── sandbox.py          219    the OS sandbox around the agents' shell
 │   ├── adapters/
-│   │   ├── tracker.py    1,812    local JSON  |  Jira (filters, boards, JQL)
-│   │   └── vcs.py          625    local git   |  GitHub
+│   │   ├── tracker.py    2,122    local JSON  |  Jira (filters, boards, JQL)
+│   │   └── vcs.py          730    local git   |  GitHub
 │   ├── mcp/                       7 in-process servers, 46 tools
 │   │   ├── context.py       ToolContext, ok()/err()
 │   │   ├── envelope_server.py · defect_memory.py · tracker.py
@@ -280,7 +281,7 @@ qa-multi-agent-system/
 │
 ├── target-app/                    the deliberately buggy calibration app
 │   └── defects.yaml               the GOLDEN LEDGER — what `qaas score` measures against
-├── tests/                         1,126 tests; offline and free by default
+├── tests/                         1,522 tests; offline and free by default
 ├── config/targets/*.yaml          this checkout's own target profiles
 ├── docs/                          dashboard.md, jira-setup.md, launch.md
 ├── .qaas/                         ← RUNTIME STATE, gitignored
@@ -521,6 +522,12 @@ max_diff_files: 5
 max_diff_lines: 150
 ```
 
+Both halves are enforced, and both are **per ticket**: files at every write
+(`Write`, `Edit`, the shell and `vcs.write_file` all go through `_check_path`),
+lines at `vcs.commit`, which commits exactly the files staged under the agent's
+paths. The budget used to be per *run*, so the second ticket of a fix cycle got
+one file; and `max_diff_lines` was advertised and enforced nowhere.
+
 **Overridable per target, and a raise or a lower — never a grant:**
 
 ```yaml
@@ -575,6 +582,8 @@ Guessing is the one option that is not available. Four shapes:
 - **wrappers peeled** (`env`, `timeout`, `nice`, `nohup`, …) before `argv[0]` is read
 - **indirection refused** (`xargs`, `eval`, `find -exec`, command substitution, a pipe into a shell) — there is no destination to name
 - **deletion and revert are writes** (`rm`, `git rm`, `git checkout -- P`, `git restore P`, and `mv`'s *source*)
+- **git is read past its global options** — `git -C . push --force origin HEAD:main` once cleared every rule; `-c`/`--git-dir`/`--work-tree` are refused, `-C` is read-only, and a push must name branches inside the agent's patterns (no `--mirror`, `--all`, `--delete`)
+- **some paths are nobody's** — `.qaas/`, `.git/`, `.claude/` and `.env*` are refused to every agent, whatever `$backend` expands to
 
 Patterns are **case-folded on both sides**: every shipped pattern is lowercase,
 `fnmatch` on POSIX is case-sensitive, macOS is not — so `api/app/Auth.py` named
@@ -584,6 +593,21 @@ One residual limit, stated because it is a decision: `python foo.py` and
 `python -m pytest` are arbitrary code and are **allowed**. Refusing them was
 tried, and it refuses how FIXER and VERIFIER run the suite — a guardrail that
 blocks the system's own happy path is one that gets switched off.
+
+**And the kernel bounds it.** The shell of every agent with Bash runs in Claude
+Code's OS sandbox (Seatbelt on macOS, bubblewrap on Linux), configured per agent
+by `sandbox.py`:
+
+| | allowed | denied |
+|---|---|---|
+| write | the target checkout, a private temp dir | `.git/hooks`, `.git/config`, `.claude/`, `.env*`, qaas's state, everything outside |
+| read | everything else | `~/.ssh`, `~/.config/gh`, `~/.aws`, `~/.npmrc`, `~/.git-credentials`, `.qaas/.env`, … |
+| network | loopback, the profile's own hosts, `sandbox.allowed_domains` | everything else |
+
+So a script the parser cannot read — a `conftest.py` in a cloned repository —
+can neither leave the checkout, nor read a token, nor send one anywhere. The
+model cannot opt out (`allowUnsandboxedCommands: false`). `sandbox.mode: auto |
+required | off` in `system.yaml`; `qaas doctor` says which applies here.
 
 ### 6.4 Test-runner language support
 
@@ -657,6 +681,7 @@ pointer to <https://claude.com/claude-code>, and a PATH install works normally.
 | `npx playwright install chromium` | only for BROWSER / GUIDE (live UI) runs |
 | `pip install "qaas-python[ui]"` | only for `qaas dashboard` |
 | Docker | only for `environment.mode: compose` targets |
+| `bubblewrap` + `socat` | Linux only, to sandbox the agents' shell (macOS has it built in) — without them the shell runs unsandboxed, and says so |
 | Node | only if the target's tests run under vitest/jest |
 
 ---
@@ -724,10 +749,10 @@ not with *agents*.
 > commit and reset the same working tree. Worktree-per-finding isolation is a
 > known open item.
 
-### 8.5 The count is 16, and one string still says 15
+### 8.5 The count is 16
 
-`pyproject.toml`'s description reads *"fifteen governed Claude Code sessions"* —
-stale since SYNTHESIZER was added. The roster is 16.
+`pyproject.toml`'s description said *"fifteen governed Claude Code sessions"*
+after SYNTHESIZER was added; it says sixteen now, matching the roster.
 
 ---
 
@@ -775,7 +800,10 @@ not file; `vcs` refuses a branch outside the agent's patterns;
 `defect_memory.record` and `mark_resolved` are policy-gated.
 
 **Errors are returned, not raised** — `ok()` / `err()` from `mcp/context.py`, so
-the agent reads the reason and corrects itself. `err()` sets **both** `isError`
+the agent reads the reason and corrects itself. And **what `ok()` returns is
+rendered as text**: the SDK forwards only `content` and `is_error`, so a field
+that lived only in `structuredContent` — `impersonate`'s token, `run_single`'s
+failure output, a `truncated` flag — never reached the model. `err()` sets **both** `isError`
 and `is_error`, and that is the bug rather than belt-and-braces: the MCP wire
 format spells it `isError`, the SDK reads the handler's dict with
 `result.get("is_error", False)` and drops anything else. **Every refusal from all
@@ -1149,7 +1177,7 @@ There is no linter and no formatter configured. These three are the whole gate,
 and they are what CI runs:
 
 ```bash
-pytest -q                            # 1,126 tests, offline, free, no API key
+pytest -q                            # 1,522 tests, offline, free, no API key
 qaas validate                        # config, prompts and allowlists cohere
 qaas run --mode pr-check --dry-run   # every agent's options assemble
 ```
@@ -1311,7 +1339,8 @@ both.
 | `flake_runs: 5 → 1` | deferred; 0 flake signal in 61 samples, so 4 of every 5 runs are pure cost |
 | REPRODUCER model tier | untested at a cheaper tier |
 | `affected_tests` on JS | falls back to the filename heuristic for the ranking half |
-| `pyproject.toml` description | says "fifteen"; the roster is 16 |
+| `pyproject.toml` description | **fixed in 0.0.2** — says sixteen |
+| Bash sandboxing at the OS level | **built in 0.0.2** — `sandbox.py`; validated against the bundled CLI by `tests/test_sandbox_e2e.py`. Linux needs `bubblewrap` and `socat`; without them `auto` runs unsandboxed and records it |
 | `fix-cycle` `max_wall_clock_s` | **fixed in 0.0.2** — 3,600 s (three tickets) → 14,400 s; `full-loop` 10,800 → 28,800 |
 
 ---
@@ -1325,9 +1354,9 @@ both.
 | MCP tools | **46** |
 | skills | **30** |
 | ledger kinds | **30** (closed set, wire format) |
-| tests | **1,126** (offline, free) |
+| tests | **1,522** (offline, free) |
 | run modes | **5** |
-| Python source lines | ~21,000 |
+| Python source lines | ~24,000 |
 | max MCP servers per agent | 6 |
 | max concurrent agents | 3 (`full-loop`), 1 (`fix-cycle`) |
 | FIXER default diff budget | 5 files / 150 lines |

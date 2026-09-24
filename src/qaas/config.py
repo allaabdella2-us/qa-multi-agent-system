@@ -188,6 +188,21 @@ class Thresholds(BaseModel):
     max_proof_reopens: int = 1
 
 
+class SandboxConfig(BaseModel):
+    """The operating-system sandbox around agents' shells. See `qaas.sandbox`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: `auto` sandboxes Bash wherever the OS supports it and says so where it
+    #: cannot; `required` fails an agent whose shell cannot be sandboxed rather
+    #: than run it without; `off` leaves only the parsed guardrails.
+    mode: Literal["auto", "required", "off"] = "auto"
+    #: Hosts a sandboxed command may reach beyond the target's own URLs and
+    #: loopback -- e.g. a package registry, if agents must install. Every entry
+    #: is somewhere code from the target repository can send data.
+    allowed_domains: list[str] = Field(default_factory=list)
+
+
 class RunMode(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -232,6 +247,7 @@ class SystemConfig(BaseModel):
     tracker: Literal["local", "jira"] = "local"
     vcs: Literal["local", "github"] = "local"
     thresholds: Thresholds = Field(default_factory=Thresholds)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     run_modes: dict[str, RunMode] = Field(default_factory=dict)
     agents: dict[str, AgentSpec] = Field(default_factory=dict)
     profile: TargetProfile | None = Field(default=None, exclude=True)
@@ -360,7 +376,11 @@ def _apply_overrides(raw: dict[str, Any], dirs: Sequence[Path]) -> None:
     thresholds = data.get("thresholds")
     if isinstance(thresholds, dict):
         current = dict(raw.get("thresholds") or {})
-        current.update(thresholds)
+        # Known fields only, as for agents above. This merged every key, and
+        # `Thresholds` is `extra="forbid"` -- so one typo under `thresholds:`
+        # (`min_confidence_to_fil: 0.7`) failed validation for every command
+        # that loads a config, the opposite of the promise at the top.
+        current.update({k: v for k, v in thresholds.items() if k in Thresholds.model_fields})
         raw["thresholds"] = current
 
 
@@ -512,7 +532,7 @@ def load_config(
         looked = ", ".join(str(d) for d in dirs) or "(nowhere -- no search path)"
         raise FileNotFoundError(f"no system config at {dirs[0] / 'system.yaml'} (looked in: {looked})")
 
-    raw: dict[str, Any] = yaml.safe_load(system_path.read_text(encoding="utf-8")) or {}
+    raw: dict[str, Any] = _load_yaml_mapping(system_path)
 
     # `target_app:` used to name the application's directory relative to the
     # process cwd. The target profile's `root` says the same thing and says it
@@ -571,7 +591,7 @@ def load_config(
 
     agents: dict[str, Any] = {}
     for path in by_stem.values():
-        spec = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        spec = _load_yaml_mapping(path)
         name = spec.get("name") or path.stem.upper()
         spec["name"] = name
         if name in agents:
@@ -648,6 +668,23 @@ def load_config(
         profile = load_target(chosen, profiles[chosen].parent)
         config = config.model_copy(update={"target": chosen, "profile": profile})
     return _resolve_agent_paths(config)
+
+
+def _load_yaml_mapping(path: Path) -> dict[str, Any]:
+    """One YAML file that must hold a mapping, with errors that name the file.
+
+    Parsed from the open file rather than from `read_text()`: PyYAML names its
+    source in every error, and a string is `"<unicode string>"`, so a typo in
+    one of a dozen config files reported a line and column in no file at all.
+    A file holding a list or a scalar was an `AttributeError` further down.
+    """
+    with path.open(encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must be a YAML mapping, not {type(data).__name__}")
+    return data
 
 
 def target_files(dirs: Sequence[Path]) -> dict[str, Path]:

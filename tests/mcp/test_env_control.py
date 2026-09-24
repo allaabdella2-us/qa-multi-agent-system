@@ -49,7 +49,10 @@ DOCKER_TOOLS = ("spin_up", "seed", "reset", "status", "tear_down")
 #: is excluded from the compose-degradation sweep and covered on its own below,
 #: where the refusal is asserted *without* a connection being attempted: a
 #: suite that reaches the network is a suite that fails on a train.
-NON_COMPOSE_TOOLS = ("http_request",)
+#: `impersonate` is the same shape -- it only signs in over HTTP -- and was in
+#: the sweep, which is how "No compose file" against an `external` target was
+#: asserted as correct rather than caught as the bug it was.
+NON_COMPOSE_TOOLS = ("http_request", "impersonate")
 OFFLINE_TOOLS = ("set_flag", "get_flags", "set_clock")
 
 
@@ -179,8 +182,15 @@ async def test_spin_up_refuses_a_service_the_compose_file_does_not_declare(tools
     assert "db, api, web" in text_of(result) or "db" in text_of(result)
 
 
-async def test_spin_up_refuses_to_pretend_it_is_on_another_branch(tools, fake_docker):
-    """Building whatever is checked out while claiming a branch would poison a repro."""
+async def test_spin_up_refuses_to_pretend_it_is_on_another_branch(tools, fake_docker, monkeypatch):
+    """Building whatever is checked out while claiming a branch would poison a repro.
+
+    The checked-out branch is pinned rather than read from this checkout: an
+    unpacked sdist is not a git repository, and this failed there.
+    """
+    import qaas.mcp.env_control as env_control_mod
+
+    monkeypatch.setattr(env_control_mod, "_current_branch", lambda root: "main")
     result = await tools["spin_up"]({"branch": "definitely-not-the-checked-out-branch"})
     assert is_error(result)
     assert "check the branch out" in text_of(result).lower()

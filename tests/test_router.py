@@ -1469,3 +1469,169 @@ async def test_resuming_a_quota_stopped_run_reaches_the_filing_phase(cfg, tmp_pa
     assert "API" not in names, "discovery that succeeded was asked again"
     assert "TRIAGE" in names, "the filing phase never ran; the findings stay on disk"
     assert not resumed.quota_exhausted
+
+
+async def test_each_ticket_gets_its_own_diff_budget(cfg, tmp_path, fake_agents):
+    """§8.2 bounds a diff, not a run.
+
+    The budget lived on the per-run store keyed by agent alone, so every ticket
+    in a fix cycle drew from one pool of five files: ticket A's fix touched four,
+    ticket B's FIXER got one edit and was refused, and every later ticket
+    escalated as "wider than the envelope". `fix-cycle --from-board` exists to
+    work ten tickets.
+    """
+    from qaas.guardrails import Guardrail
+
+    calls, behaviour = fake_agents
+    store = RunStore.new(tmp_path)
+    _filed(store, key="CORVID-1")
+    _filed(store, key="CORVID-2")
+
+    def ticket_of_this_call() -> str:
+        return "CORVID-2" if "CORVID-2" in calls[-1][1] else "CORVID-1"
+
+    seen: dict[str, int] = {}
+
+    def verifier(ctx, spec):
+        ticket = ticket_of_this_call()
+        seen[ticket] = seen.get(ticket, 0) + 1
+        verdict = "NOT_FIXED" if seen[ticket] == 1 else "VERIFIED"
+        ctx.store.log("verdict", agent="VERIFIER", ticket_key=ticket, verdict=verdict, observed="-")
+
+    allowed: dict[str, list[bool]] = {}
+
+    def fixer(ctx, spec):
+        ticket = ticket_of_this_call()
+        guard = Guardrail(ctx)
+        root = ctx.agent.policy.write_paths[0]
+        allowed[ticket] = [
+            guard.check("Edit", {"file_path": f"{root}/{ticket.lower()}_{i}.py"}).allowed
+            for i in range(4)
+        ]
+
+    def reviewer(ctx, spec):
+        ctx.store.log("review", agent="REVIEWER", ticket_key=ticket_of_this_call(), decision="APPROVE")
+
+    behaviour["VERIFIER"] = {"hook": verifier}
+    behaviour["FIXER"] = {"hook": fixer}
+    behaviour["REVIEWER"] = {"hook": reviewer}
+
+    report = await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    assert allowed == {"CORVID-1": [True] * 4, "CORVID-2": [True] * 4}, allowed
+    assert not report.escalations, report.escalations
+
+
+def test_a_resumed_run_keeps_the_base_it_started_on(tmp_path):
+    """The base is the first `run_started`, not the branch a resume finds checked out."""
+    store = RunStore.new(tmp_path)
+    store.log("run_started", mode="fix-cycle", target_branch="develop", target_sha="a" * 40)
+    store.log("run_started", mode="fix-cycle", target_branch="fix/CORVID-1", target_sha="b" * 40)
+    assert Router._run_base(store) == "develop"
+
+
+def test_a_detached_start_uses_the_sha(tmp_path):
+    store = RunStore.new(tmp_path)
+    store.log("run_started", mode="nightly", target_branch="HEAD", target_sha="c" * 40)
+    assert Router._run_base(store) == "c" * 40
+
+
+# -- every run ends, and the reserve is really held back ----------------------
+
+
+def _kinds(store) -> list[str]:
+    return [e.kind for e in store.ledger()]
+
+
+async def test_an_exception_during_discovery_still_closes_the_run(cfg, tmp_path, fake_agents, monkeypatch):
+    """The finding phases caught only Budget/Quota, so the case the second half's
+    comment describes -- a task builder raising -- escaped from the first half and
+    left `run_started` with no `run_finished`."""
+    def boom(*args, **kwargs):
+        raise ValueError("no target profile loaded")
+
+    monkeypatch.setattr(conductor_mod.tasks, "mapper", boom)
+    report = await make_conductor(cfg, tmp_path).run("pr-check")
+    store = RunStore(report.run_id, tmp_path)
+    assert _kinds(store)[-1] == "run_finished"
+    assert "ValueError" in (report.stopped_early or "")
+
+
+async def test_an_interrupt_closes_the_run_and_still_interrupts(cfg, tmp_path, fake_agents):
+    """Ctrl-C arrives as CancelledError, a BaseException neither clause caught.
+    The dashboard then showed the run live forever."""
+    import asyncio
+
+    calls, behaviour = fake_agents
+
+    def cancel(ctx, spec):
+        raise asyncio.CancelledError()
+
+    behaviour["MAPPER"] = {"hook": cancel}
+    router = make_conductor(cfg, tmp_path)
+    with pytest.raises(asyncio.CancelledError):
+        await router.run("pr-check")
+    run_id = next((tmp_path / "runs").iterdir()).name
+    finished = list(RunStore(run_id, tmp_path).ledger("run_finished"))
+    assert finished and finished[-1].detail.get("interrupted") is True
+    assert "--run-id" in (finished[-1].detail.get("resume") or "")
+
+
+async def test_a_finding_phase_agent_is_bounded_by_the_reserved_clock(cfg, tmp_path, fake_agents, monkeypatch):
+    """Bounded by the full cap, an agent in flight when the reserve began ran on
+    through it, and TRIAGE then found the clock gone."""
+    import asyncio
+
+    seen: dict[str, float] = {}
+    real_wait_for = asyncio.wait_for
+
+    async def spy(awaitable, timeout):
+        seen.setdefault("first", timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(conductor_mod.asyncio, "wait_for", spy)
+    mode = cfg.run_modes["pr-check"]
+    await make_conductor(cfg, tmp_path).run("pr-check")
+    reserved = mode.max_wall_clock_s * (1 - mode.reserve_fraction)
+    assert seen["first"] <= reserved + 1, seen
+
+
+async def test_reproducing_inside_verify_uses_the_full_clock(cfg, tmp_path, fake_agents):
+    """`_reproduce_for` ran under `_gather`'s reserved default, so past 85% of a
+    run the first ticket needing a test abandoned verify and report."""
+    from qaas.router import Budget
+
+    calls, behaviour = fake_agents
+    store = RunStore.new(tmp_path)
+    env = _filed(store)
+    fresh = env.model_copy(update={"reproduction": env.reproduction.model_copy(
+        update={"status": ReproStatus.UNATTEMPTED})})
+    store.put_envelope(fresh)
+    budget = Budget(None, 1000, reserve_fraction=0.15)
+    budget.started -= 900  # inside the reserve, well before the cap
+    router = make_conductor(cfg, tmp_path)
+    specs = {s.name: s for s in cfg.enabled_agents("full-loop")}
+    from qaas.router import RunReport
+    await router._reproduce_for(fresh, specs, store, budget, RunReport(store.run_id, "full-loop"), None)
+    assert [n for n, _ in calls] == ["REPRODUCER"]
+
+
+def test_the_reserved_clock_is_what_is_left_before_the_reserve():
+    budget = Budget(None, 1000, reserve_fraction=0.2)
+    assert 790 < budget.seconds_left(reserve=True) <= 800
+    assert 990 < budget.seconds_left() <= 1000
+
+
+async def test_a_verified_ticket_resolves_this_targets_memory(cfg, tmp_path, verdicts, monkeypatch):
+    """Memory is keyed (target, fingerprint); an unscoped resolve marked only the
+    pre-target partition, so a regression could never be reported for a named target."""
+    calls, behaviour, script = verdicts
+    script("VERIFIED")
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        conductor_mod.defect_memory, "resolve",
+        lambda *args, **kwargs: seen.append(kwargs),
+    )
+    store = RunStore.new(tmp_path)
+    _filed(store)
+    await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
+    assert seen and seen[0].get("target") == str(cfg.target or "")

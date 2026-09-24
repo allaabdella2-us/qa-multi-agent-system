@@ -35,20 +35,27 @@ qaas run --mode nightly --dashboard  # start both; the URL prints before the fir
 | flag | |
 |---|---|
 | `--port N` | default 7777; the next few are tried if it is taken, and it says which it took |
-| `--host H` | default `127.0.0.1` |
+| `--host H` | default `127.0.0.1`; loopback only (`127.0.0.1`, `::1`, `localhost`) — anything else is refused |
 | `--no-open` | do not open a browser |
-| `--root PATH` | the state directory, default `.qaas` |
+| `--root PATH` | the state directory; default: the project's `.qaas/`, found by walking up |
+| `--config DIR` | the config layer to read and write tuning to, exactly as `qaas run --config` |
 
 > [!IMPORTANT]
-> **Run it from the directory whose runs you want.** The page reads `.qaas/`
-> relative to the working directory. Started from your application's checkout it
-> shows that application's runs; started from the qaas checkout it shows the
-> demo app's. Same command, different board.
+> **Run it from the project whose runs you want.** The page reads the `.qaas/`
+> of the project it is started in, found by walking up from the working
+> directory the way every qaas command does — so `cd api && qaas dashboard` still
+> finds the project's runs. Started inside your application's checkout it shows
+> that application's runs; started inside the qaas checkout it shows the demo
+> app's. Same command, different board.
 
 > [!WARNING]
-> **Leave `--host` on localhost.** The ledger carries agent task previews,
-> refused command lines and your target's absolute paths. It is not a thing to
-> put on `0.0.0.0` on a shared network.
+> **It binds loopback only, and refuses anything else.** The ledger carries agent
+> task previews, refused command lines and your target's absolute paths. The
+> page's defence against DNS rebinding is a check that the `Host` header names
+> loopback — which a client on another machine controls, so on `0.0.0.0` it would
+> protect nothing. `--host 0.0.0.0` therefore stops with an error rather than
+> serving. To look from another machine, forward the port over SSH
+> (`ssh -L 7777:127.0.0.1:7777 host`) so the page still sees loopback.
 
 `qaas run --dashboard` starts the server in a background thread, so the page
 dies when the run ends. To keep watching after a run finishes, start
@@ -84,8 +91,34 @@ tickets, escalations, artifacts and the scorecard. Clicking a finding opens it
 with its evidence, its reproduction steps, and the exact reason it was held if
 it was not fileable.
 
+The **scorecard** tab scores a run against the golden ledger of the target that
+is configured now — so it refuses, and says so, when the run was recorded
+against a different target root (a `qaas run --repo` clone, say). Scoring that
+run against the demo's `defects.yaml` would report 0% for reasons that have
+nothing to do with the run.
+
 **The ledger column** on the right streams events as they are written.
 "Decisions only" hides file reads, which is what `qaas trace --quiet` does.
+
+### Live, finished, and interrupted
+
+A run is **live** while its ledger holds more `run_started` lines than
+`run_finished` ones (a resumed run legitimately holds two of each) *and*
+something is still writing it. A run that stopped without closing — the process
+was killed, the machine slept for good, the terminal was closed — shows as
+**interrupted**: the rail stops pulsing, the clock stops at the last entry
+rather than counting on for ever, and no tail is kept open on it.
+
+Two rules decide that:
+
+- **Runs from 0.0.2 on close themselves.** Ctrl-c, an error, or the provider
+  running out of quota all end with a `run_finished` line; an interrupt's carries
+  `interrupted: true` and the exact `qaas run --run-id …` command that resumes it.
+- **Older ledgers, and runs killed outright,** are judged by silence: once a
+  "live" ledger has gone unwritten for longer than its run's own wall-clock cap
+  plus ten minutes — eight hours when the run recorded no cap — it is
+  interrupted. `qaas dashboard` with no run id opens a genuinely live run over a
+  stale one, and `qaas trace --follow` stops following it and says why.
 
 ### Two numbers that are deliberate
 
@@ -137,7 +170,9 @@ screenshot of it.
 ## Editing tuning
 
 Model, effort, turn cap and every threshold are editable. Changing one writes
-`overrides.yaml` beside your config, and the next run sees it:
+`overrides.yaml` into the nearest *project* config layer — the one
+`load_config` reads it back from, including a `--config` directory — and the
+next run sees it:
 
 ```console
 $ qaas run --mode fix-cycle --dry-run
@@ -196,7 +231,16 @@ is ignored however it is written, including by hand.
 
 A change is validated through a real `load_config` in a scratch copy **before**
 anything lands, so a value that would not load is refused now rather than found
-on the next paid run.
+on the next paid run. The file is replaced atomically, an unknown agent name is
+refused, and a hand-edited `overrides.yaml` that no longer parses is reported
+(naming the file) rather than turning every save into a server error — "Reset
+overrides" still works to recover from it.
+
+It is **never** written into the installed package. With no project config
+directory yet (`pip install` then `qaas dashboard` in a directory holding only
+`.qaas/runs/`), the page creates `.qaas/config/` and writes there, rather than
+into `site-packages` — which would have changed every project using that
+environment, or failed outright on a read-only install.
 
 ---
 
@@ -225,8 +269,17 @@ Ctrl-c stops the view and never the run, exactly like `qaas trace --follow`.
 **The page is blank, or an old version.** Browsers cache the module script.
 Hard-reload with Cmd+Shift+R (Ctrl+Shift+R on Windows and Linux).
 
-**It shows the wrong project's runs.** It reads `.qaas/` relative to the
-directory it was started in. Change directory and restart it.
+**It shows the wrong project's runs.** It reads the `.qaas/` of the project it
+was started in, walking up from the working directory. Start it from inside the
+project you want, or pass `--root <project>/.qaas`.
+
+**`--host` is refused.** Only loopback is served; see the warning under
+*Starting it*. Forward the port over SSH instead.
+
+**A run shows as interrupted.** It stopped without writing `run_finished` —
+killed, or run before 0.0.2 by a process that was stopped. Resume it with
+`qaas run --mode <mode> --run-id <id>`; agents that already finished are not
+re-run.
 
 **The dashboard died when the run ended.** `qaas run --dashboard` serves from a
 background thread that ends with the run. Start `qaas dashboard` separately to

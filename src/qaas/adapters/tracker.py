@@ -10,13 +10,16 @@ and re-audited, for every backend.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -38,6 +41,21 @@ STATUSES = ("open", "in_progress", "in_review", "resolved", "closed", "wont_fix"
 LINK_TYPES = ("duplicates", "relates", "blocks", "blocked-by", "regression-of", "caused-by")
 
 _KEY_RE = re.compile(r"^(?P<project>[A-Z][A-Z0-9-]*)-(?P<number>\d+)$")
+
+#: Jira Cloud's summary limit. Applied by both backends (see `normalise_ticket`).
+SUMMARY_LIMIT = 255
+#: Jira's limit on a text field, the description included.
+DESCRIPTION_LIMIT = 32_767
+#: What a caller's body may use of that. The rest is headroom for the "Filed by"
+#: line `JiraTracker._description` appends, so a body cut to fit is not pushed
+#: back over the limit by our own footer.
+BODY_LIMIT = DESCRIPTION_LIMIT - 767
+
+
+def key_project(key: str) -> str | None:
+    """The project half of an issue key (`CORVID-SEC-4` -> `CORVID-SEC`), or None."""
+    match = _KEY_RE.match((key or "").strip())
+    return match.group("project") if match else None
 
 
 def _utcnow() -> datetime:
@@ -186,6 +204,71 @@ class TrackerAdapter(ABC):
         return link_type
 
 
+# -- shared input normalisation ---------------------------------------------
+
+
+def _sanitise_label(value: Any) -> str | None:
+    """A caller's label as one Jira will take: whitespace runs become `-`.
+
+    Not `_label_safe`, which *drops* a value with whitespace in it. That is right
+    for the ids it guards (a mangled envelope id never matches on the way back
+    out) and wrong for an agent's own label, which is a category: `ux friction`
+    means `ux-friction`, the spelling `routing-rules` asks for anyway.
+    """
+    label = "-".join(str(value or "").split())[:255]
+    return label or None
+
+
+def normalise_ticket(
+    title: str, body: str, labels: list[str] | None, *, envelope_id: str | None = None
+) -> tuple[str, str, list[str]]:
+    """The one shape a ticket takes before either backend stores it.
+
+    The local backend accepted three inputs Jira answers with a 400: an agent
+    label with a space in it (the caller's labels never went through
+    `_label_safe`), a title with a newline in it, and a description over Jira's
+    32,767-character limit. All three passed the offline suite, and on a real
+    Jira the 400 arrives mid-run, with the finding already in hand. Both
+    backends normalise through here now, so what the local tracker stores is
+    what Jira would have accepted. Idempotent, so calling it twice is free.
+    """
+    summary = " ".join((title or "").split())
+    if len(summary) > SUMMARY_LIMIT:
+        summary = summary[: SUMMARY_LIMIT - 1].rstrip() + "…"
+    cleaned = {label for label in (_sanitise_label(v) for v in labels or []) if label}
+    return summary, _truncate_body(body or "", envelope_id), sorted(cleaned)
+
+
+def _truncate_body(body: str, envelope_id: str | None) -> str:
+    """`body` cut to `BODY_LIMIT`, saying so where a reader will see it.
+
+    A silent cut would drop the acceptance criteria that end the house format
+    and leave a ticket that reads as complete. The marker says how much went
+    and where the whole finding still is.
+    """
+    if len(body) <= BODY_LIMIT:
+        return body
+    where = f" The full finding is envelope {envelope_id}." if envelope_id else ""
+
+    def marker(cut: int) -> str:
+        return (
+            f"\n\n[TRUNCATED: {cut:,} characters of this description were cut to fit the "
+            f"tracker's {DESCRIPTION_LIMIT:,}-character limit.{where}]"
+        )
+
+    # Sized with the widest count it could print, so the result never overshoots.
+    keep = BODY_LIMIT - len(marker(len(body)))
+    return body[:keep] + marker(len(body) - keep)
+
+
+#: Serialises the local tracker's read-modify-write operations in-process. The
+#: MCP handlers run adapter calls on worker threads now (`asyncio.to_thread`),
+#: and two threads transitioning the same ticket would each read, change and
+#: write back the file, the second erasing the first's history entry. While
+#: every call ran on the one event loop, that could not interleave.
+_LOCAL_WRITES = threading.Lock()
+
+
 class LocalTracker(TrackerAdapter):
     """Issues as JSON files under `<root>/tickets/`.
 
@@ -198,6 +281,8 @@ class LocalTracker(TrackerAdapter):
     def __init__(self, root: Path | str):
         self.dir = Path(root) / "tickets"
         self.dir.mkdir(parents=True, exist_ok=True)
+        #: Ticket files the last `issues()` scan could not parse. See `issues`.
+        self.unreadable_files = 0
 
     # -- storage ----------------------------------------------------------
 
@@ -207,12 +292,36 @@ class LocalTracker(TrackerAdapter):
         return self.dir / f"{key}.json"
 
     def _write(self, issue: Issue) -> Issue:
-        self._path(issue.key).write_text(issue.model_dump_json(indent=2), encoding="utf-8")
+        # Temp file plus `os.replace`, so a reader sees the old ticket or the new
+        # one and never half of either. A plain `write_text` truncates first and
+        # writes second: four processes filing forty tickets each left files a
+        # reader caught mid-write, ~110 of the 160 calls died on `ValidationError`
+        # reading them, and one truncated file made every later `issues()` raise.
+        # (The same shape as `store._write_atomic`; not `mkstemp`, whose 0600
+        # would make a ticket unreadable to anyone the old files were readable to.)
+        path = self._path(issue.key)
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:12]}.tmp")
+        try:
+            temp.write_text(issue.model_dump_json(indent=2), encoding="utf-8")
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
         return issue
 
     def get(self, key: str) -> Issue | None:
         path = self._path(key)
-        return Issue.model_validate_json(path.read_text(encoding="utf-8")) if path.exists() else None
+        if not path.exists():
+            return None
+        try:
+            return Issue.model_validate_json(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            # A `ValidationError` escaped here, and every caller catches
+            # `TrackerError`, so one corrupt file crashed the tool call instead
+            # of being refused with a reason.
+            raise TrackerError(
+                f"{key}'s file could not be read ({type(exc).__name__}); it is empty, "
+                "mid-write or corrupt"
+            ) from None
 
     def _require(self, key: str) -> Issue:
         issue = self.get(key)
@@ -221,15 +330,59 @@ class LocalTracker(TrackerAdapter):
         return issue
 
     def issues(self) -> list[Issue]:
+        """Every readable ticket. A file that does not parse is skipped and counted.
+
+        Tolerant for the reason `RunStore.ledger` is: this raised on the first
+        bad file, and `search` and key allocation both read through it, so one
+        truncated ticket made every later `search` and every later filing fail.
+        `unreadable_files` says how many were skipped.
+        """
         found = []
+        bad = 0
         for path in self.dir.glob("*.json"):
             if _KEY_RE.match(path.stem):
-                found.append(Issue.model_validate_json(path.read_text(encoding="utf-8")))
+                try:
+                    found.append(Issue.model_validate_json(path.read_text(encoding="utf-8")))
+                except (ValueError, OSError):
+                    bad += 1
+        self.unreadable_files = bad
         return sorted(found, key=lambda i: i.number)
 
-    def _next_key(self, project: str) -> str:
-        highest = max((i.number for i in self.issues()), default=0)
-        return f"{project}-{highest + 1}"
+    def _highest_number(self) -> int:
+        """The largest number any ticket file is named for, read from names only.
+
+        Names rather than contents: a file another process has claimed and not
+        yet written is empty, and its number is taken all the same.
+        """
+        numbers = [0]
+        for path in self.dir.glob("*.json"):
+            match = _KEY_RE.match(path.stem)
+            if match:
+                numbers.append(int(match.group("number")))
+        return max(numbers)
+
+    def _claim_key(self, project: str) -> str:
+        """Reserve the next free key by creating its file exclusively.
+
+        This was "read the highest number, add one, write": two processes read
+        the same highest number and wrote the same key, so four processes filing
+        forty tickets each left 19 files for 160 calls. `O_EXCL` makes the
+        filesystem the arbiter; losing a race moves on to the next number.
+
+        The numbers stay shared across projects, but two processes filing into
+        *different* projects at the same instant can each take the same number
+        (`CORVID-7` and `CORVID-SEC-7`). Keys stay unique, which is the promise.
+        """
+        number = self._highest_number() + 1
+        while True:
+            key = f"{project}-{number}"
+            try:
+                fd = os.open(self._path(key), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            except FileExistsError:
+                number += 1
+                continue
+            os.close(fd)
+            return key
 
     # -- operations -------------------------------------------------------
 
@@ -245,42 +398,52 @@ class LocalTracker(TrackerAdapter):
         fingerprint: str | None = None,
         reporter: str | None = None,
     ) -> Issue:
+        title, body, labels = normalise_ticket(title, body, labels, envelope_id=envelope_id)
         if not title.strip():
             raise TrackerError("an issue needs a title")
-        issue = Issue(
-            key=self._next_key(project),
-            project=project,
-            title=title.strip(),
-            body=body,
-            labels=sorted(set(labels or [])),
-            severity=severity,
-            envelope_id=envelope_id,
-            fingerprint=fingerprint,
-            reporter=reporter,
-            history=[Transition(status="open", by=reporter, comment="filed")],
-        )
-        return self._write(issue)
+        key = self._claim_key(project)
+        try:
+            issue = Issue(
+                key=key,
+                project=project,
+                title=title.strip(),
+                body=body,
+                labels=sorted(set(labels or [])),
+                severity=severity,
+                envelope_id=envelope_id,
+                fingerprint=fingerprint,
+                reporter=reporter,
+                history=[Transition(status="open", by=reporter, comment="filed")],
+            )
+            return self._write(issue)
+        except BaseException:
+            # The claim is an empty file. Left behind, it is a ticket nobody can
+            # read, counted as unreadable on every scan for ever.
+            self._path(key).unlink(missing_ok=True)
+            raise
 
     def transition(self, key: str, status: str, *, by: str | None = None, comment: str = "") -> Issue:
         self._check_status(status)
-        issue = self._require(key)
-        if issue.status == status:
-            raise TrackerError(f"{key} is already '{status}'")
-        issue.status = status
-        issue.updated_at = _utcnow()
-        issue.history.append(Transition(status=status, by=by, comment=comment))
-        return self._write(issue)
+        with _LOCAL_WRITES:
+            issue = self._require(key)
+            if issue.status == status:
+                raise TrackerError(f"{key} is already '{status}'")
+            issue.status = status
+            issue.updated_at = _utcnow()
+            issue.history.append(Transition(status=status, by=by, comment=comment))
+            return self._write(issue)
 
     def link(self, key: str, to: str, link_type: str = "relates") -> Issue:
         self._check_link_type(link_type)
         if key == to:
             raise TrackerError("an issue cannot be linked to itself")
-        issue = self._require(key)
-        self._require(to)  # refuse dangling links: a link to nothing is worse than none
-        if not any(link.type == link_type and link.to == to for link in issue.links):
-            issue.links.append(IssueLink(type=link_type, to=to))
-            issue.updated_at = _utcnow()
-        return self._write(issue)
+        with _LOCAL_WRITES:
+            issue = self._require(key)
+            self._require(to)  # refuse dangling links: a link to nothing is worse than none
+            if not any(link.type == link_type and link.to == to for link in issue.links):
+                issue.links.append(IssueLink(type=link_type, to=to))
+                issue.updated_at = _utcnow()
+            return self._write(issue)
 
     def search(
         self,
@@ -533,6 +696,11 @@ def _fingerprint_label_value(fingerprint: str | None) -> str | None:
     return digest or None
 
 
+#: Where a plain-http JIRA_BASE_URL is tolerated: the credential never leaves
+#: the machine. `::1` is the same loopback as 127.0.0.1, spelled for IPv6.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
 def _label_safe(value: str | None, prefix: str = "") -> str | None:
     """A Jira label, or None if the value cannot be one.
 
@@ -691,6 +859,20 @@ class JiraTracker(TrackerAdapter):
                 "scheme and be your Jira site root, e.g. https://acme.atlassian.net "
                 "(no /jira, no /rest/api path)."
             )
+        # Every call carries `Basic <email:api_token>`, and `http://` was accepted
+        # as readily as `https://` -- so a base URL typed without the "s" put the
+        # bot's API token on the wire in clear text, on every request, for the
+        # whole run. Loopback is the one exception: nothing leaves the machine,
+        # and it is how a local stub (this suite's included) is reached.
+        host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+        if base_url.startswith("http://") and host not in _LOOPBACK_HOSTS:
+            raise TrackerConfigError(
+                f"JIRA_BASE_URL is '{base_url}', which is plain http. Every Jira call sends "
+                "JIRA_EMAIL and JIRA_API_TOKEN as a Basic credential, so over http the token "
+                "would cross the network unencrypted. Use https:// (Jira Cloud is always "
+                "https://<site>.atlassian.net). Plain http is accepted only for localhost or "
+                "127.0.0.1, e.g. a local test stub."
+            )
 
         self.base_url = base_url
         self.email = values["JIRA_EMAIL"]
@@ -797,6 +979,25 @@ class JiraTracker(TrackerAdapter):
                     f"Jira returned a non-JSON body for {method} {path}; the URL in "
                     f"JIRA_BASE_URL ({self.base_url}) may point at a proxy or login page "
                     "rather than at a Jira site"
+                ) from None
+            except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError) as exc:
+                # Everything else a socket, the HTTP parser or the decoder can
+                # raise. `RemoteDisconnected`, `IncompleteRead` and a
+                # `UnicodeDecodeError` from a proxy's error page all escaped as
+                # themselves, and every caller catches `TrackerError` and nothing
+                # else -- so a connection dropped on the read-back after a
+                # successful POST /issue unwound past `create_issue`'s fallback
+                # and past the MCP handler. The ticket existed, nothing recorded
+                # its key, and TRIAGE's retry filed it a second time.
+                applied = (
+                    f" The {method} may already have been applied before the reply was "
+                    "lost: check before retrying, or it may be applied twice."
+                    if method != "GET"
+                    else ""
+                )
+                raise TrackerError(
+                    f"the call to Jira failed during {method} {path}: its reply was lost or "
+                    f"unreadable ({type(exc).__name__}: {exc}).{applied}"
                 ) from None
         raise TrackerError(f"Jira rate-limited {method} {path} after {attempts} attempts")
 
@@ -1079,6 +1280,13 @@ class JiraTracker(TrackerAdapter):
             # Omitted rather than sent empty: Jira answers an empty accountId
             # with a 400, which would read as "the filter API is broken".
             params["accountId"] = account
+        else:
+            # Owner unknown -- `/myself` failed. This used to fall through to an
+            # unscoped search, skip every filter that had an owner (all of them,
+            # ours included), report "none", and create a duplicate filter on
+            # every run. `/filter/my` answers "which filters are mine" without
+            # needing the account id at all.
+            return self._find_my_filter(name)
         data = self._request("GET", "/filter/search", params=params, retry_on_429=True)
         for entry in data.get("values") or []:
             if str(entry.get("name") or "").strip() != name:
@@ -1095,6 +1303,21 @@ class JiraTracker(TrackerAdapter):
             if not account and owner:
                 continue
             return entry
+        return None
+
+    def _find_my_filter(self, name: str) -> dict[str, Any] | None:
+        """This account's own filter named `name`, asked without an account id.
+
+        A failure here raises rather than answering None: None means "create
+        one", and when ownership cannot be established either way, creating is
+        how the duplicate filters were made. `ensure_repo_board`'s caller
+        already treats a raise as "no board this run", which costs a view and
+        nothing else.
+        """
+        data = self._request("GET", "/filter/my", retry_on_429=True)
+        for entry in data if isinstance(data, list) else []:
+            if isinstance(entry, dict) and str(entry.get("name") or "").strip() == name:
+                return entry
         return None
 
     def update_filter_jql(self, filter_id: int, *, name: str, jql: str) -> dict[str, Any]:
@@ -1154,8 +1377,21 @@ class JiraTracker(TrackerAdapter):
             return False  # unknown: try, and fall back on the answer
         return str(info.get("style") or "").lower() == "next-gen" or bool(info.get("simplified"))
 
-    def find_board(self, name: str) -> dict[str, Any] | None:
-        """A board with exactly this name, or None. Agile API."""
+    def find_board(self, name: str, *, filter_id: int) -> dict[str, Any] | None:
+        """A board with exactly this name *over this filter*, or None. Agile API.
+
+        It matched by name alone, and a board's name is not an identity: another
+        account's board called "repo — QA (qaas)" would be adopted as this run's,
+        and its link handed out as the place to watch this repository's defects,
+        over a filter showing someone else's tickets. The
+        filter is what makes a board ours, so each name match is checked against
+        the filter id in its configuration.
+
+        Raises when a name match exists and its filter cannot be read. None would
+        mean "create one", and a board this account may already own should not
+        be duplicated on a flaky read any more than a stranger's should be
+        adopted on a confident one.
+        """
         data = self._request(
             "GET",
             "/board",
@@ -1163,9 +1399,27 @@ class JiraTracker(TrackerAdapter):
             retry_on_429=True,
             api_base=JIRA_AGILE_BASE,
         )
+        unverified: list[str] = []
         for entry in data.get("values") or []:
-            if str(entry.get("name") or "").strip() == name:
+            if str(entry.get("name") or "").strip() != name:
+                continue
+            try:
+                config = self._request(
+                    "GET", f"/board/{int(entry['id'])}/configuration",
+                    retry_on_429=True, api_base=JIRA_AGILE_BASE,
+                )
+            except (TrackerError, KeyError, TypeError, ValueError):
+                unverified.append(str(entry.get("id")))
+                continue
+            board_filter = (config.get("filter") or {}) if isinstance(config, dict) else {}
+            if str(board_filter.get("id") or "") == str(filter_id):
                 return entry
+        if unverified:
+            raise TrackerError(
+                f"board {', '.join(unverified)} is named '{name}' but its filter could not be "
+                "read, so whether it is this repository's board is unknown. Not adopting it, "
+                "and not creating a second one beside it."
+            )
         return None
 
     def create_board(self, *, name: str, filter_id: int, board_type: str = "kanban") -> dict[str, Any]:
@@ -1207,7 +1461,10 @@ class JiraTracker(TrackerAdapter):
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 resolved = response.geturl()
-        except (urllib.error.URLError, TimeoutError, OSError):
+        # `HTTPException` too: a `BadStatusLine` from a misbehaving proxy is not
+        # an `OSError`, so it would have escaped a function documented never to
+        # raise -- the same gap `_request` had.
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, ValueError):
             return None
         if not resolved or resolved == url:
             return None
@@ -1234,9 +1491,14 @@ class JiraTracker(TrackerAdapter):
         """
         if self._account_id_cache is None:
             try:
-                self._account_id_cache = str(self.whoami().get("accountId") or "")
+                me = self.whoami()
             except TrackerError:
-                self._account_id_cache = ""
+                # Not cached. This stored "" on failure, so one /myself that
+                # timed out made the account unknown for the tracker's lifetime
+                # and every later `find_filter` went down the "owner unknown"
+                # road. Unknown now means "ask again next time".
+                return None
+            self._account_id_cache = str((me if isinstance(me, dict) else {}).get("accountId") or "")
         return self._account_id_cache or None
 
     def ensure_repo_board(
@@ -1306,7 +1568,15 @@ class JiraTracker(TrackerAdapter):
                 ),
             )
 
-        board = self.find_board(name)
+        try:
+            board = self.find_board(name, filter_id=int(info.filter_id))
+        except TrackerError as exc:
+            # Neither adopt nor create: see `find_board`. The filter is still a
+            # working view, which is the same outcome as a refused board.
+            return replace(
+                info,
+                note=f"No board this run: {exc} The saved filter above is the per-repository view.",
+            )
         if board is not None:
             return self._with_board(info, int(board["id"]), name, created=False)
 
@@ -1428,8 +1698,10 @@ class JiraTracker(TrackerAdapter):
         the payload is correct only until the day it drifts, and it would be
         trusted either way.
         """
+        title, body, labels = normalise_ticket(title, body, labels, envelope_id=envelope_id)
         if not title.strip():
             raise TrackerError("an issue needs a title")
+        project = self._check_in_scope(project)
         return {
             "fields": {
                 "project": {"key": project},
@@ -1452,6 +1724,7 @@ class JiraTracker(TrackerAdapter):
         fingerprint: str | None = None,
         reporter: str | None = None,
     ) -> Issue:
+        title, body, labels = normalise_ticket(title, body, labels, envelope_id=envelope_id)
         payload = self.create_payload(
             project=project,
             title=title,
@@ -1463,22 +1736,52 @@ class JiraTracker(TrackerAdapter):
             reporter=reporter,
         )
         created = self._request("POST", "/issue", body=payload, retry_on_429=False)
-        key = str(created.get("key") or "")
+        key = str(created.get("key") or "") if isinstance(created, dict) else ""
         if not key:
             raise TrackerError(f"Jira accepted the issue but returned no key: {created!r}")
 
         fallback = self._local_issue(
-            key, project, title, self._description(body, reporter),
+            key, payload["fields"]["project"]["key"], title, self._description(body, reporter),
             list(payload["fields"]["labels"]),
             severity, envelope_id, fingerprint, reporter,
         )
         # Reading the issue back is a convenience, not the record. The ticket
         # exists the moment Jira answered the POST, so a failure here must not
         # lose the key — a filed ticket nobody can name is a stranded ticket.
+        # Any failure, not only `TrackerError`: a read-back that parses into
+        # something `_issue_from_jira` cannot map is still a ticket that exists.
         try:
             return self.get(key) or fallback
-        except TrackerError:
+        except Exception:  # noqa: BLE001 - nothing after the POST may lose the key
             return fallback
+
+    def _check_in_scope(self, project: str) -> str:
+        """`project` in its configured spelling, or refuse.
+
+        There was no allowlist here at all: `create_issue(project="SOMEONE-ELSES")`
+        filed into whatever project the bot account could reach, which on a
+        shared Jira is every team's. The system files into exactly two projects,
+        so those two are the list.
+        """
+        allowed = [self._project] + ([self._security_project] if self._security_project else [])
+        wanted = (project or "").strip().upper()
+        for name in allowed:
+            if name.upper() == wanted:
+                return name
+        raise TrackerError(
+            f"'{project}' is not a project this tracker works in; it is configured for "
+            f"{' and '.join(allowed)} only (JIRA_PROJECT_KEY"
+            + (f" / {self.SECURITY_ENV}" if self._security_project else "")
+            + ")"
+        )
+
+    def _check_key_in_scope(self, key: str) -> str:
+        """`key` if it belongs to one of the configured projects, else refuse."""
+        project = key_project(key)
+        if project is None:
+            raise TrackerError(f"'{key}' is not an issue key; expected e.g. {self._project}-1")
+        self._check_in_scope(project)
+        return key
 
     @staticmethod
     def _local_issue(
@@ -1534,6 +1837,9 @@ class JiraTracker(TrackerAdapter):
         raises with the transitions that do exist: doing nothing quietly is the
         worst outcome here, because the caller believes the ticket moved.
         """
+        # Any key the bot could reach used to be accepted, which on a shared Jira
+        # is every team's tickets. See `_check_in_scope`.
+        self._check_key_in_scope(key)
         issue = self._require(key)
         available = (
             self._request(
@@ -1614,6 +1920,8 @@ class JiraTracker(TrackerAdapter):
         self._check_link_type(link_type)
         if key == to:
             raise TrackerError("an issue cannot be linked to itself")
+        self._check_key_in_scope(key)
+        self._check_key_in_scope(to)
         self._require(key)
         self._require(to)  # refuse dangling links: a link to nothing is worse than none
 
@@ -1809,4 +2117,6 @@ __all__ = [
     "adf_to_text",
     "build_tracker",
     "issue_summary",
+    "key_project",
+    "normalise_ticket",
 ]

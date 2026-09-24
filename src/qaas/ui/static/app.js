@@ -56,9 +56,13 @@ function renderHeader(v) {
     : "—";
 
   const status = $("status");
-  const live = !v.completed;
-  status.className = "status" + (live ? " live" : v.stopped_early ? " stopped" : "");
-  $("status-text").textContent = live ? "live" : v.stopped_early ? "stopped early" : "complete";
+  // `interrupted` is a run killed before it could write `run_finished`. Reading
+  // "not completed" as "live" pulsed a green dot and ran the clock over such a
+  // run forever; the server decides from the ledger's age, and says so.
+  const live = !v.completed && !v.interrupted;
+  status.className = "status" + (live ? " live" : v.stopped_early || v.interrupted ? " stopped" : "");
+  $("status-text").textContent = live ? "live"
+    : v.interrupted ? "interrupted" : v.stopped_early ? "stopped early" : "complete";
 
   $("elapsed").textContent = hms(v.elapsed_s);
   // The cap is wall clock, never dollars: no shipped run mode sets a budget
@@ -542,7 +546,7 @@ function applyPatch(p) {
   Object.assign(v, {
     elapsed_s: p.elapsed_s, cost_usd: p.cost_usd, phase: p.phase,
     phase_status: p.phase_status, counts: p.counts, completed: p.completed,
-    stopped_early: p.stopped_early, escalations: p.escalations,
+    interrupted: p.interrupted, stopped_early: p.stopped_early, escalations: p.escalations,
   });
   renderHeader(v); renderPhases(v); renderCounters(v); renderTabs(v);
   if (p.agents && Object.keys(p.agents).length) patchAgents(p.agents);
@@ -625,7 +629,7 @@ $("quiet").addEventListener("change", () => renderFeed(state.view));
   // The header clock must move between ledger lines: an agent can think for a
   // minute without writing one, and a frozen clock reads as a dead run.
   setInterval(() => {
-    if (state.view && !state.view.completed) {
+    if (state.view && !state.view.completed && !state.view.interrupted) {
       state.view.elapsed_s += 1;
       renderHeader(state.view);
     }

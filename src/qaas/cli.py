@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -14,13 +15,17 @@ from pathlib import Path
 from typing import Any
 
 import typer
+import yaml
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from qaas import trace as trace_mod
-from qaas.paths import STATE_DIRNAME, Workspace, package_root, packaged_prompts, project_root
+from qaas.paths import (
+    HOME_ENV, STATE_DIRNAME, Workspace, package_root, packaged_prompts, project_root,
+)
 from qaas.config import MAX_MCP_SERVERS_PER_AGENT, load_config, target_files
-from qaas.store import DEFAULT_ROOT, RunStore, SystemMapStore, list_runs
+from qaas.store import RunStore, SystemMapStore, list_runs
 from qaas.ui.serve import DEFAULT_PORT
 
 #: Colour by what a line *means*, not by which subsystem wrote it: a refusal and
@@ -126,17 +131,27 @@ def _quota_preflight() -> str | None:
     a preflight that cannot run is not a reason to refuse a run.
     """
     import subprocess
+    import tempfile
 
+    from qaas.registry import scrubbed_credentials
     from qaas.router import is_quota_error
 
     binary = _claude_cli()
     if binary is None:
         return None
+    # Isolated the way every agent is. This ran `claude -p ok` in the process
+    # cwd with the default setting sources -- and in the `qaas init .` flow the
+    # cwd is the target repository, so its `.claude/settings.json` hooks and
+    # MCP servers loaded into a process holding this user's credentials, which
+    # is precisely what `setting_sources=[]` exists to prevent. `-p` skips the
+    # workspace trust prompt, so nothing would have asked first.
     try:
-        proc = subprocess.run(
-            [binary, "-p", "ok"],
-            capture_output=True, text=True, timeout=90, check=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="qaas-preflight-") as scratch:
+            proc = subprocess.run(
+                [binary, "-p", "ok", "--setting-sources=", "--strict-mcp-config"],
+                capture_output=True, text=True, timeout=90, check=False, cwd=scratch,
+                env={**os.environ, **scrubbed_credentials()},
+            )
     except (OSError, subprocess.SubprocessError):
         return None
     blob = f"{proc.stdout}\n{proc.stderr}"
@@ -148,6 +163,17 @@ def _quota_preflight() -> str | None:
     return blob.strip().splitlines()[-1][:300] if blob.strip() else "quota exhausted"
 
 
+def _plain(value: object) -> str:
+    """Text from outside this module, made safe to put inside Rich markup.
+
+    Rich reads `[word]` as a style tag and drops it. The `[ui]` in "pip install
+    'qaas-python[ui]'" was eaten, so the install hint told people to install the
+    package they already had; pydantic's `[type=extra_forbidden, ...]` vanished
+    the same way. Anything carrying an exception's text goes through here.
+    """
+    return escape(str(value))
+
+
 def _load_config_or_exit(config_dir: Path | str | None, target: str | None):
     """`load_config`, with a missing target reported rather than raised.
 
@@ -155,12 +181,55 @@ def _load_config_or_exit(config_dir: Path | str | None, target: str | None):
     resolve, and `doctor`, `run` and `board` all call it *before* they reach
     `_load_target` -- whose friendly `typer.BadParameter` was therefore
     unreachable from any of them. A mistyped `--target` printed a traceback.
+
+    A YAML typo or a schema error is the same kind of thing -- the user's file,
+    not our bug -- and it printed a ~200-line traceback from `doctor`,
+    `targets`, `run`, `score`, `prompts list` and `tracker-check`, while only
+    `validate` said what was wrong. `ValueError` covers pydantic's
+    `ValidationError` and `load_target`'s own "profile X is invalid".
     """
     try:
         return load_config(config_dir, target=target)
     except FileNotFoundError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{_plain(exc)}[/red]")
         raise typer.Exit(1) from None
+    except (yaml.YAMLError, ValueError) as exc:
+        console.print(f"[red]config invalid:[/red] {_plain(exc)}")
+        raise typer.Exit(1) from None
+
+
+def _state_root(root: Path | str | None) -> Path:
+    """`--root` as given, else the project's state directory.
+
+    The default was `Path(".qaas")`, relative to wherever the command was typed,
+    while config, `.env`, clones and prompts all walked up to the project. So in
+    `proj/app`, `qaas runs` said "no runs yet" about a project full of them, and
+    `qaas run` from there wrote a fresh, unignored `app/.qaas/`. Resolved at call
+    time rather than as the option's default because the answer depends on the
+    working directory.
+    """
+    return Path(root) if root is not None else Workspace.resolve().state_root
+
+
+def _require_run(run_id: str, root: Path) -> RunStore:
+    """An existing run's store, or a clean exit naming the recent ones.
+
+    `trace` and `run --run-id` already refused an unknown id; `show`, `score`
+    and `escalations --run` did not. `qaas show run-typo` printed a fake empty
+    summary and exited 0, `qaas score run-typo` scored 0/21 and saved
+    `.qaas/scores/run-typo.json`, and `escalations --run bogus` reported that
+    nothing was waiting -- each one a confident answer about a run that does
+    not exist.
+    """
+    store = RunStore(run_id, root, create=False)
+    if not store.ledger_path.exists():
+        known = list_runs(root)[:5]
+        console.print(
+            f"[red]no run '{_plain(run_id)}' under {_plain(root)}.[/red] "
+            + (f"Recent: {', '.join(known)}" if known else "There are no runs here.")
+        )
+        raise typer.Exit(1)
+    return store
 
 
 def _writable_targets_dir(config_dir: Path | str | None) -> Path:
@@ -189,22 +258,38 @@ def _target_files(config_dir: Path | str | None) -> dict[str, Path]:
     return target_files(dirs)
 
 
-def _load_target(name: str, config_dir: Path | str | None):
-    """One profile by name, from wherever the layers put it."""
+def _read_profile(name: str, directory: Path):
+    """`load_target`, with a broken profile reported rather than raised.
+
+    `load_target` names the file in its error now; this is what stops the error
+    arriving wrapped in a traceback.
+    """
     from qaas.target import load_target
 
+    try:
+        return load_target(name, directory)
+    except (yaml.YAMLError, ValueError) as exc:
+        console.print(f"[red]target profile invalid:[/red] {_plain(exc)}")
+        raise typer.Exit(1) from None
+
+
+def _load_target(name: str, config_dir: Path | str | None):
+    """One profile by name, from wherever the layers put it."""
     found = _target_files(config_dir)
     if name not in found:
         raise typer.BadParameter(
             f"no target profile '{name}'. Available: {', '.join(sorted(found)) or 'none'}. "
             "Create one with `qaas init <path-to-repo>`."
         )
-    return load_target(name, found[name].parent)
+    return _read_profile(name, found[name].parent)
 
 
 #: A repo argument that is a URL rather than a directory. `git@` has no scheme,
 #: so this cannot be a urlparse.
-_REPO_URL = re.compile(r"^(https?://|git@|ssh://)")
+#: `git://`, `file://` and scp-style `user@host:path` with a user other than
+#: `git` are URLs too; they were taken for local paths and failed as
+#: "not a directory: git:/example.com/x.git".
+_REPO_URL = re.compile(r"^(https?://|git@|ssh://|git://|file://|[\w.-]+@[\w.-]+:)")
 
 
 def _clone_root(clone_to: Path | str | None) -> Path:
@@ -239,10 +324,21 @@ def _redact_url(url: str) -> str:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         return url
-    if not parts.netloc or "@" not in parts.netloc:
+    if not parts.netloc:
         return url
-    host = parts.netloc.rsplit("@", 1)[1]
-    return urllib.parse.urlunsplit(parts._replace(netloc=host))
+    # A query string on a clone URL is how GitLab-style `?private_token=` is
+    # passed, and a fragment carries nothing git needs; neither is printed or
+    # stored.
+    host = parts.netloc.rsplit("@", 1)[1] if "@" in parts.netloc else parts.netloc
+    return urllib.parse.urlunsplit(parts._replace(netloc=host, query="", fragment=""))
+
+
+def _repo_basename(repo: str) -> str:
+    """`https://h/org/api.git?private_token=x` -> `api`: what the clone and the
+    profile are named after. The query used to be part of the last path segment,
+    so a token in it became part of the target's name."""
+    bare = re.sub(r"[?#].*$", "", repo).rstrip("/")
+    return re.sub(r"\.git$", "", re.split(r"[/:]", bare)[-1])
 
 
 def _origin_url(root: Path) -> str | None:
@@ -291,7 +387,7 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
             raise typer.Exit(1)
         return root, None
 
-    slug = _slug(re.sub(r"\.git$", "", repo.rstrip("/").split("/")[-1]))
+    slug = _slug(_repo_basename(repo))
     root = _clone_root(clone_to) / slug
     if root.exists():
         # The directory is named by the repository's *basename*, so every fork
@@ -314,7 +410,11 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
             )
             raise typer.Exit(1)
         console.print(f"[dim]using existing clone at {root}[/dim]")
-        return root, repo
+        # Redacted here as on the clone path below. This returned the raw
+        # argument, so the *second* `qaas init <url-with-token> --force` wrote
+        # the credential into `repo_url` on a profile the tool tells people to
+        # commit -- the first run redacted it and the rerun undid that.
+        return root, _redact_url(repo)
 
     root.parent.mkdir(parents=True, exist_ok=True)
     console.print(f"cloning {_redact_url(repo)} -> {root}")
@@ -323,6 +423,9 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
             ["git", "clone", "--depth", "50", repo, str(root)],
             capture_output=True, text=True, timeout=600,
         )
+    except OSError as exc:
+        console.print(f"[red]cannot run git:[/red] {_plain(exc)}. Install git to clone a repository.")
+        raise typer.Exit(1) from None
     except subprocess.TimeoutExpired:
         # git leaves the partial tree behind, and `root.exists()` above then
         # reports "using existing clone" on the next run -- so a clone that timed
@@ -333,18 +436,102 @@ def _materialise_repo(repo: str, clone_to: Path | str | None) -> tuple[Path, str
         raise typer.Exit(1) from None
     if result.returncode != 0:
         shutil.rmtree(root, ignore_errors=True)
-        console.print(f"[red]clone failed:[/red] {_redact_url(result.stderr.strip()[:400])}")
+        console.print(
+            f"[red]clone failed:[/red] {_plain(_redact_text(result.stderr.strip()[:400], repo))}"
+        )
         raise typer.Exit(1)
+    # `git clone` records the URL it was given as `remote.origin.url`, so a
+    # credential embedded in it sat in `<clone>/.git/config` -- inside the
+    # directory every agent is started in, readable by any of them with `Read`.
+    # "It reaches git clone and nothing else" was the claim; this makes it true.
+    # A later push from this clone then needs a credential helper or `gh auth`,
+    # which is where a token belongs.
+    redacted = _redact_url(repo)
+    if redacted != repo:
+        try:
+            subprocess.run(
+                ["git", "-C", str(root), "remote", "set-url", "origin", redacted],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
     # The redacted form is what gets stored: `repo_url` ends up on the profile,
     # which is a committed file.
-    return root, _redact_url(repo)
+    return root, redacted
+
+
+def _redact_text(text: str, repo: str) -> str:
+    """git's own error output, with the raw URL (and so its credential) removed."""
+    return text.replace(repo, _redact_url(repo)) if repo else text
+
+
+#: What `.qaas/.gitignore` must hold. `.env` is the line that matters most:
+#: README and MANUAL tell people to put `JIRA_API_TOKEN` in `.qaas/.env`, "which
+#: is already gitignored" -- and in their own repository it was not, because
+#: this template listed only run state. This checkout never noticed: its root
+#: `.gitignore` ignores all of `.qaas/`. `targets/` holds whole clones of other
+#: people's repositories, and `scores/` is run output like the rest.
+STATE_GITIGNORE = (
+    ("# Run state: regenerated every run, never worth committing.",
+     ("runs/", "tickets/", "generated/", "system-map/", "memory.db*", "artifacts/", "scores/", "*.log")),
+    ("# Repositories cloned by `qaas run --repo` -- someone else's code.", ("targets/",)),
+    ("# Credentials. Never commit these.", (".env", ".env.*")),
+)
+
+
+def _ensure_state_gitignore(state_root: Path) -> None:
+    """Write `.qaas/.gitignore`, or add whatever an older one is missing.
+
+    Called wherever the state directory can come into being -- `qaas init`,
+    `qaas run --repo` and every run -- rather than by `init` alone, because
+    `run --repo` never wrote one and a first run creates `.qaas/` by itself.
+    Appending rather than skipping an existing file is the upgrade path: every
+    project initialised before this has the old template, without `.env`.
+
+    Derived from the *state root*, not from wherever `--config` happened to
+    point: `qaas init --config some/dir` once dropped a `.gitignore` of
+    `runs/`, `artifacts/` and `generated/` into a real source directory.
+    Never raises; a file that cannot be written is not a reason to stop.
+    """
+    if state_root.name != STATE_DIRNAME:
+        return
+    try:
+        state_root.mkdir(parents=True, exist_ok=True)
+        path = state_root / ".gitignore"
+        existing = path.read_text(encoding="utf-8") if path.exists() else ""
+        present = {line.strip() for line in existing.splitlines()}
+        if not existing:
+            blocks = ["\n".join([header, *lines]) for header, lines in STATE_GITIGNORE]
+            path.write_text(
+                "\n\n".join(blocks)
+                + "\n\n# config/ is NOT ignored -- it is yours, and it is the point.\n",
+                encoding="utf-8",
+            )
+            return
+        missing = [line for _, lines in STATE_GITIGNORE for line in lines if line not in present]
+        # `memory.db` from the old template already covers the database itself.
+        if "memory.db" in present and "memory.db*" in missing:
+            missing.remove("memory.db*")
+        if missing:
+            tail = "" if existing.endswith("\n") else "\n"
+            path.write_text(
+                existing + tail + "\n# Added by qaas: run state and credentials.\n"
+                + "\n".join(missing) + "\n",
+                encoding="utf-8",
+            )
+    except OSError:
+        pass
 
 
 def _default_branch(root: Path) -> str:
-    head = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
-        capture_output=True, text=True,
-    )
+    # A plain directory needs no git at all, so git being absent is not an error.
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "main"
     return head.stdout.strip() if head.returncode == 0 and head.stdout.strip() else "main"
 
 
@@ -405,8 +592,10 @@ def _provision_target(
     name mean one thing in this system rather than two.
     """
     from qaas.discover import build_profile
-    from qaas.target import Environment, load_target
+    from qaas.target import Environment
 
+    # Before the clone, so `targets/` is ignored from the moment it exists.
+    _ensure_state_gitignore(Workspace.resolve().state_root)
     root, repo_url = _materialise_repo(repo, clone_to)
     target_name = _slug(name or root.resolve().name)
     out = _writable_targets_dir(config_dir) / f"{target_name}.yaml"
@@ -416,7 +605,7 @@ def _provision_target(
     existing = _target_files(config_dir).get(target_name)
     if existing is not None and not force:
         if reuse_existing:
-            stored = load_target(target_name, existing.parent)
+            stored = _read_profile(target_name, existing.parent)
             # The name is the repository's *basename*, so two different
             # checkouts called `api` collide -- and `--repo` reused the stored
             # profile without ever comparing what it pointed at. The run then
@@ -444,15 +633,35 @@ def _provision_target(
     # Re-read it: the file is what every later command loads, and a profile that
     # round-trips differently from the one in memory is a bug that only shows up
     # on the *next* invocation.
-    return load_target(target_name, out.parent), target_name, out, notes, True
+    return _read_profile(target_name, out.parent), target_name, out, notes, True
 
 
-app = typer.Typer(add_completion=False, help="Multi-agent QA & remediation system.")
+# `no_args_is_help`: a bare `qaas` answered "Missing command." and nothing else,
+# which is the least useful thing to say to someone who has just installed it.
+app = typer.Typer(
+    add_completion=False, help="Multi-agent QA & remediation system.", no_args_is_help=True,
+)
 console = Console()
 
 
+def _print_version(value: bool) -> None:
+    """`qaas --version`. There was no way to ask which release was installed --
+    the first question on any bug report."""
+    if not value:
+        return
+    from qaas import __version__
+
+    typer.echo(f"qaas {__version__}")
+    raise typer.Exit()
+
+
 @app.callback()
-def _bootstrap() -> None:
+def _bootstrap(
+    version: bool = typer.Option(
+        False, "--version", callback=_print_version, is_eager=True,
+        help="Print the installed version and exit.",
+    ),
+) -> None:
     """Runs before every command. Loads credentials from `.env`, if there is one.
 
     Credentials come from the environment and never from `config/`, which is
@@ -469,7 +678,11 @@ def _bootstrap() -> None:
 #: project, then the defaults that shipped in the wheel. A literal "config"
 #: default meant every command outside this repo died on a missing directory.
 ConfigDir = typer.Option(None, "--config", "-c", help="Config directory.")
-Root = typer.Option(DEFAULT_ROOT, "--root", help="Runtime state directory.")
+#: None means "the project's `.qaas/`, found by walking up" -- see `_state_root`.
+Root = typer.Option(
+    None, "--root", help="Runtime state directory. Default: the project's .qaas/.",
+    show_default=False,
+)
 
 
 @app.command()
@@ -526,14 +739,7 @@ def init(
     # `.gitignore` containing `runs/`, `artifacts/` and `generated/` into a real
     # source directory, which then ignored any directory of those names the
     # project already had.
-    state_root = Workspace.resolve().state_root
-    gitignore = state_root / ".gitignore"
-    if state_root.name == STATE_DIRNAME and state_root.is_dir() and not gitignore.exists():
-        gitignore.write_text(
-            "# Run state: regenerated every run, never worth committing.\n"
-            "runs/\ntickets/\ngenerated/\nsystem-map/\nmemory.db\nartifacts/\n"
-            "\n# config/ is NOT ignored -- it is yours, and it is the point.\n"
-        , encoding="utf-8")
+    _ensure_state_gitignore(Workspace.resolve().state_root)
 
     console.print(f"\n[green]wrote {out}[/green]")
     console.print(
@@ -575,12 +781,20 @@ def targets(config_dir: Path | None = ConfigDir) -> None:
     if not found:
         console.print("[dim]no targets yet — run `qaas init <path-to-repo>`[/dim]")
         return
-    active = load_config(config_dir).target
+    active = _load_config_or_exit(config_dir, None).target
     table = Table(header_style="bold")
     for col in ("target", "root", "environment", "scored"):
         table.add_column(col)
+    broken: list[str] = []
     for n in sorted(found):
-        p = load_target(n, found[n].parent)
+        # One broken profile is a row, not the end of the listing: this is the
+        # command someone runs to find out which of their profiles is the bad one.
+        try:
+            p = load_target(n, found[n].parent)
+        except (yaml.YAMLError, ValueError) as exc:
+            table.add_row(n, _plain(found[n]), "[red]invalid[/red]", "-")
+            broken.append(str(exc))
+            continue
         table.add_row(
             f"[bold]{n}[/bold] (active)" if n == active else n,
             p.root,
@@ -588,6 +802,10 @@ def targets(config_dir: Path | None = ConfigDir) -> None:
             "yes" if p.ledger else "no",
         )
     console.print(table)
+    for problem in broken:
+        console.print(f"[red]invalid:[/red] {_plain(problem)}")
+    if broken:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -656,11 +874,15 @@ def doctor(
             "run reaches no product code. Override in config/agents/<agent>.yaml.[/dim]"
         )
 
+    line, fatal = _sandbox_line(cfg)
+    if line:
+        console.print(f"\n[{'red' if fatal else 'dim'}]{_plain(line)}[/]")
+
     problems = profile.readiness()
     if problems:
         console.print("\n[red]not ready:[/red]")
         for p in problems:
-            console.print(f"  - {p}")
+            console.print(f"  - {_plain(p)}")
         raise typer.Exit(1)
     console.print("\n[green]ready[/green]")
 
@@ -708,7 +930,7 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
     try:
         cfg = load_config(config_dir)
     except Exception as exc:
-        console.print(f"[red]config invalid:[/red] {exc}")
+        console.print(f"[red]config invalid:[/red] {_plain(exc)}")
         raise typer.Exit(1)
 
     # Every prompt layer, not just the first. This used to check `prompt_dirs[0]`
@@ -752,10 +974,12 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
         needed = sum(agent_caps)
         if mode.max_budget_usd is not None and agent_caps and needed > mode.max_budget_usd:
             missing = [a for a in mode.agents if a in cfg.agents][-1]
+            # One sentence: this read "...exceed the mode's cap, so its cap, so
+            # the run stops...", two edits of the wording spliced together.
             problems.append(
-                f"mode '{mode_name}': the agents' caps exceed the mode's cap, so "
-                f"its cap, so the run stops before it reaches "
-                f"{missing} and files nothing. Raise max_budget_usd or drop an agent"
+                f"mode '{mode_name}': the agents' caps exceed the mode's cap, so the "
+                f"run stops before it reaches {missing} and files nothing. Raise "
+                "max_budget_usd or drop an agent"
             )
 
     # Skills nobody uses are a note, not a problem. Thirty skills ship in the
@@ -837,6 +1061,10 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
     elif shutil.which("claude") and where != shutil.which("claude"):
         notes.append(f"claude: bundled with the SDK ({where})")
 
+    line, fatal = _sandbox_line(cfg)
+    if line:
+        (problems if fatal else notes).append(line)
+
     if notes:
         console.print("\n[dim]notes:[/dim]")
         for note in notes:
@@ -845,9 +1073,35 @@ def validate(config_dir: Path | None = ConfigDir) -> None:
     if problems:
         console.print("\n[red]problems:[/red]")
         for p in problems:
-            console.print(f"  - {p}")
+            console.print(f"  - {_plain(p)}")
         raise typer.Exit(1)
     console.print("\n[green]config ok[/green]")
+
+
+def _sandbox_line(cfg) -> tuple[str | None, bool]:
+    """What the OS sandbox will do for this config's shell agents, and whether
+    that is a problem (`sandbox.mode: required` on a machine that cannot)."""
+    from qaas import sandbox
+
+    shells = sorted(n for n, s in cfg.agents.items() if s.enabled and sandbox.applies(s))
+    if not shells:
+        return None, False
+    names = ", ".join(shells)
+    mode = cfg.sandbox.mode
+    if mode == "off":
+        return f"sandbox: off (sandbox.mode: off) -- {names} rely on the parsed guardrails alone", False
+    available, how = sandbox.support()
+    if available:
+        return f"sandbox: on for {names} ({how})", False
+    if mode == "required":
+        return (
+            f"sandbox.mode is `required` but this machine cannot sandbox a shell: {how}. "
+            f"{names} would fail at start", True,
+        )
+    return (
+        f"sandbox: unavailable -- {names} will run their shell unsandboxed, with the "
+        f"parsed guardrails only. To sandbox them: {how}", False,
+    )
 
 
 def _claude_cli() -> str | None:
@@ -931,6 +1185,23 @@ def _eject_dir(ws: Workspace) -> Path:
             "[dim]run this from your project, or set QAAS_HOME.[/dim]"
         )
         raise typer.Exit(1)
+    # Only somewhere `prompt_dirs` will read back. Outside a project, with no
+    # QAAS_HOME, the state root is `<cwd>/.qaas` -- and `.qaas/prompts/` alone
+    # does not make a project, so `Workspace.resolve` never searched it. Eject
+    # printed "wrote ./.qaas/prompts/API.md", every agent kept the packaged
+    # prompt, and the edit had no effect that anything reported.
+    home = os.environ.get(HOME_ENV)
+    readable = {
+        *([(Path(home) / "prompts").resolve()] if home else []),
+        *([(ws.project / STATE_DIRNAME / "prompts").resolve()] if ws.project else []),
+    }
+    if dest not in readable:
+        console.print(
+            "[red]no qaas project here[/red], so an ejected prompt would be written to "
+            f"{_plain(dest)}, where nothing reads it.\n"
+            "[dim]run `qaas init <path-to-repo>` first, or set QAAS_HOME.[/dim]"
+        )
+        raise typer.Exit(1)
     return dest
 
 
@@ -963,7 +1234,7 @@ def prompts_list(config_dir: Path | None = ConfigDir) -> None:
     """Show which prompt file each agent is actually given, and from where."""
     from qaas.registry import SHARED_PROMPT, append_name, append_paths, build_system_prompt
 
-    cfg = load_config(config_dir)
+    cfg = _load_config_or_exit(config_dir, None)
     ws = Workspace.resolve()
 
     table = Table(title="Prompts in force", header_style="bold")
@@ -1015,7 +1286,7 @@ def prompts_eject(
         console.print("[red]name an agent or pass --all, not both[/red]")
         raise typer.Exit(1)
 
-    cfg = load_config(config_dir)
+    cfg = _load_config_or_exit(config_dir, None)
     ws = Workspace.resolve()
     dest_dir = _eject_dir(ws)
     selected = _select_prompts(cfg, agent)
@@ -1069,7 +1340,7 @@ def prompts_diff(
 
     from qaas.registry import append_name, append_paths
 
-    cfg = load_config(config_dir)
+    cfg = _load_config_or_exit(config_dir, None)
     ws = Workspace.resolve()
     changed = 0
 
@@ -1115,8 +1386,9 @@ def prompts_diff(
 
 
 @app.command()
-def runs(root: Path = Root, limit: int = 10) -> None:
+def runs(root: Path | None = Root, limit: int = 10) -> None:
     """List recent runs with their cost and finding count."""
+    root = _state_root(root)
     ids = list_runs(root)[:limit]
     if not ids:
         console.print("[dim]no runs yet[/dim]")
@@ -1144,9 +1416,9 @@ VERDICT_STYLE = {
 
 
 @app.command()
-def show(run_id: str, root: Path = Root) -> None:
+def show(run_id: str, root: Path | None = Root) -> None:
     """Show one run's findings and ledger: cost, duration, tickets, escalations."""
-    store = RunStore(run_id, root, create=False)
+    store = _require_run(run_id, _state_root(root))
     # One pass over the ledger, shared by the header and the denial list -- each
     # `store.ledger(kind)` call is a full-file scan of a file that reaches tens
     # of thousands of lines on a real run.
@@ -1260,7 +1532,11 @@ class _Blocked:
 #: `ticket_key` is only in the ledger line for runs recorded since it was added
 #: -- which is none of the ledgers already on disk. Recovered from the prose for
 #: those, on the read side only: the writer never depends on this.
-_TICKET_IN_REASON = re.compile(r"^([A-Z][A-Z0-9]*-\d+)\s*:")
+#:
+#: Hyphenated project keys too. This was `[A-Z][A-Z0-9]*-\d+`, which cannot
+#: match `CORVID-SEC-12`, so every escalation from the security project -- the
+#: ones most worth answering -- was listed as "not answerable".
+_TICKET_IN_REASON = re.compile(r"^([A-Z][A-Z0-9_]*(?:-[A-Z][A-Z0-9_]*)*-\d+)\s*:")
 
 
 def _blocked_in_run(store) -> tuple[list[_Blocked], list[tuple[datetime, str, dict]]]:
@@ -1340,9 +1616,15 @@ def escalations(
     run_id: str = typer.Option(None, "--run", help="One run, rather than the recent ones."),
     limit: int = typer.Option(20, "--limit", help="How many recent runs to read."),
     all_: bool = typer.Option(False, "--all", help="Include escalations already answered."),
-    root: Path = Root,
+    root: Path | None = Root,
 ) -> None:
     """What is blocked on a human, across runs."""
+    root = _state_root(root)
+    if run_id:
+        # `_blocked` skips a run with no ledger -- right for a sweep over recent
+        # runs, where one half-written run must not hide the rest, and wrong for
+        # a run named explicitly, which answered "nothing is waiting on you".
+        _require_run(run_id, root)
     rows = _blocked(root, run_id=run_id, limit=limit)
     waiting = [r for r in rows if r.answer is None]
     answered = [r for r in rows if r.answer is not None]
@@ -1396,10 +1678,12 @@ def answer(
     ),
     run_id: str = typer.Option(None, "--run", help="Write into this run, rather than the resolved one."),
     limit: int = typer.Option(20, "--limit", help="How many recent runs to search."),
-    root: Path = Root,
+    root: Path | None = Root,
 ) -> None:
     """Answer an escalation. Records a decision; dispatches nothing."""
     from qaas.store import HumanDecision, RunStore
+
+    root = _state_root(root)
 
     # Case-blind for the reason `--from-board` matches a status case-blind: a
     # person types what they read, and `PROCEED` off the screen of `qaas show`
@@ -1522,6 +1806,17 @@ def _follow(store, *, agent: str | None, kinds, as_json: bool, quiet: bool = Fal
             )
             if entry.kind == LedgerKind.RUN_FINISHED:
                 console.print("[dim]run finished[/dim]")
+        # `tail` also ends when a ledger has gone silent for longer than its run
+        # could have lasted -- a run killed before it could write
+        # `run_finished`. Ending without saying why reads as "it finished".
+        started = next(iter(store.ledger("run_started")), None)
+        wall_clock = started.detail.get("wall_clock_s") if started else None
+        if trace_mod.is_stale(store.ledger_path, wall_clock):
+            console.print(
+                "[yellow]stopped following: the ledger has not been written for longer "
+                "than this run could last, so it was interrupted.[/yellow] "
+                f"Resume it with `qaas run --run-id {store.run_id}`."
+            )
     except KeyboardInterrupt:
         console.print(f"\n[dim]stopped following after {seen} entries[/dim]")
 
@@ -1529,7 +1824,7 @@ def _follow(store, *, agent: str | None, kinds, as_json: bool, quiet: bool = Fal
 @app.command()
 def trace(
     run_id: str,
-    root: Path = Root,
+    root: Path | None = Root,
     agent: str | None = typer.Option(None, "--agent", "-a", help="Only this agent's entries."),
     kind: list[str] = typer.Option(None, "--kind", "-k", help="Only these ledger kinds (repeatable)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the filtered entries as JSON."),
@@ -1537,15 +1832,15 @@ def trace(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Drop tool_call lines and show only what an agent decided."),
 ) -> None:
     """Print one run's ledger as a timeline: dispatches, tools, denials, verdicts, cost."""
-    store = RunStore(run_id, root, create=False)
+    store = RunStore(run_id, _state_root(root), create=False)
     if not store.ledger_path.exists() and not follow:
-        console.print(f"[red]no ledger for run {run_id}[/red] — try `qaas runs`")
+        console.print(f"[red]no ledger for run {_plain(run_id)}[/red] — try `qaas runs`")
         raise typer.Exit(1)
 
     try:
         kinds = trace_mod.parse_kinds(kind or [])
     except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[red]{_plain(exc)}[/red]")
         raise typer.Exit(2) from None
 
     if follow:
@@ -1583,9 +1878,11 @@ def trace(
 
 
 @app.command()
-def map(root: Path = Root, version: str | None = None) -> None:
+def map(root: Path | None = Root, version: str | None = None) -> None:
     """Show the system map Mapper produced."""
-    maps = SystemMapStore(root)
+    # `create=False`: this only reads, and the default made a
+    # `.qaas/system-map/` in whatever directory the command was typed in.
+    maps = SystemMapStore(_state_root(root), create=False)
     payload = maps.get(version)
     if payload is None:
         console.print("[dim]no system map yet — run MAPPER[/dim]")
@@ -1609,7 +1906,7 @@ def _start_dashboard(root: Path, config_dir: Path | None) -> str | None:
         app_ = build(root, **_dashboard_kwargs(config_dir))
         port = free_port("127.0.0.1", DEFAULT_PORT)
     except (MissingUIExtra, OSError) as exc:
-        console.print(f"[yellow]dashboard not started: {exc}[/yellow]")
+        console.print(f"[yellow]dashboard not started: {_plain(exc)}[/yellow]")
         return None
     serve_in_background(app_, "127.0.0.1", port)
     url = f"http://127.0.0.1:{port}/"
@@ -1621,7 +1918,7 @@ def _start_dashboard(root: Path, config_dir: Path | None) -> str | None:
 def dashboard(
     run_id: str = typer.Argument(None, help="Run to open. Defaults to the live run, else the newest."),
     config_dir: Path | None = ConfigDir,
-    root: Path = Root,
+    root: Path | None = Root,
     host: str = typer.Option(
         "127.0.0.1",
         "--host",
@@ -1639,6 +1936,7 @@ def dashboard(
     from qaas.ui.serve import build, free_port, open_browser as launch, serve
     from qaas.ui.state import pick_run
 
+    root = _state_root(root)
     chosen = pick_run(root, run_id)
     if chosen is None:
         console.print("[dim]no runs yet — qaas run --mode pr-check[/dim]")
@@ -1647,7 +1945,7 @@ def dashboard(
     try:
         app_ = build(root, **_dashboard_kwargs(config_dir))
     except MissingUIExtra as exc:
-        console.print(f"[yellow]{exc}[/yellow]")
+        console.print(f"[yellow]{_plain(exc)}[/yellow]")
         raise typer.Exit(1) from None
 
     bound = free_port(host, port)
@@ -1667,6 +1965,17 @@ def _is_live(root: Path, run_id: str) -> bool:
     from qaas.ui.state import is_live
 
     return is_live(RunStore(run_id, root=root, create=False))
+
+
+def _golden_or_exit(ledger_path: Path):
+    """The golden ledger, or a one-line error rather than a traceback."""
+    from qaas.scorecard import GoldenLedger, GoldenLedgerError
+
+    try:
+        return GoldenLedger.load(ledger_path)
+    except GoldenLedgerError as exc:
+        console.print(f"[red]{_plain(str(exc))}[/red]")
+        raise typer.Exit(1) from None
 
 
 def _dashboard_kwargs(config_dir: Path | None) -> dict:
@@ -1692,8 +2001,13 @@ def _dashboard_kwargs(config_dir: Path | None) -> dict:
         # threshold cost".
         "cfg": cfg,
         # Where an override would be written and validated against. Nearest
-        # first, exactly as `load_config` searches.
-        "config_dirs": list(Workspace.resolve().config_dirs),
+        # first, exactly as `load_config` searches -- including `--config`,
+        # which this dropped: the page showed and wrote the project's layers
+        # while the config it rendered had been loaded from another.
+        "config_dirs": list(Workspace.resolve(config=config_dir).config_dirs),
+        # Where an override is written when no project config layer exists yet
+        # -- the project's state directory, never the packaged defaults.
+        "state_root": Workspace.resolve(config=config_dir).state_root,
     }
 
 
@@ -1722,7 +2036,25 @@ def _tickets_in_status(cfg, status: str, root: Path) -> set[str]:
     """
     from qaas.adapters.tracker import TrackerError, build_tracker, repo_label
 
+    # No label, no scope. `repo_label` returns None for no target or a name that
+    # cannot be a label, and the search below then ran with `label=None` --
+    # which both backends read as "every ticket" -- so the run picked up every
+    # repository's cards in that status. Refused, rather than widened.
+    if not cfg.target:
+        console.print(
+            "[red]--from-board needs a target[/red]: the board is scoped to one "
+            "repository by its label, and no target profile is loaded. Pass --target, "
+            "or run `qaas init <path-to-repo>`."
+        )
+        raise typer.Exit(1)
     label = repo_label(cfg.target)
+    if label is None:
+        console.print(
+            f"[red]target name '{_plain(cfg.target)}' cannot be a tracker label[/red], "
+            "so the board cannot be scoped to this repository and --from-board would "
+            "pick up every repository's tickets. Rename the target profile."
+        )
+        raise typer.Exit(1)
     try:
         # Constructed *inside* the try. `build_tracker` validates its
         # environment at construction and raises `TrackerConfigError`, which is a
@@ -1739,7 +2071,7 @@ def _tickets_in_status(cfg, status: str, root: Path) -> set[str]:
         # who dragged the card expects.
         issues = tracker.search(label=label, limit=BOARD_SCAN_LIMIT)
     except TrackerError as exc:
-        console.print(f"[red]the board could not be read:[/red] {exc}")
+        console.print(f"[red]the board could not be read:[/red] {_plain(exc)}")
         raise typer.Exit(1) from None
     wanted = status.strip().lower()
     return {i.key for i in issues if i.status.strip().lower() == wanted}
@@ -1764,11 +2096,150 @@ def _run_holding_tickets(root: Path, tickets: set[str]) -> str | None:
     return None
 
 
+def _preflight_target(cfg, mode: str, *, dry_run: bool) -> None:
+    """What `run` and `sweep` check about the mode and target before any work.
+
+    One implementation because there were two entry points and only one of them
+    checked. `sweep` -- the command documented for cron -- went straight from
+    `load_config` to `Router.run`, so with `QAAS_TARGET` naming a root inside an
+    enclosing git repository, or one that does not exist, it dispatched the
+    roster against it: exactly the damage `BLOCKING_READINESS` exists to stop.
+    `_preflight_dispatch` is the other half, the part only a real run pays for.
+    """
+    # An unknown mode was a KeyError traceback -- from `cfg.run_modes[mode]`
+    # under `--only`, from `enabled_agents` otherwise, and from `sweep` alike.
+    if mode not in cfg.run_modes:
+        console.print(
+            f"[red]unknown run mode '{_plain(mode)}'.[/red] "
+            f"This config has: {', '.join(sorted(cfg.run_modes)) or 'none'}."
+        )
+        raise typer.Exit(1)
+
+    if cfg.profile is None:
+        # With no profile the readiness checks below were skipped entirely, and
+        # the run dispatched with `target_root()` falling back to the project or
+        # the working directory -- every write-path sandbox, the test runner's
+        # cwd and the SDK subprocess pointed at wherever the operator happened to
+        # be standing, where MANUAL.md promises "no target profile loaded". A
+        # rehearsal writes nothing, so it still renders, and says so.
+        if not dry_run:
+            console.print(
+                "[red]no target profile loaded[/red] — there is nothing to run against. "
+                "Run `qaas init <path-to-repo>`, or pass --target or --repo."
+            )
+            raise typer.Exit(1)
+        console.print(
+            "[yellow]no target profile loaded[/yellow] — a real run would refuse. "
+            "[dim]`qaas init <path-to-repo>` makes one.[/dim]"
+        )
+        return
+
+    problems = cfg.profile.readiness()
+    # A rehearsal writes nothing, and every entry in BLOCKING_READINESS is
+    # justified by damage: a root that is not there, or one that belongs to
+    # a larger checkout an agent would branch. `--dry-run` does neither, so
+    # refusing it reports a danger that cannot happen and takes away the
+    # one command that answers "what would this run do" *before* the target
+    # is made ready.
+    #
+    # The bundled demo is the case that proves it. `target-app` lives inside
+    # this repository on purpose -- the sdist carries it so a contributor
+    # can score against it -- so on any fresh clone it has no `.git` of its
+    # own and trips "not its own". Blocking unconditionally therefore broke
+    # `qaas run --dry-run` for the shipped configuration, and CI with it,
+    # while passing on the machine where the check was written because that
+    # machine had since acquired a target-app/.git.
+    blocking = [] if dry_run else [
+        p for p in problems if any(m in p for m in BLOCKING_READINESS)
+    ]
+    if blocking:
+        console.print(f"[red]target '{_plain(cfg.target)}' is not usable:[/red]")
+        for p in blocking:
+            console.print(f"  - {_plain(p)}")
+        raise typer.Exit(1)
+    for p in problems:
+        console.print(f"[yellow]warning:[/yellow] {_plain(p)}")
+    console.print(f"[dim]target: {_plain(cfg.target)} ({cfg.profile.environment.mode})[/dim]")
+
+
+def _preflight_dispatch(
+    cfg, *, root: Path, config_dir: Path | None, dashboard: bool = False
+) -> tuple[Any, str | None]:
+    """The half of the pre-flight only a real dispatch pays for.
+
+    Shared by `run` and `sweep` for the reason `_preflight_target` is: `sweep`
+    had none of it, so a scheduled sweep made no board for anyone to watch and
+    found out the model was refusing work one agent at a time. Returns
+    `(board_info, dashboard_url)`.
+    """
+    # Before the first agent, not after the first ticket: the board is what
+    # someone watches a run *on*, and one that appears at the end is a report.
+    board_info = _ensure_board(cfg)
+    dash_url = _start_dashboard(root, config_dir) if dashboard else None
+
+    # Last thing before anything is dispatched, and skipped for --dry-run, which
+    # is meant to cost nothing at all.
+    limited = _quota_preflight()
+    if limited:
+        console.print(f"[red]the model is not accepting work right now:[/red] {_plain(limited)}")
+        console.print(
+            "[dim]Every agent would fail the same way, one at a time. "
+            "Wait for the reset and run again -- and if a run is already part "
+            "way through, resume it with --run-id so the agents that "
+            "succeeded are not repeated.[/dim]"
+        )
+        raise typer.Exit(1)
+
+    _ensure_state_gitignore(Path(root))
+    return board_info, dash_url
+
+
+def _assemble_options(cfg, specs) -> list[tuple[str, str]]:
+    """Build every agent's real `ClaudeAgentOptions`; return what failed.
+
+    `qaas run --dry-run` is what CI and CLAUDE.md lean on to prove that "every
+    agent's options assemble", and it never assembled them: `describe()`
+    rendered the allowlist and counted the prompt, and `registry.build_options`
+    -- MCP servers, hooks, guardrail, plugins -- was first called by a paid run.
+    A declared server naming an unset `${VAR}`, or a tracker that cannot be
+    constructed, passed the rehearsal and failed the real thing.
+
+    Against a throwaway store, so a rehearsal leaves nothing behind (building
+    the tracker server makes `tickets/`; `satisfiable_contract` writes to the
+    ledger). Nothing here reaches the API or the network: every server is built
+    in-process, the tracker and vcs constructors only read the environment, and
+    `test_the_dry_run_assembles_options_without_network_or_subprocess` holds
+    that line. It costs well under a second for the shipped roster.
+    """
+    import tempfile
+
+    from qaas import sandbox
+    from qaas.mcp.context import ToolContext
+    from qaas.registry import build_options
+
+    failures: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="qaas-dry-run-") as scratch:
+        store = RunStore("dry-run", scratch)
+        maps = SystemMapStore(scratch, create=False)
+        target_root = cfg.target_root()
+        for spec in specs:
+            ctx = ToolContext(
+                store=store, maps=maps, config=cfg, agent=spec, target_root=target_root
+            )
+            try:
+                # Built for real, so a sandboxed agent's private temp directory
+                # exists now -- and a rehearsal must leave nothing behind.
+                sandbox.cleanup(build_options(spec, ctx))
+            except Exception as exc:  # noqa: BLE001 - reported per agent, never a traceback
+                failures.append((spec.name, f"{type(exc).__name__}: {exc}"))
+    return failures
+
+
 @app.command()
 def run(
     mode: str = typer.Option(..., "--mode", "-m", help="Run mode from system.yaml."),
     config_dir: Path | None = ConfigDir,
-    root: Path = Root,
+    root: Path | None = Root,
     only: list[str] = typer.Option(None, "--only", help="Restrict the run to these agents."),
     target: str = typer.Option(None, "--target", "-t", help="Target profile to run against. Overrides system.yaml."),
     repo: str = typer.Option(None, "--repo", help="A local path or git URL to run against directly. Clones and profiles it if needed."),
@@ -1798,6 +2269,7 @@ def run(
     if repo and target:
         console.print("[red]--repo and --target name two different targets.[/red] Pass one.")
         raise typer.Exit(1)
+    root = _state_root(root)
 
     # `--repo` is sugar over `--target`, not a second way to run. It provisions
     # a profile the same way `qaas init` does and then falls into the ordinary
@@ -1839,33 +2311,8 @@ def run(
                 "profile": profile or _load_target(target, config_dir),
             }
         )
-    if cfg.profile:
-        problems = cfg.profile.readiness()
-        # A rehearsal writes nothing, and every entry in BLOCKING_READINESS is
-        # justified by damage: a root that is not there, or one that belongs to
-        # a larger checkout an agent would branch. `--dry-run` does neither, so
-        # refusing it reports a danger that cannot happen and takes away the
-        # one command that answers "what would this run do" *before* the target
-        # is made ready.
-        #
-        # The bundled demo is the case that proves it. `target-app` lives inside
-        # this repository on purpose -- the sdist carries it so a contributor
-        # can score against it -- so on any fresh clone it has no `.git` of its
-        # own and trips "not its own". Blocking unconditionally therefore broke
-        # `qaas run --dry-run` for the shipped configuration, and CI with it,
-        # while passing on the machine where the check was written because that
-        # machine had since acquired a target-app/.git.
-        blocking = [] if dry_run else [
-            p for p in problems if any(m in p for m in BLOCKING_READINESS)
-        ]
-        if blocking:
-            console.print(f"[red]target '{cfg.target}' is not usable:[/red]")
-            for p in blocking:
-                console.print(f"  - {p}")
-            raise typer.Exit(1)
-        for p in problems:
-            console.print(f"[yellow]warning:[/yellow] {p}")
-        console.print(f"[dim]target: {cfg.target} ({cfg.profile.environment.mode})[/dim]")
+    # The mode, the profile and its readiness -- shared with `sweep`.
+    _preflight_target(cfg, mode, dry_run=dry_run)
     if only:
         wanted = {a.upper() for a in only}
         # Checked against the MODE, not the whole roster. Against the roster,
@@ -1908,7 +2355,12 @@ def run(
     # and read-only, and "what would this pick up?" is precisely the question
     # `--dry-run` exists to answer. Rendering a plan that silently omits which
     # tickets it would work on is a rehearsal of a different run.
-    tickets = list(ticket) if ticket else None
+    #
+    # Upper-cased the way `qaas answer` already does it. Keys are matched
+    # exactly against the envelopes, so `--ticket qaas-31` found no run while
+    # `qaas answer qaas-31` found the escalation: one key, typed one way,
+    # meaning something to one command and nothing to the other.
+    tickets = [t.strip().upper() for t in ticket if t.strip()] if ticket else None
     if from_board:
         from qaas.adapters.tracker import repo_label
 
@@ -1916,12 +2368,12 @@ def run(
         label = repo_label(cfg.target) or "this repo's label"
         if not found:
             console.print(
-                f"[yellow]no tickets in '{from_board}'[/yellow] carrying {label}"
+                f"[yellow]no tickets in '{_plain(from_board)}'[/yellow] carrying {label}"
                 " — nothing to do"
             )
             raise typer.Exit(0)
         console.print(
-            f"[dim]from the board[/dim] {from_board} ({label}): "
+            f"[dim]from the board[/dim] {_plain(from_board)} ({label}): "
             f"{', '.join(sorted(found))}"
         )
         tickets = sorted(set(tickets or []) | found)
@@ -1959,12 +2411,32 @@ def run(
             )
             console.print(f"    tools: {', '.join(d['allowed_tools'])}")
             console.print(f"    prompt: {d['prompt_chars']} chars")
+        failures = _assemble_options(cfg, specs)
+        if failures:
+            console.print("\n[red]options failed to assemble:[/red]")
+            for name, why in failures:
+                console.print(f"  - {name}: {_plain(why)}")
+            raise typer.Exit(1)
+        console.print(
+            f"\n[dim]options assembled for {len(specs)} agent(s) — MCP servers, hooks "
+            "and guardrails built; nothing was called[/dim]"
+        )
         return
 
-    # Before the first agent, not after the first ticket: the board is what
-    # someone watches a run *on*, and one that appears at the end is a report.
-    board_info = _ensure_board(cfg)
-    dash_url = _start_dashboard(root, config_dir) if dashboard_ else None
+    if run_id is not None:
+        # `--run-id` means *resume*, and `RunStore` creates by default -- so a
+        # typo silently started a brand new empty run under the mistyped id.
+        # Worse than a wasted run: the budget carry-forward reads the *existing*
+        # ledger to decide what has already been spent, so the resumed cap
+        # started at zero and the mode's budget applied twice.
+        #
+        # Checked before the dispatch pre-flight now, so a typo does not first
+        # pay for a quota probe and provision a board.
+        _require_run(run_id, root)
+
+    board_info, dash_url = _preflight_dispatch(
+        cfg, root=root, config_dir=config_dir, dashboard=dashboard_
+    )
 
     def on_event(kind: str, detail: dict) -> None:
         if kind == "agent_started":
@@ -1975,36 +2447,7 @@ def run(
                 f"[dim]{detail.get('envelopes', 0)} findings[/dim]"
             )
         elif kind == "stopped":
-            console.print(f"[yellow]stopped: {detail.get('reason')}[/yellow]")
-
-    # Last thing before anything is dispatched, and skipped for --dry-run, which
-    # is meant to cost nothing at all.
-    if not dry_run:
-        limited = _quota_preflight()
-        if limited:
-            console.print(f"[red]the model is not accepting work right now:[/red] {limited}")
-            console.print(
-                "[dim]Every agent would fail the same way, one at a time. "
-                "Wait for the reset and run again -- and if a run is already part "
-                "way through, resume it with --run-id so the agents that "
-                "succeeded are not repeated.[/dim]"
-            )
-            raise typer.Exit(1)
-
-    if run_id is not None:
-        # `--run-id` means *resume*, and `RunStore` creates by default -- so a
-        # typo silently started a brand new empty run under the mistyped id.
-        # Worse than a wasted run: the budget carry-forward reads the *existing*
-        # ledger to decide what has already been spent, so the resumed cap
-        # started at zero and the mode's budget applied twice.
-        resumed = RunStore(run_id, root, create=False)
-        if not resumed.ledger_path.exists():
-            known = list_runs(root)[:5]
-            console.print(
-                f"[red]no run '{run_id}' under {root}.[/red] "
-                + (f"Recent: {', '.join(known)}" if known else "There are no runs here.")
-            )
-            raise typer.Exit(1)
+            console.print(f"[yellow]stopped: {_plain(detail.get('reason'))}[/yellow]")
 
     router = Router(cfg, root=root, on_event=on_event, tickets=tickets)
     report = asyncio.run(router.run(mode, run_id=run_id))
@@ -2035,7 +2478,7 @@ def run(
 def score(
     run_id: str = typer.Argument(None, help="Run to score. Defaults to the most recent."),
     config_dir: Path | None = ConfigDir,
-    root: Path = Root,
+    root: Path | None = Root,
     phase: int = typer.Option(1, help="Score against defects seeded for this phase and earlier."),
     domains: list[str] = typer.Option(
         None, "--domain", help="Restrict scoring to these domains. Use it when a run covered only part of the surface."
@@ -2047,7 +2490,8 @@ def score(
     """Score a run against the golden ledger. This is the honest number."""
     from qaas.scorecard import GoldenLedger, score as score_run
 
-    cfg = load_config(config_dir)
+    root = _state_root(root)
+    cfg = _load_config_or_exit(config_dir, None)
     # Every other command that reads a run takes `--target`; this one did not,
     # so a `--repo` run was scored against whatever profile `system.yaml`
     # happened to name -- in practice the bundled demo's ledger, which describes
@@ -2074,11 +2518,13 @@ def score(
             raise typer.Exit(1)
         run_id = ids[0]
 
-    store = RunStore(run_id, root, create=False)
+    # Before anything is scored or written: a typo'd id scored 0/21 against a
+    # run with no envelopes and saved that as `scores/<typo>.json`.
+    store = _require_run(run_id, root)
     envelopes = store.envelopes()
     card = score_run(
         envelopes,
-        GoldenLedger.load(ledger_path),
+        _golden_or_exit(ledger_path),
         phase=phase,
         domains=set(domains) if domains else None,
         cost_usd=store.total_cost_usd(),
@@ -2086,7 +2532,11 @@ def score(
     s = card.summary()
     per_agent = card.by_agent(envelopes)
     _persist_score(root, run_id, s, per_agent)
-    _remember_false_positives(root, cfg_target(config_dir), run_id, card, envelopes)
+    # The target just scored, not a second `load_config` of the configured one:
+    # with `--target`, false positives from that target's run were remembered
+    # under whatever `system.yaml` named, and memory is partitioned by target
+    # precisely so one codebase's lessons do not answer another's questions.
+    _remember_false_positives(root, str(cfg.target or ""), run_id, card, envelopes)
 
     console.print(f"[bold]{run_id}[/bold]")
     table = Table(header_style="bold")
@@ -2213,7 +2663,7 @@ def _persist_score(root: Path, run_id: str, summary: dict, per_agent: dict) -> N
 def sweep(
     mode: str = typer.Option("nightly", "--mode", "-m"),
     config_dir: Path | None = ConfigDir,
-    root: Path = Root,
+    root: Path | None = Root,
     min_precision: float = typer.Option(
         0.70, help="Quality gate. §11 stops the rollout below 70% accepted."
     ),
@@ -2229,7 +2679,14 @@ def sweep(
     from qaas.router import Router
     from qaas.scorecard import GoldenLedger, score as score_run
 
-    cfg = load_config(config_dir)
+    root = _state_root(root)
+    cfg = _load_config_or_exit(config_dir, None)
+    # The same pre-flight as `run`, both halves. This went straight from the
+    # config to `Router.run`: no readiness check, so a target root that did not
+    # exist or sat inside an enclosing git repository was dispatched against;
+    # no quota probe; no board.
+    _preflight_target(cfg, mode, dry_run=False)
+    _preflight_dispatch(cfg, root=root, config_dir=config_dir)
     router = Router(cfg, root=root)
     report = asyncio.run(router.run(mode))
     console.print_json(data=report.summary())
@@ -2253,7 +2710,7 @@ def sweep(
 
     store = RunStore(report.run_id, root)
     card = score_run(
-        store.envelopes(), GoldenLedger.load(ledger_path), cost_usd=store.total_cost_usd()
+        store.envelopes(), _golden_or_exit(ledger_path), cost_usd=store.total_cost_usd()
     )
     console.print_json(data=card.summary())
 
@@ -2347,7 +2804,7 @@ def _print_checks(rows: list[tuple[str, bool, str]]) -> None:
     table.add_column("", justify="center")
     table.add_column("detail")
     for label, passed, detail in rows:
-        table.add_row(label, "[green]ok[/green]" if passed else "[red]fail[/red]", detail)
+        table.add_row(label, "[green]ok[/green]" if passed else "[red]fail[/red]", _plain(detail))
     console.print(table)
 
 
@@ -2429,7 +2886,7 @@ def _check_jira_project(
     for house, target in mapping.items():
         driven = house in _DRIVEN_STATUSES
         if target:
-            table.add_row(house, target)
+            table.add_row(house, _plain(target))
         else:
             table.add_row(
                 f"[red]{house}[/red]" if driven else house,
@@ -2573,7 +3030,7 @@ def _ensure_board(cfg, *, create: bool = True):
     try:
         tracker = JiraTracker()
     except TrackerError as exc:
-        console.print(f"[yellow]no board:[/yellow] {exc}")
+        console.print(f"[yellow]no board:[/yellow] {_plain(exc)}")
         return None
 
     if not create:
@@ -2588,7 +3045,7 @@ def _ensure_board(cfg, *, create: bool = True):
     try:
         info = tracker.ensure_repo_board(cfg.target)
     except TrackerError as exc:
-        console.print(f"[yellow]could not provision a board:[/yellow] {exc}")
+        console.print(f"[yellow]could not provision a board:[/yellow] {_plain(exc)}")
         return None
 
     what = "board" if info.board_id and info.url != info.filter_url else "filter"
@@ -2649,7 +3106,7 @@ def board(
 @app.command("tracker-check")
 def tracker_check(
     config_dir: Path | None = ConfigDir,
-    root: Path = Root,
+    root: Path | None = Root,
     dry_run_ticket: bool = typer.Option(
         False, "--dry-run-ticket", help="Also render the JSON that would be POSTed for a sample finding."
     ),
@@ -2661,14 +3118,14 @@ def tracker_check(
     the alternative is discovering a wrong project key by watching real tickets
     appear in front of real people.
     """
-    cfg = load_config(config_dir)
+    cfg = _load_config_or_exit(config_dir, None)
     console.print(
         f"[bold]tracker backend[/bold]: {cfg.tracker}   "
         f"[dim](tracker: in {_system_yaml(config_dir)})[/dim]\n"
     )
 
     if cfg.tracker == "local":
-        tickets = Path(root) / "tickets"
+        tickets = _state_root(root) / "tickets"
         count = len(list(tickets.glob("*.json"))) if tickets.is_dir() else 0
         console.print(f"tickets are written as JSON under [bold]{tickets}[/bold] ({count} so far)")
         console.print(
@@ -2687,11 +3144,11 @@ def tracker_check(
     problems, warnings = _tracker_check_jira(dry_run_ticket)
 
     for warning in warnings:
-        console.print(f"\n[yellow]warning:[/yellow] {warning}")
+        console.print(f"\n[yellow]warning:[/yellow] {_plain(warning)}")
     if problems:
         console.print("\n[red]not ready:[/red]")
         for problem in problems:
-            console.print(f"  - {problem}")
+            console.print(f"  - {_plain(problem)}")
         raise typer.Exit(1)
     console.print("\n[green]ready[/green] — nothing was created by this check.")
 

@@ -83,6 +83,11 @@ Requires Python 3.12+ and an `ANTHROPIC_API_KEY`. The Claude Code binary ships
 with the SDK, so there is nothing else to install. Add
 `npx playwright install chromium` only if you want the browser agents.
 
+The agents that run shell commands do so inside an OS sandbox — writes stay in
+the checkout, credential stores are unreadable, the network reaches only your
+app. macOS has it built in; on Linux install `bubblewrap` and `socat`
+(`qaas doctor` tells you which applies).
+
 ## Five minutes
 
 ```bash
@@ -366,7 +371,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest -q                              # 1126 tests, offline, free, no API key
+pytest -q                              # 1522 tests, offline, free, no API key
 qaas validate                          # config, prompts and allowlists cohere
 qaas run --mode pr-check --dry-run     # every agent's options assemble
 ```

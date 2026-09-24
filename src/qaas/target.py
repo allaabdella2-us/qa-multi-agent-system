@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from qaas.paths import project_root
 
@@ -276,9 +276,23 @@ def load_target(name: str, targets_dir: Path | str = "config/targets") -> Target
             f"Available: {', '.join(available) or 'none'}. "
             "Create one with `qaas init <path-to-repo>`."
         )
-    raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    # Parsed from the open file, not from `read_text()`. PyYAML names the stream
+    # it was handed in every error mark, and a string is `"<unicode string>"` --
+    # so a typo in a profile was reported as being in no file at all, by every
+    # command that loads one.
+    with path.open(encoding="utf-8") as fh:
+        raw: Any = yaml.safe_load(fh) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"target profile {path} must be a mapping of fields, not a {type(raw).__name__}"
+        )
     raw.setdefault("name", name)
-    return TargetProfile.model_validate(raw)
+    try:
+        return TargetProfile.model_validate(raw)
+    except ValidationError as exc:
+        # Pydantic's message names the model and the field, never the file, and
+        # a project can hold a profile of the same name in two config layers.
+        raise ValueError(f"target profile {path} is invalid: {exc}") from exc
 
 
 # `list_targets(one_dir)` lived here and is gone. Listing profiles from a single

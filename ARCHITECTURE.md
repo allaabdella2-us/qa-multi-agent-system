@@ -465,7 +465,7 @@ for a real codebase.
 ## 11. Testing
 
 ```bash
-pytest                    # 547 tests, no API calls, no network, free
+pytest                    # 1522 tests, no API calls, no network, free
 pytest -m docker          # 18 tests, needs target-app running
 pytest -m 'llm'           # real API calls — excluded by default
 ```

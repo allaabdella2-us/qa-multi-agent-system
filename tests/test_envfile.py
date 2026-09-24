@@ -99,3 +99,46 @@ def test_an_override_path_is_read_instead_of_the_search(tmp_path, monkeypatch):
 
 def test_no_env_file_anywhere_is_not_an_error(tmp_path):
     assert load_env_file(tmp_path) == (None, [])
+
+
+# -- quotes, comments, BOMs and tabs -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('KEY="abc123"  # rotated 2026-09', "abc123"),
+        ("KEY='abc123' # rotated", "abc123"),
+        ('KEY="a # not a comment"  # but this is', "a # not a comment"),
+        ('KEY="abc"trailing', "abc"),
+        ('KEY=""  # empty on purpose', ""),
+        ('KEY="unterminated', '"unterminated'),
+    ],
+)
+def test_a_quoted_value_ends_at_its_closing_quote(line, expected):
+    """The quote test ran before the comment strip, so `KEY="abc123"  # rotated`
+    ended in `d`, was taken as unquoted, and became `"abc123"` -- the token
+    with its quotes still on, failing auth for a reason the file does not show."""
+    assert parse_env(line)["KEY"] == expected
+
+
+def test_a_byte_order_mark_does_not_rename_the_first_key(tmp_path, monkeypatch):
+    """Notepad writes one. The first key became `\\ufeffJIRA_BASE_URL`."""
+    (tmp_path / ".env").write_bytes("﻿JIRA_BASE_URL=https://acme.example\n".encode("utf-8"))
+    monkeypatch.delenv("JIRA_BASE_URL", raising=False)
+    path, applied = load_env_file(tmp_path)
+    assert applied == ["JIRA_BASE_URL"]
+    assert os.environ["JIRA_BASE_URL"] == "https://acme.example"
+    assert parse_env("﻿A=1\n") == {"A": "1"}
+
+
+@pytest.mark.parametrize("sep", ["\t", "  ", " \t "])
+def test_export_may_be_followed_by_any_whitespace(sep):
+    """`export<TAB>KEY=v` produced a key named `export\\tKEY`."""
+    assert parse_env(f"export{sep}JIRA_EMAIL=bot@acme.example") == {
+        "JIRA_EMAIL": "bot@acme.example"
+    }
+
+
+def test_a_key_that_merely_starts_with_export_is_kept():
+    assert parse_env("exported=1\nexport=2") == {"exported": "1", "export": "2"}

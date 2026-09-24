@@ -29,7 +29,10 @@ def triage(ctx):
     return ctx, handlers(build_tools(ctx))
 
 
-def _file(tools, title: str = "Refund endpoint accepts any authenticated user", **extra):
+def _file(ctx, tools, title: str = "Refund endpoint accepts any authenticated user", **extra):
+    """File one ticket. `envelope_id` is required, so a fresh envelope is made when none is named."""
+    if "envelope_id" not in extra:
+        extra["envelope_id"] = make_envelope(ctx, title=title).id
     return tools["create_issue"]({"title": title, "body": BODY, **extra})
 
 
@@ -42,7 +45,7 @@ async def test_a_read_only_agent_may_not_create_issues(make_ctx):
     assert ctx.agent.policy.read_only
     tools = handlers(build_tools(ctx))
 
-    result = await _file(tools)
+    result = await _file(ctx, tools)
     assert is_error(result)
     assert "may not create tickets" in text_of(result)
     assert ctx.count("tickets") == 0
@@ -57,7 +60,7 @@ async def test_a_read_only_agent_may_not_create_issues(make_ctx):
 
 async def test_a_read_only_agent_may_not_transition_issues(triage, make_ctx):
     ctx, tools = triage
-    filed = await _file(tools)
+    filed = await _file(ctx, tools)
     key = filed["structuredContent"]["key"]
 
     api = make_ctx("API", root=ctx.store.root)
@@ -70,12 +73,12 @@ async def test_a_read_only_agent_may_not_transition_issues(triage, make_ctx):
 async def test_proof_may_transition_but_not_create(triage, make_ctx):
     """§8.1: VERIFIER is the closing authority, never the filing one."""
     ctx, tools = triage
-    key = (await _file(tools))["structuredContent"]["key"]
+    key = (await _file(ctx, tools))["structuredContent"]["key"]
 
     verifier = make_ctx("VERIFIER", root=ctx.store.root)
     verifier_tools = handlers(build_tools(verifier))
 
-    assert is_error(await _file(verifier_tools))
+    assert is_error(await _file(verifier, verifier_tools))
 
     moved = await verifier_tools["transition"](
         {"key": key, "status": "closed", "comment": "verified: test_refund_authz now passes"}
@@ -97,12 +100,12 @@ async def test_clerk_files_up_to_the_cap_then_escalates(triage):
     assert cap > 0
 
     for i in range(cap):
-        result = await _file(tools, title=f"Defect number {i}")
+        result = await _file(ctx, tools, title=f"Defect number {i}")
         assert not is_error(result), text_of(result)
         assert result["structuredContent"]["tickets_filed"] == i + 1
     assert ctx.count("tickets") == cap
 
-    over = await _file(tools, title="One too many")
+    over = await _file(ctx, tools, title="One too many")
     assert is_error(over)
     body = text_of(over)
     assert "cap" in body
@@ -131,7 +134,7 @@ async def test_a_security_relevant_envelope_routes_to_the_restricted_project(tri
         impact={"security_relevant": True, "user_facing": True},
     )
 
-    result = await _file(tools, envelope_id=envelope.id)
+    result = await _file(ctx, tools, envelope_id=envelope.id)
     assert not is_error(result)
     body = result["structuredContent"]
     assert body["project"] == SECURITY_PROJECT
@@ -145,7 +148,7 @@ async def test_a_vulnerability_class_envelope_routes_to_the_restricted_project(t
     """The class alone is enough; the reporter need not also tick the flag."""
     ctx, tools = triage
     envelope = make_envelope(ctx, domain="security", **{"class": "vulnerability"})
-    result = await _file(tools, envelope_id=envelope.id)
+    result = await _file(ctx, tools, envelope_id=envelope.id)
     assert result["structuredContent"]["project"] == SECURITY_PROJECT
 
 
@@ -153,7 +156,7 @@ async def test_asking_for_a_public_project_for_a_security_finding_is_refused(tri
     ctx, tools = triage
     envelope = make_envelope(ctx, domain="security", impact={"security_relevant": True})
 
-    result = await _file(tools, envelope_id=envelope.id, project=DEFAULT_PROJECT)
+    result = await _file(ctx, tools, envelope_id=envelope.id, project=DEFAULT_PROJECT)
     assert is_error(result)
     assert DEFAULT_PROJECT in text_of(result)
     assert SECURITY_PROJECT in text_of(result)
@@ -167,7 +170,7 @@ async def test_asking_for_a_public_project_for_a_security_finding_is_refused(tri
 async def test_an_ordinary_envelope_goes_to_the_default_project(triage):
     ctx, tools = triage
     envelope = make_envelope(ctx)
-    result = await _file(tools, envelope_id=envelope.id)
+    result = await _file(ctx, tools, envelope_id=envelope.id)
     body = result["structuredContent"]
     assert body["project"] == DEFAULT_PROJECT
     assert body["restricted"] is False
@@ -180,20 +183,20 @@ async def test_an_ordinary_envelope_goes_to_the_default_project(triage):
 
 async def test_issue_keys_are_monotonic_and_stable_across_store_instances(ctx, make_ctx):
     tools = handlers(build_tools(ctx))
-    first = (await _file(tools, title="First"))["structuredContent"]["key"]
-    second = (await _file(tools, title="Second"))["structuredContent"]["key"]
+    first = (await _file(ctx, tools, title="First"))["structuredContent"]["key"]
+    second = (await _file(ctx, tools, title="Second"))["structuredContent"]["key"]
     assert (first, second) == (f"{DEFAULT_PROJECT}-1", f"{DEFAULT_PROJECT}-2")
 
     # A new run against the same state root continues the sequence rather than
     # restarting it — a reused key would overwrite a live ticket.
     later = make_ctx("TRIAGE", root=ctx.store.root)
     later_tools = handlers(build_tools(later))
-    third = (await _file(later_tools, title="Third"))["structuredContent"]["key"]
+    third = (await _file(later, later_tools, title="Third"))["structuredContent"]["key"]
     assert third == f"{DEFAULT_PROJECT}-3"
 
     # The sequence is shared with the restricted project, so keys stay unique.
     envelope = make_envelope(later, domain="security", impact={"security_relevant": True})
-    fourth = (await _file(later_tools, envelope_id=envelope.id))["structuredContent"]["key"]
+    fourth = (await _file(later, later_tools, envelope_id=envelope.id))["structuredContent"]["key"]
     assert fourth == f"{SECURITY_PROJECT}-4"
 
     assert [i.key for i in LocalTracker(ctx.store.root).issues()] == [first, second, third, fourth]
@@ -201,7 +204,7 @@ async def test_issue_keys_are_monotonic_and_stable_across_store_instances(ctx, m
 
 async def test_every_create_is_logged(triage):
     ctx, tools = triage
-    key = (await _file(tools))["structuredContent"]["key"]
+    key = (await _file(ctx, tools))["structuredContent"]["key"]
     created = [e for e in ctx.store.ledger("ticket") if e.detail["action"] == "created"]
     assert len(created) == 1
     assert created[0].agent == "TRIAGE"
@@ -220,7 +223,7 @@ async def test_transition_refuses_an_unknown_key_without_dying(triage, make_ctx)
 
 async def test_transition_refuses_an_unknown_status_with_the_valid_list(triage, make_ctx):
     ctx, tools = triage
-    key = (await _file(tools))["structuredContent"]["key"]
+    key = (await _file(ctx, tools))["structuredContent"]["key"]
     verifier = make_ctx("VERIFIER", root=ctx.store.root)
     result = await handlers(build_tools(verifier))["transition"]({"key": key, "status": "donezo"})
     assert is_error(result)
@@ -229,8 +232,8 @@ async def test_transition_refuses_an_unknown_status_with_the_valid_list(triage, 
 
 async def test_link_relates_two_issues_and_refuses_dangling_targets(triage):
     ctx, tools = triage
-    a = (await _file(tools, title="Original"))["structuredContent"]["key"]
-    b = (await _file(tools, title="Recurrence"))["structuredContent"]["key"]
+    a = (await _file(ctx, tools, title="Original"))["structuredContent"]["key"]
+    b = (await _file(ctx, tools, title="Recurrence"))["structuredContent"]["key"]
 
     linked = await tools["link"]({"key": b, "to": a, "type": "regression-of"})
     assert not is_error(linked)
@@ -249,9 +252,14 @@ async def test_link_is_refused_for_an_agent_with_no_tracker_write_access(make_ct
 
 async def test_search_finds_filed_issues_and_is_open_to_read_only_agents(triage, make_ctx):
     ctx, tools = triage
-    await _file(tools, title="Refund endpoint accepts any authenticated user")
+    await _file(ctx, tools, title="Refund endpoint accepts any authenticated user")
+    other = make_envelope(ctx, title="Order list ignores the page size parameter")
     await tools["create_issue"](
-        {"title": "Order list ignores the page size parameter", "body": "GET /v1/orders returns every row."}
+        {
+            "title": "Order list ignores the page size parameter",
+            "body": "GET /v1/orders returns every row.",
+            "envelope_id": other.id,
+        }
     )
 
     api = make_ctx("API", root=ctx.store.root)
@@ -317,9 +325,18 @@ async def test_filing_stamps_the_ticket_key_onto_the_envelope(triage):
     assert [e for e in ctx.store.envelopes() if e.jira.key], "remediation can now find it"
 
 
-async def test_filing_without_an_envelope_stamps_nothing(triage):
+async def test_filing_without_an_envelope_is_refused_and_stamps_nothing(triage):
+    """It used to file, and routing never looked at an envelope nobody named.
+
+    A vulnerability filed without `envelope_id` went into the public project.
+    Whether a ticket is a disclosure cannot hang on an optional argument.
+    """
     ctx, tools = triage
     before = [e.id for e in ctx.store.envelopes()]
     result = await tools["create_issue"]({"title": "Ad-hoc issue", "body": BODY})
-    assert not is_error(result)
+    assert is_error(result)
+    assert "`envelope_id` is required" in text_of(result)
     assert [e.id for e in ctx.store.envelopes()] == before
+    assert LocalTracker(ctx.store.root).issues() == []
+    assert ctx.count("tickets") == 0
+    assert list(ctx.store.ledger("denial"))[0].detail["tool"] == "create_issue"

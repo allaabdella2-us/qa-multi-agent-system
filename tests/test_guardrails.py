@@ -850,3 +850,175 @@ async def test_a_long_argument_is_truncated_in_the_ledger(tmp_path):
     recorded = denials[-1].detail["args"]["command"]
     assert len(recorded) == 201, len(recorded)
     assert recorded.endswith("…")
+
+
+# -- git's global options, push shapes, and qaas's own state ------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -C . push --force origin HEAD:main",
+        "git -c user.name=x push -f origin HEAD:main",
+        "git -C . merge fix/x",
+        "git -C . reset --hard HEAD~3",
+        "git -C . checkout -- api/app/auth.py",
+        "git -C . commit -am x",
+        "git --work-tree=. checkout -- api/app/auth.py",
+        "git -c core.fsmonitor='touch /tmp/pwned' status",
+        "env git -C . push -f origin fix/x",
+        "git config core.hooksPath /tmp/hooks",
+        "git reset HEAD~3",
+    ],
+)
+def test_a_global_option_is_not_a_way_past_the_git_rules(tmp_path, command):
+    """Every git rule read the subcommand as the word after `git`.
+
+    One global option in between -- `git -C . push --force origin HEAD:main` --
+    cleared all of them, for read-only VERIFIER as much as for anyone.
+    """
+    decision = _guard("VERIFIER", tmp_path).check("Bash", {"command": command})
+    assert not decision.allowed, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push --mirror origin",
+        "git push --all origin",
+        "git push origin --delete release-1.0",
+        "git push -d origin release-1.0",
+        "git push -uf origin fix/x",
+        "git push origin",
+        "git push origin HEAD",
+        "git push origin release-1.0",
+        "git push --receive-pack='rm -rf ~' origin fix/x",
+        "ls && git checkout -b release-hotfix",
+        "git branch -D main",
+    ],
+)
+def test_a_push_publishes_one_named_branch_inside_the_patterns(tmp_path, command):
+    """`--mirror`, `--all` and `--delete` named no branch and passed every rule."""
+    decision = _guard("FIXER", tmp_path).check("Bash", {"command": command})
+    assert not decision.allowed, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git checkout -b fix/QAAS-1",
+        "git -C api log --oneline -5",
+        "git config --get remote.origin.url",
+        "curl -s http://127.0.0.1:8000/v1/orders",
+        "curl -sS http://127.0.0.1:8000/health -o /dev/null",
+        "wget -qO- http://127.0.0.1:8000/health",
+        "tar -tf fixtures.tar",
+        "chmod +x qa/repro/run.sh",
+    ],
+)
+def test_ordinary_git_and_http_work_still_goes_through(tmp_path, command):
+    decision = _guard("FIXER", tmp_path).check("Bash", {"command": command})
+    assert decision.allowed, f"{command}: {decision.reason}"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl -s -o api/app/auth.py http://127.0.0.1:9/x",
+        "curl -sSo api/app/main.py http://127.0.0.1:9/x",
+        "wget -O api/app/main.py http://127.0.0.1:9/x",
+        "wget http://127.0.0.1:9/main.py",
+        "sort -o api/app/main.py api/app/main.py",
+        "awk -i inplace '{print}' api/app/main.py",
+        "perl -pi.bak script.pl api/app/main.py",
+        "tar -xzf /tmp/payload.tgz",
+        "unzip /tmp/payload.zip",
+        "chmod 000 api/app/main.py",
+        "git mv api/app/main.py api/app/gone.py",
+    ],
+)
+def test_writers_that_name_their_destination_behind_an_option_are_read(tmp_path, command):
+    """None of these was on any table, so each cleared read-only VERIFIER."""
+    decision = _guard("VERIFIER", tmp_path).check("Bash", {"command": command})
+    assert not decision.allowed, command
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".qaas/config/agents/fixer.yaml",
+        ".qaas/runs/run-x/ledger.jsonl",
+        ".qaas/memory.db",
+        ".qaas/.env",
+        ".env",
+        ".env.production",
+        ".git/hooks/pre-commit",
+        ".claude/settings.json",
+    ],
+)
+def test_no_write_path_reaches_qaas_state_or_the_repositorys_machinery(tmp_path, path):
+    """A single-package repo profiles as `backend: ["."]`, so `$backend` is the
+    whole checkout -- including `.qaas/`, FIXER's own policy, the ledger and the
+    Jira token. The rule that those are "in nobody's write_paths" has to hold
+    whatever a layout expands to."""
+    guard = _guard("FIXER", tmp_path, write_paths=["."], forbidden_paths=[])
+    for door, payload in (("Write", {"file_path": path}), ("Bash", {"command": f"echo x > {path}"})):
+        decision = guard.check(door, payload)
+        assert not decision.allowed, f"{door} {path}"
+
+
+def test_an_env_template_is_still_ordinary_source(tmp_path):
+    guard = _guard("FIXER", tmp_path, write_paths=["."], forbidden_paths=[])
+    assert guard.check("Write", {"file_path": ".env.example"}).allowed
+
+
+def test_the_state_root_is_refused_even_outside_the_target(tmp_path):
+    guard = _guard("FIXER", tmp_path, write_paths=["."], forbidden_paths=[])
+    ledger = tmp_path / "runs" / "run-x" / "ledger.jsonl"
+    assert not guard.check("Write", {"file_path": str(ledger)}).allowed
+
+
+def test_a_clone_under_the_state_root_is_still_writable(tmp_path):
+    """`qaas run --repo` clones into `.qaas/targets/<slug>`, inside the state root."""
+    cfg = load_config(search=CONFIG_SEARCH)
+    state = tmp_path / ".qaas"
+    target = state / "targets" / "demo"
+    (target / "src").mkdir(parents=True)
+    spec = cfg.agents["FIXER"].model_copy(deep=True)
+    spec.policy.write_paths = ["src"]
+    guard = Guardrail(ToolContext(
+        store=RunStore.new(root=state), maps=SystemMapStore(state),
+        config=cfg, agent=spec, target_root=target,
+    ))
+    assert guard.check("Write", {"file_path": "src/app.py"}).allowed
+    assert not guard.check("Write", {"file_path": str(state / "memory.db")}).allowed
+
+
+def test_a_write_path_that_is_a_symlink_out_of_the_checkout_grants_nothing(tmp_path):
+    """`qa/repro -> ~` in a hostile repository made `qa/repro/.bashrc` writable."""
+    cfg = load_config(search=CONFIG_SEARCH)
+    target, outside = tmp_path / "target", tmp_path / "home"
+    (target / "qa").mkdir(parents=True)
+    outside.mkdir()
+    (target / "qa" / "repro").symlink_to(outside, target_is_directory=True)
+    spec = cfg.agents["REPRODUCER"].model_copy(deep=True)
+    guard = Guardrail(ToolContext(
+        store=RunStore.new(root=tmp_path / "state"), maps=SystemMapStore(tmp_path / "state"),
+        config=cfg, agent=spec, target_root=target,
+    ))
+    assert not guard.check("Write", {"file_path": "qa/repro/.bashrc"}).allowed
+
+
+@pytest.mark.parametrize("command", ["git commit -am fix", "git push origin fix/QAAS-1", "env GIT_AUTHOR_NAME=x git commit -m x"])
+def test_an_agent_with_the_vcs_tools_commits_and_pushes_through_them(tmp_path, command):
+    """The vcs tools check every committed file and hold a security fix back;
+    the same two operations typed into Bash skipped both."""
+    decision = _guard("FIXER", tmp_path).check("Bash", {"command": command})
+    assert not decision.allowed, command
+    assert "mcp__vcs__" in decision.reason
+
+
+def test_a_push_to_main_still_names_the_rule_it_breaks(tmp_path):
+    decision = _guard("FIXER", tmp_path).check("Bash", {"command": "git push origin fix/main-menu:main"})
+    assert not decision.allowed
+    assert "mcp__vcs__" not in decision.reason

@@ -183,10 +183,14 @@ class RunStore:
         if create:
             for sub in ("envelopes", "artifacts", "results"):
                 (self.dir / sub).mkdir(parents=True, exist_ok=True)
-        #: agent -> files it has written this run. See `touched_files`.
-        self._touched: dict[str, set[str]] = {}
+        #: (agent, scope) -> files it has written this run. See `touched_files`.
+        self._touched: dict[tuple[str, str | None], set[str]] = {}
+        #: (agent, scope) -> lines it has committed. See `committed_lines`.
+        self._committed_lines: dict[tuple[str, str | None], int] = {}
         #: Lines the last `ledger()` scan could not parse. See `ledger`.
         self.unreadable_lines = 0
+        #: Envelope and result files the last scan could not parse. See `envelopes`.
+        self.unreadable_files = 0
         #: agent -> per-run tallies. See `counters`.
         self._counters: dict[str, dict[str, int]] = {}
 
@@ -255,7 +259,7 @@ class RunStore:
         if envelope.dedupe.fingerprint is None:
             envelope = envelope.with_fingerprint()
         path = self.dir / "envelopes" / f"{envelope.id}.json"
-        path.write_text(envelope.to_json(), encoding="utf-8")
+        _write_atomic(path, envelope.to_json())
         self.log(
             "envelope",
             agent=envelope.discovered_by,
@@ -268,12 +272,42 @@ class RunStore:
         return path
 
     def envelopes(self) -> list[DefectEnvelope]:
-        paths = sorted((self.dir / "envelopes").glob("*.json"))
-        return [DefectEnvelope.from_json(p.read_text(encoding="utf-8")) for p in paths]
+        """Every readable envelope. A file that does not parse is skipped and counted.
+
+        Tolerant for the reason `ledger` is. This raised on the first bad file,
+        and every phase of the router, `run_agent` itself and every reader call
+        it -- so one envelope truncated by a crash mid-write, or written by a
+        release with a different schema, failed every resume of that run in the
+        same place, forever. It is written atomically now, which closes the
+        first cause; the tolerance is for the files already on disk.
+        """
+        found: list[DefectEnvelope] = []
+        bad = 0
+        for path in sorted((self.dir / "envelopes").glob("*.json")):
+            try:
+                found.append(DefectEnvelope.from_json(path.read_text(encoding="utf-8")))
+            except (ValidationError, ValueError, OSError):
+                bad += 1
+        self.unreadable_files = bad
+        return found
 
     def get_envelope(self, envelope_id: str) -> DefectEnvelope | None:
+        """One envelope by id, or None. The id is agent-supplied, so it is checked.
+
+        `record_reproduction`, `fingerprint`, `record` and `create_issue` all
+        pass an agent's `envelope_id` straight here, and it was joined into a
+        path unchecked: `../../<other-run>/envelopes/<id>` read another run's
+        envelope, which `record_reproduction` then wrote into this one.
+        """
+        if not _ENVELOPE_ID.fullmatch(str(envelope_id)):
+            return None
         path = self.dir / "envelopes" / f"{envelope_id}.json"
-        return DefectEnvelope.from_json(path.read_text(encoding="utf-8")) if path.exists() else None
+        if not path.exists():
+            return None
+        try:
+            return DefectEnvelope.from_json(path.read_text(encoding="utf-8"))
+        except (ValidationError, ValueError, OSError):
+            return None
 
     def counters(self, agent: str) -> dict[str, int]:
         """Per-agent tallies that must span the whole run, not one dispatch.
@@ -288,13 +322,32 @@ class RunStore:
         """
         return self._counters.setdefault(agent, {})
 
-    def touched_files(self, agent: str) -> set[str]:
-        """The distinct files one agent has written this run (§8.2's denominator).
+    def touched_files(self, agent: str, scope: str | None = None) -> set[str]:
+        """The distinct files one agent has written for one piece of work (§8.2).
 
         Held here rather than on `ToolContext` because a context is built per
-        dispatch and a run outlives many of them.
+        dispatch, and a FIXER/REVIEWER round trip on one ticket is several
+        dispatches that must share one budget.
+
+        Keyed by `scope` as well as by agent, because §8.2 bounds *a diff* --
+        "the diff touches fewer than N files" -- and not a run. Keyed by agent
+        alone, the budget was shared across every ticket in the run: after
+        ticket A's fix touched four files, ticket B's FIXER got one edit and was
+        refused, and every later ticket escalated as "wider than the envelope"
+        -- in `fix-cycle --from-board`, the mode that exists to work ten. The
+        router scopes FIXER by ticket key; `None` is the whole run.
         """
-        return self._touched.setdefault(agent, set())
+        return self._touched.setdefault((agent, scope), set())
+
+    def committed_lines(self, agent: str, scope: str | None = None) -> int:
+        """Lines one agent has committed for one piece of work -- the other half
+        of §8.2's envelope. Scoped like `touched_files`."""
+        return self._committed_lines.get((agent, scope), 0)
+
+    def add_committed_lines(self, agent: str, scope: str | None, lines: int) -> int:
+        total = self.committed_lines(agent, scope) + lines
+        self._committed_lines[(agent, scope)] = total
+        return total
 
     # -- artifacts --------------------------------------------------------
 
@@ -380,7 +433,7 @@ class RunStore:
         # under-reports by however much the repeated agents actually spent.
         existing = len(list((self.dir / "results").glob(f"{result.agent}-*.json")))
         path = self.dir / "results" / f"{result.agent}-{existing + 1:02d}.json"
-        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        _write_atomic(path, result.model_dump_json(indent=2))
         self.log(
             "agent_finished",
             agent=result.agent,
@@ -392,8 +445,19 @@ class RunStore:
         )
 
     def results(self) -> list[AgentResult]:
-        paths = sorted((self.dir / "results").glob("*.json"))
-        return [AgentResult.model_validate_json(p.read_text(encoding="utf-8")) for p in paths]
+        """Every readable result; a truncated file is skipped rather than fatal.
+
+        `total_cost_usd` reads these for a resume's `already_spent` and
+        `qaas show` reads them for a summary, and one file cut short by a kill
+        made both raise for exactly the run someone needed to look at.
+        """
+        found: list[AgentResult] = []
+        for path in sorted((self.dir / "results").glob("*.json")):
+            try:
+                found.append(AgentResult.model_validate_json(path.read_text(encoding="utf-8")))
+            except (ValidationError, ValueError, OSError):
+                continue
+        return found
 
     def total_cost_usd(self) -> float:
         return sum(r.cost_usd for r in self.results())
@@ -437,14 +501,39 @@ class SystemMapStore:
         return pointer.read_text(encoding="utf-8").strip() if pointer.exists() else None
 
     def get(self, version: str | None = None) -> dict[str, Any] | None:
+        """One map version, or None. A version that is not a plain name is refused.
+
+        The dashboard's `?version=` reached here unchecked, so
+        `?version=../../secret` returned any `.json` file the user could read.
+        """
         version = version or self.latest_version()
-        if not version:
+        if not version or not _MAP_VERSION.fullmatch(version):
             return None
-        path = self.dir / f"{version}.json"
+        path = (self.dir / f"{version}.json").resolve()
+        if path.parent != self.dir.resolve():
+            return None
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
     def versions(self) -> list[str]:
         return sorted(p.stem for p in self.dir.glob("*.json"))
+
+
+#: An envelope id is a uuid; the router and the servers only ever mint those.
+_ENVELOPE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+#: `20260920T232352-3acbe3`, or any other plain name -- never a path.
+_MAP_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write via a sibling temp file and `os.replace`, so a reader -- or a crash --
+    sees the old file or the new one, never half of the new one."""
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
 
 
 def list_runs(root: Path | str = DEFAULT_ROOT) -> list[str]:

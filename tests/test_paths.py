@@ -104,6 +104,71 @@ def test_find_project_returns_none_rather_than_guessing(tmp_path):
     assert find_project(tmp_path) is None
 
 
+# -- a `config/` directory is not automatically ours --------------------------
+#
+# `config/` is about the most common directory name there is. Any
+# `config/system.yaml` or `config/targets/` used to mark a qaas project, so a
+# repository whose `config/system.yaml` held `database: ...` had that file
+# copied into `.qaas/config/system.yaml` by `qaas init .`, and every command
+# after that failed on `extra_forbidden`.
+
+
+def test_a_repositorys_own_config_system_yaml_is_not_a_qaas_project(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system.yaml").write_text("database:\n  host: db\n")
+    assert find_project(tmp_path) is None
+    ws = Workspace.resolve(cwd=tmp_path)
+    assert all(d.is_relative_to(package_root()) for d in ws.config_dirs), ws.config_dirs
+
+
+def test_a_bare_config_targets_directory_is_not_a_qaas_project(tmp_path):
+    (tmp_path / "config" / "targets").mkdir(parents=True)
+    assert find_project(tmp_path) is None
+
+
+def test_a_top_level_system_yaml_with_run_modes_is_a_qaas_project(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system.yaml").write_text("run_modes:\n  mine:\n    trigger: x\n")
+    assert find_project(tmp_path / "config") == tmp_path.resolve()
+
+
+def test_a_qaas_system_yaml_with_a_typo_still_marks_the_project(tmp_path):
+    """Matched as text, not parsed: a typo must fail loudly in `load_config`,
+    not quietly unmark the project and hand back the packaged defaults."""
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "system.yaml").write_text("run_modes:\n  mine: [unclosed\n")
+    assert find_project(tmp_path) == tmp_path.resolve()
+
+
+def test_a_qaas_source_checkout_is_still_found_by_its_config_targets(tmp_path):
+    """This repository's own shape: `config/targets/` beside `src/qaas`, and no
+    `.qaas/config/` on a fresh clone. Without it the suite loses `corvid`."""
+    (tmp_path / "config" / "targets").mkdir(parents=True)
+    (tmp_path / "src" / "qaas" / "defaults" / "config").mkdir(parents=True)
+    assert find_project(tmp_path / "src") == tmp_path.resolve()
+    assert (tmp_path / "config").resolve() in Workspace.resolve(cwd=tmp_path).config_dirs
+
+
+def test_this_checkout_still_finds_the_demo_profile():
+    from support import REPO
+
+    assert find_project(REPO) == REPO
+    found = load_config(search=Workspace.resolve(cwd=REPO).config_dirs, target="corvid")
+    assert found.profile is not None and found.profile.name == "corvid"
+    assert (REPO / "config").resolve() in Workspace.resolve(cwd=REPO).config_dirs
+
+
+def test_after_init_a_repositorys_config_dir_is_not_a_layer(tmp_path):
+    """`.qaas/config` marks the project; the repository's own `config/` must
+    still not be read as agents, targets or a fallback `system.yaml`."""
+    (tmp_path / ".qaas" / "config").mkdir(parents=True)
+    (tmp_path / "config" / "agents").mkdir(parents=True)
+    (tmp_path / "config" / "system.yaml").write_text("database:\n  host: db\n")
+    ws = Workspace.resolve(cwd=tmp_path)
+    assert ws.project == tmp_path.resolve()
+    assert (tmp_path / "config").resolve() not in ws.config_dirs
+
+
 # -- layering ---------------------------------------------------------------
 
 

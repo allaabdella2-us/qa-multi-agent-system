@@ -538,3 +538,51 @@ def test_a_real_comment_is_still_removed(tmp_path):
 
     graph = build(tmp_path)
     assert graph.imports["src/d.ts"] == {"src/a.ts"}
+
+
+# -- never raises, never shouts, says when it stopped short ------------------
+
+
+@pytest.mark.parametrize("extends", ["./\\u0000x", "./a\\u0000/tsconfig.json", "./" + "x" * 5000])
+def test_an_extends_the_filesystem_cannot_represent_is_not_followed(tmp_path, extends):
+    """`"extends": "./\\u0000x"` is valid JSON, and `resolve()` raised
+    `ValueError: embedded null byte` straight out of `build()`."""
+    write(tmp_path, "tsconfig.json",
+          '{"extends": "%s", "compilerOptions": {"paths": {"@/*": ["src/*"]}}}' % extends)
+    write(tmp_path, "src/lib/dates.ts", "export const d = 1;\n")
+    write(tmp_path, "src/app.test.ts", 'import { d } from "@/lib/dates";\n')
+    graph = build(tmp_path)
+    # The config's own aliases still apply; only the unfollowable parent is lost.
+    assert "src/lib/dates.ts" in graph.imports["src/app.test.ts"]
+
+
+def test_parsing_the_target_prints_no_syntax_warnings(tmp_path):
+    r"""`"\d"` in a target's regex is a SyntaxWarning on 3.12, and `ast.parse`
+    printed one per occurrence into the operator's terminal."""
+    import warnings
+
+    write(tmp_path, "pkg/__init__.py")
+    write(tmp_path, "pkg/rx.py", 'import re\nPAT = re.compile("\\d+\\.\\w")\n')
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        graph = build(tmp_path)
+    assert "pkg/rx.py" in graph.imports
+    assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]
+
+
+def test_a_repository_exactly_at_the_cap_is_not_called_truncated(tmp_path):
+    for i in range(3):
+        write(tmp_path, f"m{i}.py", "X = 1\n")
+    graph = build(tmp_path, max_modules=3)
+    assert len(graph.imports) == 3
+    assert graph.truncated is False
+    assert graph.truncated_note is None
+
+
+def test_truncation_is_an_attribute_a_caller_can_report(tmp_path):
+    for i in range(5):
+        write(tmp_path, f"m{i}.py", "X = 1\n")
+    graph = build(tmp_path, max_modules=3)
+    assert graph.truncated is True
+    assert graph.module_cap == 3
+    assert "3" in graph.truncated_note and "cap" in graph.truncated_note

@@ -14,8 +14,10 @@ the marked test's job, and the reason it exists rather than being deleted.
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
+import urllib.request
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,6 +32,7 @@ from qaas.adapters.tracker import (
     Issue,
     JiraDataCenterTracker,
     JiraTracker,
+    LocalTracker,
     TrackerConfigError,
     TrackerError,
     UnknownIssue,
@@ -635,6 +638,26 @@ def security_envelope(ctx: ToolContext) -> DefectEnvelope:
     return envelope
 
 
+def ordinary_envelope(ctx: ToolContext, title: str = "Slow list endpoint") -> DefectEnvelope:
+    """A finding with nothing security-shaped about it. `create_issue` requires one."""
+    envelope = DefectEnvelope.model_validate(
+        {
+            "run_id": ctx.store.run_id,
+            "discovered_by": "API",
+            "domain": "api",
+            "class": "bug",
+            "title": title,
+            "summary": "GET /v1/orders ignores the page size and returns every row.",
+            "severity": "major",
+            "confidence": 0.9,
+            "location": {"endpoint": "GET /v1/orders"},
+            "evidence": [{"type": "log", "uri": "artifact://run/orders.log"}],
+        }
+    )
+    ctx.store.put_envelope(envelope)
+    return envelope
+
+
 @pytest.fixture
 def clean_jira_env(monkeypatch):
     """Keep the ambient environment out of it, both ways."""
@@ -695,7 +718,9 @@ async def test_an_ordinary_finding_goes_to_the_configured_default_project(
 ):
     ctx = jira_ctx(stub, tmp_path, monkeypatch)
     tools = handlers(build_tools(ctx))
-    result = await tools["create_issue"]({"title": "Slow list endpoint", "body": "Repro: ..."})
+    result = await tools["create_issue"](
+        {"title": "Slow list endpoint", "body": "Repro: ...", "envelope_id": ordinary_envelope(ctx).id}
+    )
     assert not result.get("isError"), result
     assert stub.calls("POST", f"{API}/issue")[0].fields["project"] == {"key": "CORVID"}
 
@@ -971,7 +996,9 @@ async def test_dry_run_creates_nothing_and_says_so(stub, tmp_path, monkeypatch, 
     ctx = jira_ctx(stub, tmp_path, monkeypatch)
     tools = handlers(build_tools(ctx))
 
-    result = await tools["create_issue"]({"title": "Slow list endpoint", "body": "Repro: ..."})
+    result = await tools["create_issue"](
+        {"title": "Slow list endpoint", "body": "Repro: ...", "envelope_id": ordinary_envelope(ctx).id}
+    )
     assert not result.get("isError"), result
 
     text = "\n".join(block["text"] for block in result["content"])
@@ -1053,7 +1080,9 @@ async def test_without_the_flag_nothing_changes(stub, tmp_path, monkeypatch, cle
     monkeypatch.delenv("QAAS_TRACKER_DRY_RUN", raising=False)
     ctx = jira_ctx(stub, tmp_path, monkeypatch)
     tools = handlers(build_tools(ctx))
-    result = await tools["create_issue"]({"title": "Slow list endpoint", "body": "Repro: ..."})
+    result = await tools["create_issue"](
+        {"title": "Slow list endpoint", "body": "Repro: ...", "envelope_id": ordinary_envelope(ctx).id}
+    )
     assert not result.get("isError"), result
     assert len(stub.calls("POST", f"{API}/issue")) == 1
     assert "dry_run" not in result["structuredContent"]
@@ -1128,6 +1157,8 @@ def test_a_second_run_against_the_same_repo_reuses_the_board(tracker, stub):
         (200, {"values": [{"id": "10100", "name": name, "jql": jql}]}),
     )
     stub.route("GET", f"{AGILE}/board", (200, {"values": [{"id": 42, "name": name}]}))
+    # A board is ours because of its filter, not its name (see `find_board`).
+    stub.route("GET", f"{AGILE}/board/42/configuration", (200, {"id": 42, "filter": {"id": "10100"}}))
 
     info = tracker.ensure_repo_board("claude-code-training")
 
@@ -1171,7 +1202,9 @@ async def test_every_filed_ticket_carries_its_repository_label(stub, tmp_path, m
     )
     tools = handlers(build_tools(ctx))
 
-    result = await tools["create_issue"]({"title": "A defect", "body": "Repro: ..."})
+    result = await tools["create_issue"](
+        {"title": "A defect", "body": "Repro: ...", "envelope_id": ordinary_envelope(ctx).id}
+    )
 
     assert not result.get("isError"), result
     assert "repo-claude-code-training" in stub.calls("POST", f"{API}/issue")[0].fields["labels"]
@@ -1200,9 +1233,13 @@ def test_an_account_id_that_could_not_be_read_is_omitted_rather_than_sent_empty(
     API is broken" rather than "/myself did not answer"."""
     stub.route("GET", f"{API}/myself", (500, {"errorMessages": ["boom"]}))
     stub.route("GET", f"{API}/filter/search", (200, {"values": []}))
+    stub.route("GET", f"{API}/filter/my", (200, []))
 
     assert tracker.find_filter("anything") is None
-    assert "accountId" not in stub.calls("GET", f"{API}/filter/search")[0].query
+    # With the owner unknown it now asks `/filter/my` rather than searching
+    # unscoped; either way no request carries an accountId it does not have.
+    assert all("accountId" not in c.query for c in stub.calls("GET", f"{API}/filter/search"))
+    assert stub.calls("GET", f"{API}/filter/my")
 
 
 def test_a_board_link_is_resolved_by_jira_rather_than_assembled(tracker, stub, monkeypatch):
@@ -1258,6 +1295,7 @@ def test_an_existing_board_with_no_location_is_not_offered_as_a_link(tracker, st
         (200, {"values": [{"id": "10100", "name": name, "jql": jql}]}),
     )
     stub.route("GET", f"{AGILE}/board", (200, {"values": [{"id": 42, "name": name}]}))
+    stub.route("GET", f"{AGILE}/board/42/configuration", (200, {"id": 42, "filter": {"id": "10100"}}))
     stub.route("GET", f"{AGILE}/board/42", (200, {"id": 42, "name": name}))   # no location
 
     info = tracker.ensure_repo_board("claude-code-training")
@@ -1396,3 +1434,264 @@ def test_an_unreadable_workflow_does_not_fail_the_search(tracker, stub):
     tracker.search(status="open")
 
     assert stub.calls("POST", f"{API}/search/jql")
+
+
+# -- 0.0.2 review: the project allowlist -------------------------------------
+
+
+def test_the_adapter_files_only_into_its_two_configured_projects(tracker, stub):
+    """No allowlist at all: `project="SOMEONE-ELSES"` went to Jira as given, and on
+    a shared site the bot can usually reach every team's project."""
+    with pytest.raises(TrackerError, match="SOMEONE-ELSES"):
+        tracker.create_issue(project="SOMEONE-ELSES", title="A defect")
+    with pytest.raises(TrackerError, match="CORVID and CORVIDSEC"):
+        tracker.create_payload(project="HR", title="A defect")
+    assert stub.requests == []
+
+    tracker.create_issue(project="corvidsec", title="A defect")
+    assert stub.calls("POST", f"{API}/issue")[0].fields["project"] == {"key": "CORVIDSEC"}
+
+
+def test_the_adapter_moves_and_links_only_its_own_tickets(tracker, stub):
+    with pytest.raises(TrackerError, match="PAYROLL"):
+        tracker.transition("PAYROLL-3", "closed")
+    with pytest.raises(TrackerError, match="PAYROLL"):
+        tracker.link("CORVID-1", "PAYROLL-3")
+    assert stub.requests == []
+
+
+# -- 0.0.2 review: nothing but TrackerError leaves `_request` ------------------
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes | BaseException):
+        self._body = body
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        if isinstance(self._body, BaseException):
+            raise self._body
+        return self._body
+
+
+class _FakeOpener:
+    """Answers each request from a queue; the last answer repeats.
+
+    `("open", exc)` fails before any reply, `("read", exc)` fails reading it, and
+    `("body", bytes)` answers. What a stub server cannot do on cue: drop the
+    connection half way through a reply.
+    """
+
+    def __init__(self, *answers: tuple[str, Any]):
+        self.answers = list(answers)
+        self.seen: list[str] = []
+
+    def open(self, request: urllib.request.Request, timeout: float | None = None) -> _FakeResponse:
+        self.seen.append(f"{request.get_method()} {request.full_url}")
+        kind, value = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if kind == "open":
+            raise value
+        return _FakeResponse(value)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ("open", http.client.RemoteDisconnected("Remote end closed connection without response")),
+        ("read", http.client.IncompleteRead(b'{"key": "COR')),
+        ("body", b"\xff\xfe a proxy's error page, not utf-8"),
+        ("open", ValueError("Invalid header value")),
+        ("open", ConnectionResetError(54, "Connection reset by peer")),
+    ],
+    ids=["remote-disconnected", "incomplete-read", "unicode", "value-error", "reset"],
+)
+def test_transport_failures_become_tracker_errors(tracker, answer):
+    """They escaped as themselves, past every caller's `except TrackerError`."""
+    tracker._opener = _FakeOpener(answer)
+    with pytest.raises(TrackerError, match="call to Jira failed during GET"):
+        tracker.get("CORVID-1")
+
+
+def test_a_write_whose_reply_was_lost_says_it_may_have_happened(tracker):
+    tracker._opener = _FakeOpener(("open", http.client.RemoteDisconnected("gone")))
+    with pytest.raises(TrackerError, match="may already have been applied"):
+        tracker.create_issue(project="CORVID", title="A defect")
+
+
+@pytest.mark.parametrize(
+    "readback",
+    [("open", http.client.RemoteDisconnected("gone")), ("body", b"[]")],
+    ids=["connection-dropped", "unmappable-payload"],
+)
+def test_a_created_ticket_keeps_its_key_whatever_the_readback_does(tracker, readback):
+    """The POST succeeded, so the ticket exists. Losing its key to the read-back is
+    how a retry files it twice."""
+    tracker._opener = _FakeOpener(("body", b'{"id": "1", "key": "CORVID-7"}'), readback)
+
+    issue = tracker.create_issue(project="CORVID", title="A defect", body="b", severity="major")
+
+    assert (issue.key, issue.severity) == ("CORVID-7", "major")
+    assert "GET" in tracker._opener.seen[1] and "/issue/CORVID-7?" in tracker._opener.seen[1]
+
+
+async def test_a_lost_readback_still_stamps_and_logs_the_ticket(
+    stub, tmp_path, monkeypatch, clean_jira_env
+):
+    """Through the MCP server: the key reaches the envelope and the ledger, so the
+    next pass sees the finding as filed instead of filing it again."""
+    opener = _FakeOpener(
+        ("body", b'{"id": "1", "key": "CORVID-7"}'),
+        ("open", http.client.RemoteDisconnected("gone")),
+    )
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_handlers: opener)
+    ctx = jira_ctx(stub, tmp_path, monkeypatch)
+    tools = handlers(build_tools(ctx))
+    envelope = ordinary_envelope(ctx)
+
+    result = await tools["create_issue"]({"title": "Slow list", "body": "b", "envelope_id": envelope.id})
+
+    assert not result.get("is_error"), result
+    assert ctx.store.get_envelope(envelope.id).jira.key == "CORVID-7"
+    assert [e.detail["key"] for e in ctx.store.ledger("ticket")] == ["CORVID-7"]
+
+    again = await tools["create_issue"]({"title": "Slow list", "body": "b", "envelope_id": envelope.id})
+    assert again.get("is_error") and "CORVID-7" in again["content"][0]["text"]
+    assert len([s for s in opener.seen if s.startswith("POST")]) == 1
+
+
+# -- 0.0.2 review: plain http carries the token in clear ---------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["http://acme.atlassian.net", "http://localhost.evil.example", "http://127.0.0.1@evil.example"],
+)
+def test_a_plain_http_base_url_is_refused_off_loopback(url):
+    with pytest.raises(TrackerConfigError) as exc:
+        JiraTracker(env=env_for(JiraStub(base_url=url)))
+    message = str(exc.value)
+    assert "plain http" in message and "https://" in message and "JIRA_BASE_URL" in message
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://acme.atlassian.net", "http://localhost:8080", "http://127.0.0.1:9", "http://[::1]:8080"],
+)
+def test_https_and_loopback_http_are_accepted(url):
+    assert JiraTracker(env=env_for(JiraStub(base_url=url))).base_url == url
+
+
+# -- 0.0.2 review: one normalisation, both backends ---------------------------
+
+
+def test_both_backends_store_what_jira_would_accept(tracker, stub, tmp_path):
+    """Labels with spaces, a newline in the title and a 40,000-character body were
+    all fine locally and a 400 from Jira, discovered mid-run."""
+    title = "Refund endpoint\naccepts   any\tuser"
+    body = "x" * 40_000
+    labels = ["ux friction", "agent-found", "  tech   debt ", "   "]
+
+    local = LocalTracker(tmp_path).create_issue(
+        project="CORVID", title=title, body=body, labels=labels, envelope_id="env-9"
+    )
+    tracker.create_issue(project="CORVID", title=title, body=body, labels=labels, envelope_id="env-9")
+    fields = stub.calls("POST", f"{API}/issue")[0].fields
+
+    assert local.title == fields["summary"] == "Refund endpoint accepts any user"
+    assert local.labels == ["agent-found", "tech-debt", "ux-friction"]
+    assert set(local.labels) <= set(fields["labels"])
+    assert not [label for label in fields["labels"] if any(c.isspace() for c in label)]
+
+    marker = local.body.rsplit("\n", 1)[-1]
+    assert marker.startswith("[TRUNCATED:") and "env-9" in marker
+    assert len(local.body) < 32_767
+    described = adf_to_text(fields["description"])
+    assert marker in described and len(described) < 32_767
+
+
+def test_a_title_past_jiras_limit_is_cut_the_same_way_on_both(tracker, stub, tmp_path):
+    title = "word " * 100
+    local = LocalTracker(tmp_path).create_issue(project="CORVID", title=title)
+    tracker.create_issue(project="CORVID", title=title)
+    summary = stub.calls("POST", f"{API}/issue")[0].fields["summary"]
+    assert local.title == summary and len(summary) <= 255 and summary.endswith("…")
+
+
+# -- 0.0.2 review: whose board, whose filter ----------------------------------
+
+
+BOARD_NAME = "claude-code-training — QA (qaas)"
+BOARD_JQL = 'project = "CORVID" AND labels = "repo-claude-code-training" ORDER BY created DESC'
+
+
+def test_a_same_named_board_over_someone_elses_filter_is_not_adopted(tracker, stub):
+    """Matched by name alone, another account's board of the same name was ours."""
+    route_no_existing_board(stub)
+    stub.route("GET", f"{AGILE}/board", (200, {"values": [{"id": 7, "name": BOARD_NAME}]}))
+    stub.route("GET", f"{AGILE}/board/7/configuration", (200, {"id": 7, "filter": {"id": "999"}}))
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.board_id == 42 and info.created_board
+    assert stub.calls("POST", f"{AGILE}/board")[0].body["filterId"] == 10100
+
+
+def test_a_same_named_board_whose_filter_cannot_be_read_is_neither_adopted_nor_duplicated(tracker, stub):
+    route_no_existing_board(stub)
+    stub.route("GET", f"{AGILE}/board", (200, {"values": [{"id": 7, "name": BOARD_NAME}]}))
+    stub.route("GET", f"{AGILE}/board/7/configuration", (403, {"errorMessages": ["no"]}))
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.board_id is None
+    assert stub.calls("POST", f"{AGILE}/board") == []
+    assert "filter=10100" in info.url
+    assert info.note and "could not be read" in info.note
+
+
+def test_a_failed_myself_reuses_our_own_filter_instead_of_duplicating_it(tracker, stub):
+    """It skipped every owned filter, ours included, and made a new one each run."""
+    stub.route("GET", f"{API}/myself", (500, {"errorMessages": ["boom"]}))
+    stub.route("GET", f"{API}/filter/my", (200, [{"id": "10100", "name": BOARD_NAME, "jql": BOARD_JQL}]))
+    stub.route("GET", f"{API}/project/CORVID", (200, {"key": "CORVID", "style": "next-gen"}))
+    stub.route("POST", f"{API}/filter", (200, {"id": "10200"}))
+
+    info = tracker.ensure_repo_board("claude-code-training")
+
+    assert info.filter_id == 10100 and not info.created_filter
+    assert stub.calls("POST", f"{API}/filter") == []
+
+
+def test_a_failed_myself_is_asked_again_rather_than_remembered(tracker, stub):
+    """The failure was cached as "" for the tracker's whole lifetime."""
+    stub.route("GET", f"{API}/myself", (500, {"errorMessages": ["boom"]}), (200, {"accountId": "acct-1"}))
+    stub.route("GET", f"{API}/filter/my", (200, []))
+    stub.route("GET", f"{API}/filter/search", (200, {"values": []}))
+
+    tracker.find_filter("x")
+    tracker.find_filter("x")
+
+    assert len(stub.calls("GET", f"{API}/myself")) == 2
+    assert "accountId=acct-1" in stub.calls("GET", f"{API}/filter/search")[0].query
+
+
+def test_with_no_way_to_know_the_owner_no_filter_is_created(tracker, stub):
+    """Neither adopt a stranger's filter nor make a duplicate of ours: no board this
+    run, which `cli._ensure_board` already reports and survives."""
+    stub.route("GET", f"{API}/myself", (500, {"errorMessages": ["boom"]}))
+    stub.route("GET", f"{API}/filter/my", (500, {"errorMessages": ["boom"]}))
+    # What the unscoped search used to see: our own filter, which it skipped.
+    stub.route(
+        "GET", f"{API}/filter/search",
+        (200, {"values": [{"id": "10100", "name": BOARD_NAME, "owner": {"accountId": "acct-1"}}]}),
+    )
+    stub.route("POST", f"{API}/filter", (200, {"id": "10200"}))
+
+    with pytest.raises(TrackerError):
+        tracker.ensure_repo_board("claude-code-training")
+    assert stub.calls("POST", f"{API}/filter") == []

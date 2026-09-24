@@ -12,7 +12,7 @@ import importlib
 import os
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import warnings
 
@@ -37,6 +37,7 @@ try:  # pragma: no cover - depends on the installed SDK exposing the class
 except ImportError:  # the SDK renamed or dropped it; nothing to silence
     pass
 
+from qaas import sandbox
 from qaas.config import AgentSpec
 from qaas.guardrails import ALWAYS_GRANTED, Guardrail
 from qaas.mcp.context import ToolContext
@@ -63,11 +64,20 @@ SDK_SERVER_MODULES: dict[str, str] = {
     "vcs": "qaas.mcp.vcs",
 }
 
+#: Pinned, not `@latest`. `npx -y` fetches and executes whatever npm serves at
+#: that moment, inside a process holding this user's credentials, and a flag
+#: renamed upstream would break every BROWSER and GUIDE run of an installed
+#: release with no change on our side. Bump it deliberately; a project that
+#: needs another version declares `playwright` under `mcp_servers:`.
+PLAYWRIGHT_MCP_VERSION = "0.0.82"
+
 STDIO_SERVERS: dict[str, dict[str, Any]] = {
     "playwright": {
         "type": "stdio",
         "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest", "--isolated", "--browser", "chromium"],
+        "args": [
+            "-y", f"@playwright/mcp@{PLAYWRIGHT_MCP_VERSION}", "--isolated", "--browser", "chromium",
+        ],
     },
 }
 
@@ -505,6 +515,43 @@ def qualified_skills(spec: AgentSpec, ctx: ToolContext) -> list[str]:
     return [q for q in (ws.qualify(name) for name in spec.skills) if q]
 
 
+#: A variable whose name says it holds a secret.
+_CREDENTIAL_NAME = re.compile(
+    r"(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY|_PAT)$", re.IGNORECASE
+)
+#: Credentials the Claude Code process itself needs (the API key or OAuth
+#: token, Bedrock's AWS keys), and `QAAS_TARGET_*` -- the documented way to
+#: hand the target's own tests a credential, and the one prefix
+#: `test_runner`'s allowlist already passes.
+_CHILD_NEEDS = ("ANTHROPIC_", "CLAUDE_", "AWS_", "QAAS_TARGET_")
+#: Named explicitly because the name does not say "secret": it is half of the
+#: Jira basic-auth pair.
+_ALSO_CREDENTIALS = frozenset({"JIRA_EMAIL"})
+
+
+def scrubbed_credentials(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Blank every credential the agent's process has no use for.
+
+    The SDK starts Claude Code with `{**os.environ, **options.env}`, so every
+    variable this process holds reached the agent -- and through it, every
+    command the agent's `Bash` runs. FIXER, REPRODUCER and VERIFIER may run
+    `python -m pytest` there on purpose, so a target's `conftest.py` reading
+    `os.environ` got `JIRA_API_TOKEN` and `GITHUB_TOKEN`: the exact hole
+    `test_runner`'s environment allowlist was built to close, open again one
+    door over. Jira and GitHub are reached from *this* process (the tracker and
+    vcs servers run in-process), so the child never needed them.
+
+    Blanked rather than removed because `options.env` can only override.
+    """
+    source = os.environ if environ is None else environ
+    return {
+        name: ""
+        for name in source
+        if (name in _ALSO_CREDENTIALS or _CREDENTIAL_NAME.search(name))
+        and not name.upper().startswith(_CHILD_NEEDS)
+    }
+
+
 def build_options(
     spec: AgentSpec,
     ctx: ToolContext,
@@ -514,12 +561,23 @@ def build_options(
     """Everything one agent needs, assembled from its spec."""
     guard = Guardrail(ctx)
 
-    env = {
+    env = scrubbed_credentials()
+    env.update({
         # Opus delegates readily. An unbounded subagent tree is the fastest route
         # to a surprise bill, so cap depth and width regardless of what it decides.
         "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
         "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "3",
-    }
+    })
+    # The shell of an agent that has one runs inside the OS sandbox. Its temp
+    # directory is private to this invocation and on the sandbox's write list:
+    # the sandbox's own default is shared by every Claude Code session this
+    # user runs, and a `CLAUDE_CODE_TMPDIR` the sandbox cannot write sends
+    # Python's `tempfile` -- and so pytest's `tmp_path` -- into the checkout.
+    sandbox_settings = None
+    if sandbox.applies(spec) and ctx.config.sandbox.mode != "off":
+        tmpdir = sandbox.make_tmpdir(spec.name)
+        sandbox_settings = sandbox.settings_for(spec, ctx, tmpdir)
+        env[sandbox.TMPDIR_ENV] = str(tmpdir)
     env.update(extra_env or {})
 
     return ClaudeAgentOptions(
@@ -558,6 +616,7 @@ def build_options(
         # and skills is a list.
         setting_sources=[],
         permission_mode="default",
+        sandbox=sandbox_settings,
     )
 
 

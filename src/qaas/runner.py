@@ -21,6 +21,7 @@ from claude_agent_sdk import (
     query,
 )
 
+from qaas import sandbox
 from qaas.config import AgentSpec
 from qaas.mcp.context import ToolContext
 from qaas.registry import build_options
@@ -145,12 +146,33 @@ async def run_agent(
 
     if max_budget_usd is not None:
         options.max_budget_usd = max_budget_usd
-    started = time.monotonic()
+    # Recorded per invocation, because "was this shell sandboxed" is a property
+    # of the machine the run happened on, and `auto` runs unsandboxed -- and
+    # says so here -- where the OS cannot.
+    shell = sandbox.status(spec, ctx.config)
     ctx.store.log(
         "agent_started", agent=spec.name, model=spec.model, task_chars=len(task),
+        **({"sandbox": shell} if shell else {}),
         **_record_task(ctx, spec.name, task),
     )
+    try:
+        return await _stream(spec, ctx, task, options, max_budget_usd, on_event)
+    finally:
+        # The private temp directory `build_options` made for a sandboxed
+        # shell. Removed however the turn ended -- a cancellation included.
+        sandbox.cleanup(options)
 
+
+async def _stream(
+    spec: AgentSpec,
+    ctx: ToolContext,
+    task: str,
+    options: ClaudeAgentOptions,
+    max_budget_usd: float | None,
+    on_event: Callable[[str, dict[str, Any]], None] | None,
+) -> RunOutcome:
+    """Stream one agent's turn and record what it cost and produced."""
+    started = time.monotonic()
     before = {e.id for e in ctx.store.envelopes()}
     final_text = ""
     tool_calls = 0

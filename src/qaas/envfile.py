@@ -34,30 +34,49 @@ CANDIDATES = (".qaas/.env", ".env")
 #: developer happens to have on disk.
 ENV_FILE_VAR = "QAAS_ENV_FILE"
 
+#: The shell's `export` keyword, then whitespace of any kind.
+_EXPORT_RE = re.compile(r"export\s+")
+
 
 def parse_env(text: str) -> dict[str, str]:
     """`KEY=value` lines to a dict. Comments, blanks and `export ` tolerated.
 
     Quotes are stripped only when they wrap the whole value: a token that
     genuinely contains a quote character is more likely than a caller who meant
-    to keep the wrapping ones.
+    to keep the wrapping ones. "The whole value" is the part up to the matching
+    closing quote -- a comment after it is still a comment.
     """
     values: dict[str, str] = {}
+    # A BOM is what Notepad and some Windows editors put at the front of a
+    # "UTF-8" file. Read as text it is U+FEFF, which `strip()` does not remove,
+    # so the first key became "﻿JIRA_BASE_URL" -- a variable nothing ever
+    # reads, and the real one reported missing several steps later.
+    text = text.lstrip("﻿")
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
+        # `export` followed by *any* whitespace. Matching the literal "export "
+        # left `export<TAB>KEY=value` alone, and the key became "export\tKEY".
+        match = _EXPORT_RE.match(line)
+        if match:
+            line = line[match.end() :]
         key, _, value = line.partition("=")
         key = key.strip()
         if not key:
             continue
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        if value[:1] in ("\"", "'") and value.find(value[0], 1) != -1:
             # Quoted: everything inside is the value, `#` included. A token
             # containing a hash is the reason to quote it in the first place.
-            value = value[1:-1]
+            #
+            # Up to the *matching* quote, and whatever follows it is dropped.
+            # This asked whether the value both started and ended with a quote,
+            # before any comment was stripped -- so `KEY="abc123"  # rotated`
+            # ended in `d`, fell through to the unquoted branch, and the value
+            # became `"abc123"` with its quotes still on: a credential that
+            # fails auth for a reason nobody can see in the file.
+            value = value[1 : value.index(value[0], 1)]
         else:
             # Unquoted: a trailing `# ...` is a comment, not part of the value.
             # Whole-line comments were stripped and this was not, so
@@ -107,7 +126,9 @@ def load_env_file(start: Path | str | None = None) -> tuple[Path | None, list[st
         if not path.is_file():
             continue
         try:
-            values = parse_env(path.read_text(encoding="utf-8", errors="replace"))
+            # `utf-8-sig` drops a leading BOM; `parse_env` strips one too, for
+            # callers that hand it text they decoded themselves.
+            values = parse_env(path.read_text(encoding="utf-8-sig", errors="replace"))
         except OSError:
             # An unreadable .env is not worth killing a command over; the
             # missing variable will produce a far clearer error downstream.

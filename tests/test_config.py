@@ -586,3 +586,19 @@ def test_an_agent_with_no_budget_gets_no_budget_line(cfg):
     none.agents["FIXER"].policy.max_diff_files = None
     none.agents["FIXER"].policy.max_diff_lines = None
     assert "diff budget" not in tasks.fixer("X-1", None, none)
+
+
+def test_a_typo_under_thresholds_in_overrides_is_dropped_not_fatal(tmp_path):
+    """Unknown agent fields were dropped; unknown threshold keys failed validation
+    for every command that loads a config."""
+    import shutil
+
+    from support import PACKAGED_CONFIG
+
+    layer = tmp_path / "config"
+    shutil.copytree(PACKAGED_CONFIG, layer)
+    (layer / "overrides.yaml").write_text(
+        "thresholds:\n  min_confidence_to_fil: 0.9\n  max_proof_reopens: 3\n"
+    )
+    cfg = load_config(search=[layer, *CONFIG_SEARCH])
+    assert cfg.thresholds.max_proof_reopens == 3

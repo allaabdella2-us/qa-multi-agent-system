@@ -376,13 +376,23 @@ def test_run_started_pins_the_run_to_a_commit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(conductor_mod, "run_agent", fake_run_agent)
     cfg = load_config(search=CONFIG_SEARCH)
-    report = asyncio.run(Router(cfg, target_root=REPO, root=tmp_path).run("pr-check"))
+    # A repository of its own, not this checkout: an unpacked sdist is not a git
+    # repository, and the test failed there on `git rev-parse` rather than on
+    # anything about pinning.
+    target = tmp_path / "target"
+    target.mkdir()
+    _git(target, "init", "-q")
+    (target / "app.py").write_text("x = 1\n")
+    _git(target, "add", "-A")
+    _git(target, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
+    state = tmp_path / "state"
+    report = asyncio.run(Router(cfg, target_root=target, root=state).run("pr-check"))
 
-    started = next(iter(RunStore(report.run_id, tmp_path).ledger("run_started")))
+    started = next(iter(RunStore(report.run_id, state).ledger("run_started")))
     # `cfg.target_app` is gone: the target root is the profile's, resolved once.
-    assert Path(started.detail["target_root"]) == Path(REPO)
-    assert started.detail["target_sha"] == _git(REPO, "rev-parse", "HEAD").strip()
-    assert started.detail["target_dirty"] in (True, False)
+    assert Path(started.detail["target_root"]) == target
+    assert started.detail["target_sha"] == _git(target, "rev-parse", "HEAD").strip()
+    assert started.detail["target_dirty"] is False
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -471,3 +481,26 @@ def test_quiet_does_not_override_an_explicit_kind_filter(run):
         trace_mod.read_ledger(run), kinds=[LedgerKind.DENIAL], quiet=True
     )
     assert [e.kind for e in entries] == [LedgerKind.DENIAL]
+
+
+# -- a run killed mid-write ----------------------------------------------------
+
+
+def test_summarise_survives_a_truncated_result_file(run):
+    """A run killed inside `put_result` leaves half a JSON object in
+    `results/`, and `qaas show` raised on it for the one run that mattered."""
+    victim = sorted((run.dir / "results").glob("*.json"))[-1]
+    victim.write_text(victim.read_text()[:25], encoding="utf-8")
+    summary = trace_mod.summarise(run)
+    assert summary.mode == "fix-cycle"
+    assert summary.cost_usd >= 1.25
+
+
+def test_summarise_falls_back_to_the_ledgers_cost_when_results_will_not_read(run, monkeypatch):
+    def unreadable():
+        raise ValidationError.from_exception_data("AgentResult", [])
+
+    monkeypatch.setattr(run, "total_cost_usd", unreadable)
+    summary = trace_mod.summarise(run)
+    # `put_result` logs the same cost on `agent_finished`: 1.25 + 0.75.
+    assert summary.cost_usd == pytest.approx(2.0)

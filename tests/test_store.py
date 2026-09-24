@@ -190,3 +190,53 @@ def test_reading_a_run_that_does_not_exist_does_not_create_it(tmp_path):
     RunStore("run-does-not-exist", root=tmp_path, create=False)
     assert not (tmp_path / "runs" / "run-does-not-exist").exists()
     assert list_runs(tmp_path) == []
+
+
+# -- tolerant reads, atomic writes, contained lookups -----------------------------
+
+
+def _envelope(run_id: str):
+    from qaas.envelope import DefectEnvelope
+
+    return DefectEnvelope(
+        run_id=run_id, discovered_by="API", domain="api", **{"class": "bug"},
+        title="t", summary="s", severity="major", confidence=0.9,
+    )
+
+
+def test_one_truncated_envelope_does_not_make_the_run_unreadable(tmp_path):
+    """Every phase and every reader calls `envelopes()`, and it raised on the
+    first bad file -- so one envelope cut short by a crash failed every resume."""
+    store = RunStore.new(tmp_path)
+    store.put_envelope(_envelope(store.run_id))
+    (store.dir / "envelopes" / "broken.json").write_text('{"envelope_version": "1.0", "id":')
+    assert len(store.envelopes()) == 1
+    assert store.unreadable_files == 1
+
+
+def test_a_truncated_result_is_skipped_not_fatal(tmp_path):
+    from qaas.store import AgentResult
+
+    store = RunStore.new(tmp_path)
+    store.put_result(AgentResult(agent="API", cost_usd=1.5))
+    (store.dir / "results" / "API-99.json").write_text('{"agent": "API", "cost_')
+    assert store.total_cost_usd() == 1.5
+
+
+def test_writes_leave_no_temp_files(tmp_path):
+    store = RunStore.new(tmp_path)
+    store.put_envelope(_envelope(store.run_id))
+    assert [p.name for p in (store.dir / "envelopes").iterdir() if p.name.startswith(".")] == []
+
+
+@pytest.mark.parametrize("bad", ["../../other/envelopes/x", "/etc/passwd", "..", "a/b"])
+def test_an_agent_supplied_envelope_id_cannot_leave_the_run(tmp_path, bad):
+    store = RunStore.new(tmp_path)
+    assert store.get_envelope(bad) is None
+
+
+@pytest.mark.parametrize("bad", ["../../secret", "/abs/path/secret", "..", "a/b"])
+def test_a_map_version_cannot_name_a_file_outside_the_store(tmp_path, bad):
+    (tmp_path / "secret.json").write_text('{"leaked": true}')
+    maps = SystemMapStore(tmp_path / ".qaas")
+    assert maps.get(bad) is None

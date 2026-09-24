@@ -28,6 +28,7 @@ allowed at the exact moment `Edit` on it was refused.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,8 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from qaas.adapters.vcs import VcsAdapter, VcsError, build_vcs
-from qaas.guardrails import Guardrail
+from qaas.envelope import DefectClass, DefectEnvelope, Domain
+from qaas.guardrails import DIFF_BUDGET_REFUSAL, Guardrail
 from qaas.mcp.context import ToolContext, err, ok
 
 # Refused for every agent regardless of policy. A policy that names one of these
@@ -92,6 +94,41 @@ def _publish_refusal(ctx: ToolContext, branch: str) -> str | None:
     return _branch_refusal(ctx, branch)
 
 
+def _is_security(envelope: DefectEnvelope) -> bool:
+    """The same test the tracker routes on: a security domain, a vulnerability,
+    or an impact the discovering agent marked security-relevant."""
+    return (
+        envelope.domain == Domain.SECURITY
+        or envelope.defect_class == DefectClass.VULNERABILITY
+        or bool(envelope.impact.security_relevant)
+    )
+
+
+def _security_refusal(ctx: ToolContext, ticket: str | None) -> str | None:
+    """Why a fix for this ticket may not be published, or None.
+
+    The tracker refuses to put a security finding in a readable backlog, and
+    routes it to a restricted project -- and nothing stopped the fix for that
+    same finding going out as a pushed branch and a pull request whose title
+    and body describe the vulnerability, on a remote that may be public.
+    `--from-board` picks restricted tickets up like any other. §8.4 makes any
+    security ticket a mandatory human touch; publishing is where that lands.
+    The fix itself is not refused: it stays on the local branch for a human.
+    """
+    key = (ticket or ctx.scope or "").strip().upper()
+    if not key:
+        return None
+    for envelope in ctx.store.envelopes():
+        if (envelope.jira.key or "").upper() == key and _is_security(envelope):
+            return (
+                f"{key} is a security finding. Security fixes stop at a human (§8.4): "
+                "a pushed branch or a pull request describes the vulnerability to "
+                "everyone who can read the remote. Commit the fix locally and say in "
+                "your summary which branch holds it; a human publishes it."
+            )
+    return None
+
+
 def _remote_refusal(adapter: VcsAdapter, capability: str) -> str | None:
     """The local backend has no remote; say so rather than raise AttributeError."""
     if not hasattr(adapter, capability):
@@ -142,6 +179,60 @@ def _path_refusal(
     return resolved, None
 
 
+def _product_files(ctx: ToolContext, files: list[str]) -> list[str]:
+    """The files that are the change, not the probe harness beside it (§8.2)."""
+    scratch = ctx.agent.policy.scratch_paths
+    return [
+        f for f in files
+        if not any(_under_prefix(f, prefix) for prefix in scratch)
+    ]
+
+
+def _under_prefix(path: str, prefix: str) -> bool:
+    prefix = prefix.strip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def _line_budget_refusal(ctx: ToolContext, adapter: VcsAdapter, files: list[str]) -> str | None:
+    """Why this commit would take the agent past `max_diff_lines`, or None.
+
+    `max_diff_lines` was configured, overridable per target, shown on the
+    dashboard and told to FIXER and REVIEWER as "the number the guardrail
+    enforces" -- and nothing enforced it. The commit is where a line count is
+    both knowable and final, and FIXER must commit for its round to count at
+    all. Scratch files are exempt exactly as they are from the file budget.
+    """
+    limit = ctx.agent.policy.max_diff_lines
+    if limit is None:
+        return None
+    product = _product_files(ctx, files)
+    try:
+        lines = adapter.staged_line_count(product) if product else 0
+    except (VcsError, ValueError):
+        return None
+    already = ctx.store.committed_lines(ctx.agent.name, ctx.scope)
+    if already + lines <= limit:
+        return None
+    return (
+        f"{ctx.agent.name} would have committed {already + lines} changed lines, which is "
+        f"past its limit of {limit} {DIFF_BUDGET_REFUSAL}. A fix this wide is outside the "
+        "autonomy envelope: stop, and escalate with what you have found."
+    )
+
+
+def _charge_lines(ctx: ToolContext, adapter: VcsAdapter, files: list[str]) -> None:
+    product = _product_files(ctx, files)
+    if ctx.agent.policy.max_diff_lines is None or not product:
+        return
+    try:
+        # Measured against the commit just made rather than re-read from the
+        # index, which `commit_files` has now emptied of these paths.
+        lines = adapter.committed_line_count(product)
+    except (VcsError, ValueError, AttributeError):
+        return
+    ctx.store.add_committed_lines(ctx.agent.name, ctx.scope, lines)
+
+
 def build_tools(ctx: ToolContext) -> list:
     """The vcs tools, bound to one agent's run context.
 
@@ -181,7 +272,14 @@ def build_tools(ctx: ToolContext) -> list:
             "required": ["name"],
             "properties": {
                 "name": {"type": "string", "description": "e.g. 'qa/repro/PROJ-1284-order-500'"},
-                "from_ref": {"type": "string", "description": "Base ref. Defaults to the current HEAD."},
+                "from_ref": {
+                    "type": "string",
+                    "description": (
+                        "Base ref. Defaults to the ticket's reproduction branch when you are "
+                        "fixing one (so the failing test is on your branch), otherwise to the "
+                        "commit this run started on -- never to whatever happens to be checked out."
+                    ),
+                },
             },
         },
     )
@@ -192,12 +290,19 @@ def build_tools(ctx: ToolContext) -> list:
         refusal = _branch_refusal(ctx, name)
         if refusal:
             return _deny(ctx, "create_branch", refusal)
+        # The base is decided by the router, not by what is checked out. The
+        # working tree is shared across findings, so "the current HEAD" was
+        # wherever the previous agent had left it: REPRODUCER's second branch
+        # grew out of its first, and each FIXER branch after the first carried
+        # other findings' commits into its pull request.
+        base = str(args.get("from_ref") or "").strip() or ctx.base_ref
         try:
-            branch = vcs().create_branch(name, args.get("from_ref"))
+            branch = vcs().create_branch(name, base or None)
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
-        ctx.store.log("vcs", agent=ctx.agent.name, action="create_branch", branch=branch)
-        return ok(f"Created and switched to '{branch}'.", branch=branch)
+        ctx.store.log("vcs", agent=ctx.agent.name, action="create_branch", branch=branch, base=base)
+        return ok(f"Created and switched to '{branch}' from {base or 'the current HEAD'}.",
+                  branch=branch, base=base)
 
     @tool(
         "write_file",
@@ -318,11 +423,40 @@ def build_tools(ctx: ToolContext) -> list:
             staged.append(resolved.relative_to(ctx.target_root.resolve()).as_posix())
 
         try:
-            sha = vcs().commit(message, staged)
+            adapter = vcs()
+            files = await asyncio.to_thread(adapter.stage, staged)
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
+        if not files:
+            return err("nothing staged to commit: no file under those paths has changed.")
+
+        # The matrix is applied to the *files*, not only to the pathspecs. A
+        # pathspec of `api/app` passes `_check_path`, and staging it pulled in
+        # whatever was under it -- `api/app/auth.py` changed some other way (a
+        # script run through Bash, a code generator), eight files against a
+        # budget of five -- none of which was ever checked. Counted against the
+        # budget here, which is a no-op for files `Write`/`Edit` already charged.
+        for rel in files:
+            _, file_refusal = _path_refusal(ctx, rel, count_against_budget=True)
+            if file_refusal:
+                adapter.unstage(files)
+                return _deny(ctx, "commit", f"refusing to commit {rel}: {file_refusal}")
+
+        line_refusal = _line_budget_refusal(ctx, adapter, files)
+        if line_refusal:
+            adapter.unstage(files)
+            return _deny(ctx, "commit", line_refusal)
+
+        try:
+            sha = await asyncio.to_thread(adapter.commit_files, message, files)
+        except (VcsError, NotImplementedError, ValueError) as exc:
+            return err(str(exc))
+        _charge_lines(ctx, adapter, files)
         ctx.store.log("vcs", agent=ctx.agent.name, action="commit", branch=branch, sha=sha)
-        return ok(f"Committed {sha[:10]} on {branch}.", sha=sha, branch=branch, paths=staged)
+        return ok(
+            f"Committed {sha[:10]} on {branch}: {len(files)} file(s).",
+            sha=sha, branch=branch, paths=staged, files=files,
+        )
 
     @tool(
         "diff",
@@ -337,7 +471,7 @@ def build_tools(ctx: ToolContext) -> list:
     )
     async def diff(args: dict[str, Any]) -> dict[str, Any]:
         try:
-            patch = vcs().diff(args.get("ref"), args.get("paths"))
+            patch = await asyncio.to_thread(vcs().diff, args.get("ref"), args.get("paths"))
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
         if not patch.strip():
@@ -376,7 +510,7 @@ def build_tools(ctx: ToolContext) -> list:
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
 
-        refusal = _publish_refusal(ctx, branch)
+        refusal = _publish_refusal(ctx, branch) or _security_refusal(ctx, None)
         if refusal:
             return _deny(ctx, "push", refusal)
         unsupported = _remote_refusal(adapter, "push")
@@ -384,7 +518,7 @@ def build_tools(ctx: ToolContext) -> list:
             return err(unsupported)
 
         try:
-            pushed = adapter.push(branch)
+            pushed = await asyncio.to_thread(adapter.push, branch)
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
         ctx.store.log("vcs", agent=ctx.agent.name, action="push", branch=pushed)
@@ -424,7 +558,7 @@ def build_tools(ctx: ToolContext) -> list:
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
 
-        refusal = _publish_refusal(ctx, branch)
+        refusal = _publish_refusal(ctx, branch) or _security_refusal(ctx, ticket)
         if refusal:
             return _deny(ctx, "open_pr", refusal)
         unsupported = _remote_refusal(adapter, "open_pr")
@@ -433,7 +567,12 @@ def build_tools(ctx: ToolContext) -> list:
 
         draft = args.get("draft")
         try:
-            pr = adapter.open_pr(
+            # Off the event loop, like every network call here: `gh pr create`
+            # and `git push` can take up to two minutes, and while they ran
+            # synchronously inside this async handler nothing else in the
+            # process moved -- not the router's clock, not a sibling agent.
+            pr = await asyncio.to_thread(
+                adapter.open_pr,
                 branch,
                 title,
                 body,
@@ -473,7 +612,7 @@ def build_tools(ctx: ToolContext) -> list:
         if unsupported:
             return err(unsupported)
         try:
-            patch = adapter.pr_diff(args["number"])
+            patch = await asyncio.to_thread(adapter.pr_diff, args["number"])
         except (VcsError, NotImplementedError, ValueError, KeyError) as exc:
             return err(str(exc))
         if not patch.strip():
@@ -503,7 +642,9 @@ def build_tools(ctx: ToolContext) -> list:
         if unsupported:
             return err(unsupported)
         try:
-            files = adapter.list_changed_files(str(args["base"]), str(args["head"]))
+            files = await asyncio.to_thread(
+                adapter.list_changed_files, str(args["base"]), str(args["head"])
+            )
         except (VcsError, NotImplementedError, ValueError, KeyError) as exc:
             return err(str(exc))
         return ok(", ".join(files) or "(no files changed)", files=files, count=len(files))

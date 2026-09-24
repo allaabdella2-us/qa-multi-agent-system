@@ -23,6 +23,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import urllib.error
 import urllib.request
@@ -112,6 +113,34 @@ class _Proc:
         return blob[-limit:] if blob else "(no output)"
 
 
+#: `start_new_session` and `killpg` are POSIX; Windows kills the child alone.
+_POSIX = os.name == "posix"
+
+#: How long to wait for the pipes to close once the group has been killed.
+_DRAIN_S = 5
+
+
+def _kill_group(proc: Any) -> None:
+    """Kill the child and everything it started.
+
+    `proc.kill()` reached the child alone. `docker compose` and anything a hung
+    command had spawned kept running after the tool reported the timeout --
+    and kept the pipes open, so the `communicate()` that followed the kill
+    could wait on them indefinitely. The child is started in its own session,
+    so its process group is exactly what it started.
+    """
+    if _POSIX:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+
 async def _exec(argv: list[str], timeout: float, *, stdin: bytes | None = None, cwd: Path | None = None) -> _Proc:
     """Run argv with a hard deadline, capturing output. Kills on timeout."""
     try:
@@ -121,6 +150,7 @@ async def _exec(argv: list[str], timeout: float, *, stdin: bytes | None = None, 
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=str(cwd) if cwd else None,
+            start_new_session=_POSIX,
         )
     except (OSError, ValueError) as exc:  # binary vanished between check and exec
         return _Proc(argv, 127, "", str(exc))
@@ -128,14 +158,21 @@ async def _exec(argv: list[str], timeout: float, *, stdin: bytes | None = None, 
     try:
         out, errout = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
     except (asyncio.TimeoutError, TimeoutError):
-        proc.kill()
+        _kill_group(proc)
         try:
-            await proc.communicate()
+            # Bounded: only something that left the group itself can still
+            # hold a pipe now, and it must not hold this tool call too.
+            await asyncio.wait_for(proc.communicate(), timeout=_DRAIN_S)
         except Exception:  # noqa: BLE001 - the process is already gone; nothing to salvage
             pass
         return _Proc(argv, -1, "", f"timed out after {timeout:.0f}s", timed_out=True)
+    except asyncio.CancelledError:
+        # Its own session means a Ctrl-C at the terminal no longer reaches the
+        # child, so a cancelled tool call has to stop it instead.
+        _kill_group(proc)
+        raise
 
-    return _Proc(argv, proc.returncode or 0, out.decode(errors="replace"), errout.decode(errors="replace"))
+    return _Proc(argv, proc.returncode or 0, out.decode("utf-8", errors="replace"), errout.decode("utf-8", errors="replace"))
 
 
 def docker_bin() -> str | None:
@@ -159,18 +196,39 @@ def _is_absolute_url(value: str) -> bool:
     return bool(_ABSOLUTE_URL_RE.match(value.strip()))
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Hand a 3xx back as the answer instead of following it.
+
+    `urlopen` followed redirects to any host and carried the request's headers
+    along: a 302 from the target to somewhere else sent the agent's
+    `Authorization: Bearer ...` and `X-Api-Key` there, and the agent saw a 200
+    with that other host's body -- a finding about the wrong server, paid for
+    with a credential. The redirect itself was invisible too, so "does /admin
+    redirect anonymous users to the login page?" could not be observed at all.
+    Returning None here makes urllib raise HTTPError with the 3xx, which
+    `_http_call` already reads as an ordinary status.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 - urllib's signature
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirects)
+
+
 def _http_call(
     url: str, method: str, data: bytes | None, headers: dict[str, str], timeout: float
 ) -> tuple[int | None, str, dict[str, str]]:
-    """One request, returning the status even for a 4xx/5xx.
+    """One request, returning the status even for a 3xx/4xx/5xx.
 
     An error status is the *answer* here, not a failure: "this endpoint returns
     500 for an empty cart" is the finding. `urlopen` raises on those, so
-    `HTTPError` is caught and read rather than propagated.
+    `HTTPError` is caught and read rather than propagated. A redirect is an
+    answer in the same way and is never followed -- see `_NoRedirects`.
     """
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _NO_REDIRECT_OPENER.open(request, timeout=timeout) as response:
             return response.status, response.read().decode(errors="replace"), dict(response.headers)
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode(errors="replace"), dict(exc.headers or {})
@@ -236,6 +294,17 @@ def _roles(ctx: ToolContext) -> dict[str, tuple[str, str | None]]:
     # No roles declared: the bundled demo, whose fixture password is public and
     # whose accounts exist only inside a throwaway container.
     return {name: (email, FALLBACK_PASSWORD) for name, email in FALLBACK_USERS.items()}
+
+
+def _token_at(doc: Any, path: str) -> Any:
+    """The value at `auth.token_path` in a login response -- `access_token`, or
+    a dotted path such as `data.token` for an API that nests it."""
+    node = doc
+    for part in path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
 
 
 def _default_fixture(ctx: ToolContext) -> str:
@@ -397,9 +466,14 @@ def _current_branch(target_root: Path) -> str | None:
     if git is None:
         return None
     try:
+        # UTF-8 with replacement, not `text=True`: that decoded strictly, so a
+        # branch name or a git message with one Latin-1 byte in it raised
+        # UnicodeDecodeError -- which is neither of the exceptions below --
+        # out of `spin_up` and `status` instead of returning a result.
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
             [git, "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=str(target_root), capture_output=True, text=True, timeout=10,
+            cwd=str(target_root), capture_output=True, encoding="utf-8", errors="replace",
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -441,7 +515,20 @@ def build_tools(ctx: ToolContext) -> list:
         if needs_lifecycle:
             environment = getattr(getattr(ctx.config, "profile", None), "environment", None)
             mode = getattr(environment, "mode", None)
-            if mode is not None and not getattr(environment, "is_managed", False):
+            # No profile used to mean no gate: `mode is None` skipped the check
+            # below, so a run with no target profile loaded could spin up, reseed
+            # and tear down whatever a compose file in the checkout described.
+            # The rule is "only when the profile says `compose`", and silence is
+            # not the profile saying so.
+            if mode is None:
+                return err(
+                    "No target profile is loaded, so nothing says this system owns the "
+                    "environment, and it may not create, reset or destroy it. Declare "
+                    "`environment.mode: compose` in the target profile if this run is "
+                    "meant to own a disposable instance; otherwise work against what is "
+                    "already running, or statically."
+                )
+            if not getattr(environment, "is_managed", False):
                 return err(
                     f"This target declares `environment.mode: {mode}`, so this system "
                     "does not own the environment and may not create, reset or destroy "
@@ -594,7 +681,10 @@ def build_tools(ctx: ToolContext) -> list:
 
         branch = args.get("branch")
         if branch:
-            actual = _current_branch(ctx.target_root)
+            # Off the event loop, like every other subprocess here: a sync
+            # `subprocess.run` inside an async handler stalled every other
+            # agent's tool calls for as long as git took to answer.
+            actual = await asyncio.to_thread(_current_branch, ctx.target_root)
             if actual and actual != branch:
                 return err(
                     f"You asked for branch '{branch}' but the working tree is on '{actual}'. "
@@ -632,7 +722,7 @@ def build_tools(ctx: ToolContext) -> list:
 
         state = _read_state(ctx)
         state["services"] = list(requested)
-        state["branch"] = branch or _current_branch(ctx.target_root)
+        state["branch"] = branch or await asyncio.to_thread(_current_branch, ctx.target_root)
         _write_json(_state_path(ctx), state)
         ctx.store.log("env", agent=ctx.agent.name, action="spin_up", services=list(requested), problem=problem)
 
@@ -814,7 +904,8 @@ def build_tools(ctx: ToolContext) -> list:
     @tool(
         "http_request",
         "Call an endpoint on the application under test and get back the real status, "
-        "headers and body. This is how a finding stops being a hypothesis.",
+        "headers and body. This is how a finding stops being a hypothesis. A redirect "
+        "comes back as its 3xx status and Location; it is never followed.",
         {
             "type": "object",
             "required": ["method", "path"],
@@ -895,12 +986,23 @@ def build_tools(ctx: ToolContext) -> list:
             "env", agent=ctx.agent.name, action="http_request",
             method=method, url=url, status=status,
         )
+        # A redirect is reported, never followed (`_NoRedirects`), so the
+        # `Location` is part of the answer and goes in the text the model reads.
+        location = next(
+            (v for k, v in resp_headers.items() if k.lower() == "location"), None
+        )
+        redirect = (
+            f"\nLocation: {location}\n(Redirect not followed. To see where it leads, "
+            "call http_request again with that path if it is on this application.)"
+            if 300 <= status < 400 and location else ""
+        )
         return ok(
-            f"{method} {path} -> {status}\n{body[:4000]}",
+            f"{method} {path} -> {status}{redirect}\n{body[:4000]}",
             status=status,
             url=url,
             method=method,
             headers=resp_headers,
+            location=location,
             body=body[:20000],
             truncated=len(body) > 20000,
         )
@@ -908,7 +1010,8 @@ def build_tools(ctx: ToolContext) -> list:
     @tool(
         "impersonate",
         "Get a real bearer token for a seeded user with the given role, by logging in against the "
-        "running API. Use the token in an Authorization header exactly as a browser would.",
+        "running API -- or, where the target profile uses `auth.mode: token`, the one token it "
+        "names. Use the token in an Authorization header exactly as a browser would.",
         {
             "type": "object",
             "required": ["role"],
@@ -916,9 +1019,44 @@ def build_tools(ctx: ToolContext) -> list:
         },
     )
     async def impersonate(args: dict[str, Any]) -> dict[str, Any]:
-        gate = preflight(needs_docker=False)
-        if gate:
-            return gate
+        # No `preflight` here. It asks whether a compose file exists, which is a
+        # lifecycle question, and this tool only signs in over HTTP -- so against
+        # an `external` target, where `http_request` worked, impersonate refused
+        # with "No compose file" and no agent there could act as a second role.
+        # What it needs is a running instance and a base URL, checked below.
+        environment = _environment(ctx)
+        if environment is not None and not getattr(environment, "is_reachable", False):
+            return err(
+                "This target declares `environment.mode: none`, so there is no running "
+                "instance to sign in to. Work statically, and say so in any finding "
+                "whose permission check you could not execute."
+            )
+
+        profile = getattr(ctx.config, "profile", None)
+        auth = getattr(profile, "auth", None) if profile else None
+        # `auth.mode: token` -- one bearer token named by `auth.token_env` --
+        # was in the schema and in the task brief ("`env_control.impersonate`
+        # will hand it to you"), and this tool ignored it: it fell through to
+        # the login path and POSTed demo accounts at a target that has no login.
+        if getattr(auth, "mode", None) == "token":
+            var = getattr(auth, "token_env", None)
+            token = os.environ.get(var) if var else None
+            if not token:
+                return err(
+                    f"This target authenticates with a bearer token from environment "
+                    f"variable {var or '(auth.token_env, which is not set)'}, and it is "
+                    "unset. Export it and try again -- credentials are never read from "
+                    "the profile itself."
+                )
+            ctx.store.log("env", agent=ctx.agent.name, action="impersonate", role=str(args["role"]), mode="token")
+            return ok(
+                f"This target authenticates with one bearer token (${var}) rather than a "
+                "login, so this is that token whatever role you asked for -- it cannot "
+                "show you a second role. Pass the `token` below to "
+                "http_request(token=...).",
+                role=str(args["role"]), token=token, mode="token",
+            )
+
         # Case-blind on BOTH sides. The argument was lowercased and then looked
         # up in a dict whose keys come straight from `profile.auth.roles` with
         # no normalisation, so a profile declaring `Admin` could never be
@@ -941,8 +1079,6 @@ def build_tools(ctx: ToolContext) -> list:
             )
         email, password = entry
         if not password:
-            profile = getattr(ctx.config, "profile", None)
-            auth = getattr(profile, "auth", None) if profile else None
             var = getattr(getattr(auth, "roles", {}).get(role, None), "password_env", "QAAS_PASSWORD")
             return err(
                 f"Role '{role}' names environment variable {var} for its password and it is unset. "
@@ -956,7 +1092,6 @@ def build_tools(ctx: ToolContext) -> list:
         # target-agnostic. Any application whose API service happens to be
         # called "web" was unreachable; any whose frontend is called something
         # else had its login POSTed at the frontend.
-        environment = _environment(ctx)
         base = os.environ.get("QAAS_TARGET_BASE_URL") or getattr(environment, "api_url", None)
         if not base:
             compose = _load_compose(compose_file)
@@ -974,27 +1109,19 @@ def build_tools(ctx: ToolContext) -> list:
 
         # Field names come from the profile: not every API calls them
         # "email" and "password".
-        profile = getattr(ctx.config, "profile", None)
-        auth = getattr(profile, "auth", None) if profile else None
         user_field = getattr(auth, "username_field", None) or "email"
         pass_field = getattr(auth, "password_field", None) or "password"
         payload = json.dumps({user_field: email, pass_field: password}).encode()
-        request = urllib.request.Request(
-            f"{base.rstrip('/')}{_login_path(ctx)}", data=payload,
-            headers={"Content-Type": "application/json"}, method="POST",
+
+        # Through `_http_call`, so a login that redirects is reported as the
+        # redirect it is rather than followed to wherever it points -- the same
+        # rule `http_request` holds, for the one request here that carries a
+        # password.
+        status, body, _ = await asyncio.to_thread(
+            _http_call, f"{base.rstrip('/')}{_login_path(ctx)}", "POST", payload,
+            {"Content-Type": "application/json"}, LOGIN_TIMEOUT_S,
         )
-
-        def _post() -> tuple[int, str]:
-            try:
-                with urllib.request.urlopen(request, timeout=LOGIN_TIMEOUT_S) as resp:  # noqa: S310 - fixed http scheme
-                    return resp.status, resp.read().decode(errors="replace")
-            except urllib.error.HTTPError as exc:
-                return exc.code, exc.read().decode(errors="replace")
-            except (urllib.error.URLError, OSError, TimeoutError) as exc:
-                return 0, str(exc)
-
-        status, body = await asyncio.to_thread(_post)
-        if status == 0:
+        if status is None:
             return err(
                 f"Could not reach the API at {base} ({body}). Call spin_up first; "
                 "if it is up, the api service is not healthy."
@@ -1008,13 +1135,18 @@ def build_tools(ctx: ToolContext) -> list:
             doc = json.loads(body)
         except json.JSONDecodeError:
             return err(f"Login returned HTTP 200 but not JSON: {body[:200]}")
-        token = doc.get("access_token")
-        if not token:
-            return err(f"Login response has no access_token: {body[:200]}")
+        # `auth.token_path` names where the token sits in the response, and was
+        # never read: a login answering `{"data": {"token": ...}}` came back
+        # "has no access_token" for a profile that had said where to look.
+        token_path = getattr(auth, "token_path", None) or "access_token"
+        token = _token_at(doc, token_path)
+        if not token or not isinstance(token, str):
+            return err(f"Login response has no {token_path}: {body[:200]}")
 
         ctx.store.log("env", agent=ctx.agent.name, action="impersonate", role=role, email=email)
         return ok(
-            f"Signed in as {email} ({doc.get('role', role)}). Send header: Authorization: Bearer <token>.",
+            f"Signed in as {email} ({doc.get('role', role)}). Pass the `token` below "
+            "to http_request(token=...) to call as this role.",
             role=doc.get("role", role), email=email, token=token, base_url=base,
         )
 
@@ -1049,7 +1181,7 @@ def build_tools(ctx: ToolContext) -> list:
         payload = {
             "services": services,
             "fixture": env_state.get("fixture"),
-            "branch": env_state.get("branch") or _current_branch(ctx.target_root),
+            "branch": env_state.get("branch") or await asyncio.to_thread(_current_branch, ctx.target_root),
             "flags": flags.get("flags", {}),
             "clock": flags.get("clock"),
         }

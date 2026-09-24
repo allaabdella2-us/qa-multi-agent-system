@@ -6,9 +6,12 @@ while the installed SDK uses PascalCase events and `HookMatcher(matcher=, hooks=
 Rather than trust either, this module reads the truth out of the installed
 package at import time and fails loudly if it changes under us.
 
-Guardrails do not depend on hooks working (they live in `can_use_tool`), so a
-drift here degrades observability, not enforcement — but it should still be a
-noisy failure rather than a silent one.
+This matters more than observability. Primary enforcement lives in the
+`PreToolUse` hook (`guardrails.Guardrail.pre_tool_use`), because an
+`allowed_tools` entry auto-approves a tool before `can_use_tool` is consulted --
+and the `Stop` hook is what holds each agent to its `must_call` contract. A hook
+event renamed under us would switch both off without an error, so a drift here
+must fail loudly at import.
 """
 
 from __future__ import annotations
@@ -17,9 +20,24 @@ import typing
 
 from claude_agent_sdk import types as _sdk_types
 
-_EVENTS: tuple[str, ...] = tuple(
-    typing.get_args(arg)[0] for arg in typing.get_args(_sdk_types.HookEvent)
-)
+
+def _literal_values(annotation: object) -> tuple[str, ...]:
+    """Every string in a `Literal[...]`, however it is nested in unions.
+
+    `HookEvent` was a Union of single-value Literals, and this read `[0]` of
+    each -- so the day the SDK writes it as one `Literal["A", "B", ...]`, an
+    ordinary refactor, the import raised a bare IndexError instead of the
+    helpful error below, taking every `qaas` command down with it.
+    """
+    if isinstance(annotation, str):
+        return (annotation,)
+    values: list[str] = []
+    for arg in typing.get_args(annotation):
+        values.extend(_literal_values(arg))
+    return tuple(values)
+
+
+_EVENTS: tuple[str, ...] = _literal_values(_sdk_types.HookEvent)
 
 PRE_TOOL_USE = "PreToolUse"
 POST_TOOL_USE = "PostToolUse"

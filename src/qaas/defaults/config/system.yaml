@@ -14,6 +14,16 @@ vcs: local          # local | github
 # is the model-agnostic bound. Set `max_budget_usd` here if you want a
 # ceiling; the governor enforces one whenever it is present.
 
+# The operating-system sandbox around the shell of every agent that has Bash
+# (FIXER, REPRODUCER, VERIFIER): writes stay in the target and a private temp
+# directory, credential stores are unreadable, and the network reaches only the
+# target's own hosts and localhost. macOS works out of the box; Linux needs
+# `bubblewrap` and `socat`. `auto` runs unsandboxed -- and records it -- where
+# the OS cannot; `required` fails the agent instead; `off` disables it.
+sandbox:
+  mode: auto
+  allowed_domains: []   # extra hosts a sandboxed command may reach
+
 thresholds:
   min_confidence_to_file: 0.6      # §7 confidence gate
   max_findings_per_agent_run: 25   # §8.3 loop breaker: pause and escalate, don't file

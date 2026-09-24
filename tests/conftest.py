@@ -62,3 +62,27 @@ for _leaked in ("QAAS_TRACKER", "QAAS_VCS", "QAAS_CONFIG_DIR", "QAAS_HOME"):
 #: legitimate state -- so the demo name belongs here, in this repository's own
 #: test setup, and not in the defaults everyone else receives.
 os.environ.setdefault("QAAS_TARGET", "corvid")
+
+
+import shutil as _shutil  # noqa: E402
+
+import pytest as _pytest  # noqa: E402
+
+
+@_pytest.fixture(scope="session", autouse=True)
+def _remove_sandbox_tmpdirs():
+    """Remove the private temp directories `build_options` made for this session.
+
+    Every sandboxed agent's options come with one (`sandbox.make_tmpdir`), and
+    in production the runner removes it when the turn ends. A test that builds
+    options without running a turn has nobody to remove it, and the suite left
+    dozens in `/tmp`. They stay under `/tmp` rather than pytest's own temp
+    directory on purpose: the sandbox puts its sockets inside, and macOS's long
+    temp prefix leaves no room under the 104-byte socket path limit.
+    """
+    root = Path("/tmp")
+    before = set(root.glob("qaas-*-*")) if root.is_dir() else set()
+    yield
+    if root.is_dir():
+        for path in set(root.glob("qaas-*-*")) - before:
+            _shutil.rmtree(path, ignore_errors=True)

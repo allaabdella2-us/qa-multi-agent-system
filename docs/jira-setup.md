@@ -52,13 +52,19 @@ committed. Export these in the shell that runs `qaas`.
 
 | Variable | Required | What it does | What breaks without it |
 |---|---|---|---|
-| `JIRA_BASE_URL` | yes | Your site root, e.g. `https://acme.atlassian.net`. No `/jira`, no `/rest/api` path, and the scheme is not optional. | The tracker refuses to construct. A value without a scheme is rejected by name at startup. |
+| `JIRA_BASE_URL` | yes | Your site root, e.g. `https://acme.atlassian.net`. No `/jira`, no `/rest/api` path, and the scheme is not optional — it must be `https://` (plain `http://` is accepted only for `localhost`, because every call carries the token as a Basic credential). | The tracker refuses to construct. A value without a scheme, or plain `http` to a real host, is rejected by name at startup. |
 | `JIRA_EMAIL` | yes | The Atlassian account email the API token was minted for. Jira Cloud authenticates with HTTP Basic over email + token. | 401 on every call. A token paired with the wrong email is indistinguishable from a revoked one. |
 | `JIRA_API_TOKEN` | yes | An API token from the URL above. | 401 on every call. |
 | `JIRA_PROJECT_KEY` | yes | The project ordinary findings go to, e.g. `ENG`. | The tracker refuses to construct. |
 | `JIRA_SECURITY_PROJECT_KEY` | no, but read this | The restricted project security findings go to. | **Security-relevant findings are refused rather than filed.** They are not filed into the public project as a fallback. See below. |
 | `JIRA_ISSUE_TYPE` | no | The issue type to create. Defaults to `Bug`. | A 400 from Jira if the project has no type called `Bug` — some projects call it `Defect`, or `Task`. |
 | `QAAS_TRACKER_DRY_RUN` | no | Set to `1` to rehearse every tracker write instead of performing it. | Nothing. Off by default; this is the safety rail, not a feature. |
+
+These two projects are the **only** ones the system touches. `create_issue`,
+`transition`, `link` and `search` are all scoped to `JIRA_PROJECT_KEY` and
+`JIRA_SECURITY_PROJECT_KEY`: an agent that names any other project, or a ticket
+key in one, is refused before anything is sent — even when the bot account could
+reach it.
 
 All four required variables are read and validated when the tracker is built,
 before any agent starts work. That is on purpose: a tracker that discovers it
@@ -67,11 +73,20 @@ run, because those findings live in an agent's context and the context is gone.
 
 ### Why a missing `JIRA_SECURITY_PROJECT_KEY` refuses rather than falls back
 
-A finding is routed as restricted when the reporting agent flagged security
-impact, or when the defect is classified as a vulnerability. If no restricted
-project is configured, `create_issue` **refuses the finding and tells the agent
-to escalate it to a human through a private channel** — it does not file it
-anywhere.
+Every ticket is filed from exactly one finding: `create_issue` requires the
+finding's `envelope_id`, and the routing is read from that envelope — not from
+anything the filing agent says. A finding is routed as restricted when its
+domain is `security`, its class is `vulnerability`, or the discovering agent
+marked it security-relevant; naming the public project for it does not move it
+there. A finding that already carries a ticket is refused, so a retry after a
+lost reply cannot file it twice. If no restricted project is configured,
+`create_issue` **refuses the finding and tells the agent to escalate it to a
+human through a private channel** — it does not file it anywhere.
+
+The fix for a security finding is held back the same way: FIXER may commit it
+on a local branch, but the vcs tools refuse to push that branch or open a pull
+request for it, because a public branch and PR describe the vulnerability as
+plainly as a ticket would. A human publishes it.
 
 That is the correct behaviour and it is enforced in code, not in a prompt. A
 vulnerability filed into a project the whole company can read is a disclosure,
@@ -144,9 +159,14 @@ trying the house name and a list of common aliases.
 `tracker-check` shows you that mapping in advance. Four of those statuses are
 **driven by the system** and an unmapped one is a failure, not a note:
 
-* `open` — a reopened ticket
-* `in_progress` — TRIAGE picking work up
+* `open` — VERIFIER reopening a ticket whose fix did not hold
+* `in_progress` — FIXER picking the ticket up, before it touches code
 * `resolved`, `closed` — VERIFIER closing a ticket whose fix it verified
+
+Each agent may move a ticket only to the statuses its own task names, and the
+tool refuses the rest: FIXER to `in_progress` or `in_review`, VERIFIER to
+`open`, `resolved` or `closed`. TRIAGE files and never transitions. So no
+agent can close its own ticket, and FIXER cannot mark its own fix done.
 
 If `resolved` has nowhere to land, the run reports a verified fix and the ticket
 stays open, and nobody notices until someone audits the board. `tracker-check`
@@ -299,6 +319,10 @@ afternoon debugging the wrong one.
 | `this Jira has no link type usable for '…'; it offers: …` | The instance's link types were customised and even `Relates` is gone. | Add a link type, or accept unlinked duplicates. |
 | `Jira accepted the issue but returned no key` | Jira answered a create with no key in the body. Rare; usually a proxy rewriting responses. | Check what sits between you and Jira. |
 | `Refused: this is a security-relevant finding and this tracker has no restricted project configured` | Working as designed. | Set `JIRA_SECURITY_PROJECT_KEY`, or handle the finding through a private channel. It will not be filed publicly. |
+| `JIRA_BASE_URL is '…', which is plain http` | The base URL uses `http://` for a real host, so the token would cross the network unencrypted. | Use `https://`. Plain `http` is accepted only for `localhost` / `127.0.0.1` (a local test stub). |
+| `'…' is not a project this tracker works in` / `Refused: '…' is not a project this system files into` / `Refused: … is in project '…', and this system works only in …` | An agent named a project, or a ticket key, outside `JIRA_PROJECT_KEY` and `JIRA_SECURITY_PROJECT_KEY`. Nothing was sent. | Nothing to fix unless the project should be in scope — then change the two variables. |
+| ``Refused: `envelope_id` is required`` / `Refused: envelope … is already filed as …` | TRIAGE tried to file without naming the finding, or to file one that already has a ticket. | Nothing to fix; the agent is told which envelope to name. The second is the double-filing guard working. |
+| `Refused: FIXER may move a ticket only to …` | An agent asked for a status its task does not name. | Nothing to fix; it is the per-agent status rule above. |
 | `Ticket cap reached (N for this run)` | The per-run cap in `config/system.yaml`. | This is an escalation, not a filing problem: hitting the cap means something upstream is wrong, and forty more tickets will not fix it. Read the run before raising the cap. |
 | `an issue needs a title` / `unknown status '…'` / `unknown link type '…'` / `'…' is not an issue key` | An agent sent something invalid. Nothing was sent to Jira. | Nothing to fix; the agent is told the valid values and retries. |
 

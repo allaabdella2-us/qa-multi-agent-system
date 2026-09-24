@@ -49,13 +49,13 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 > PyPI: https://pypi.org/project/qaas-python/
 > Code and architecture: https://github.com/allaabdella2-us/qa-multi-agent-system
-> 989 tests run offline with no API key, so you can read how the guardrails work before spending anything.
+> 1,522 tests run offline with no API key, so you can read how the guardrails work before spending anything.
 
 ### Variant B — the builder's post (engineering audience)
 
 > The design decision that shaped everything in qaas: the orchestrator is code, not a prompt. A model cannot enforce a budget it is itself spending.
 >
-> qaas is an open-source harness around Claude Code itself. Not a program that calls an API: sixteen real Claude Code sessions, each with its own context, tool allowlist and budget, run through map → discover → synthesise → reproduce → file → fix → review → verify → report. The router that orders them, caps their concurrency, governs the budget and can refuse any tool call any of them makes is a Python state machine. That is also why 989 tests run offline, free, with no API key.
+> qaas is an open-source harness around Claude Code itself. Not a program that calls an API: sixteen real Claude Code sessions, each with its own context, tool allowlist and budget, run through map → discover → synthesise → reproduce → file → fix → review → verify → report. The router that orders them, caps their concurrency, governs the budget and can refuse any tool call any of them makes is a Python state machine. That is also why 1,522 tests run offline, free, with no API key.
 >
 > Three things are enforced in code rather than requested in a prompt:
 >
@@ -77,7 +77,7 @@ House rules that apply to every variant: no "revolutionary", no "10x", no
 
 ### Variant C — short (repost or comment thread)
 
-> Open-sourced qaas: sixteen governed Claude Code sessions that find defects in a running application, reproduce each one into a failing test, file it, fix it, verify the fix, and move the ticket to Done on your Jira board. The orchestrator is Python, not a prompt. No merge method exists. 989 tests run without an API key.
+> Open-sourced qaas: sixteen governed Claude Code sessions that find defects in a running application, reproduce each one into a failing test, file it, fix it, verify the fix, and move the ticket to Done on your Jira board. The orchestrator is Python, not a prompt. No merge method exists. 1,522 tests run without an API key.
 >
 > Real numbers: 14 of 15 reproductions became failing tests; a real React site yielded 17 findings for about $20.
 >
@@ -96,8 +96,9 @@ refuses them and records them. That is precisely what the product is:
 |---|---|
 | ordering, concurrency, budget, loop breakers | `router.py`, a Python state machine |
 | refusal of writes, branches, merges | `guardrails.py`, a `PreToolUse` hook |
+| the shell, at the kernel | `sandbox.py` — Seatbelt or bubblewrap: writes stay in the checkout, credential stores are unreadable, the network reaches only the target |
 | what may be filed | `has_evidence()` / `is_fileable()` on the envelope model |
-| the record | `ledger.jsonl`, 28 event kinds, append-only |
+| the record | `ledger.jsonl`, 30 event kinds, append-only |
 
 The agents are replaceable data: a prompt plus a YAML file. DBA and AUDITOR were
 added without touching the router, the runner, the registry or the guardrails.
@@ -266,9 +267,16 @@ guardrail. Pull requests open as drafts.
 
 **Can a repository it inspects attack it?**
 It loads no settings, hooks or MCP servers from the target's filesystem
-(`setting_sources=[]`). A cloned repository cannot inject anything into the
-process holding your credentials. Credentials themselves are never in a profile;
-profiles name environment variables.
+(`setting_sources=[]`), so a cloned repository cannot configure the process
+holding your credentials. Its *code* does run — that is what running its test
+suite means — so it runs where it can do least. Every shell an agent opens runs
+in an OS sandbox (Seatbelt on macOS, bubblewrap on Linux): writes stay inside
+the checkout, credential stores such as `~/.ssh` and `~/.config/gh` are
+unreadable, and the network reaches only the target's own hosts. The agents'
+environment carries no Jira or GitHub token at all. Where the OS cannot sandbox
+a shell, `qaas doctor` says so and the parsed guardrails are what remain.
+Credentials themselves are never in a profile; profiles name environment
+variables.
 
 **Is it safe to let it write to my Jira?**
 Every ticket carries a repository label and a defect fingerprint, stamped in
@@ -345,7 +353,7 @@ implementation, and the plan for it is written down in `PROVIDERS_PLAN.md`.
 
 **"It's just prompts."**
 The prompts are the least of it. The router, the guardrails, the evidence gate
-and the ledger are Python, and 989 tests exercise them without a model in the
+and the ledger are Python, and 1,522 tests exercise them without a model in the
 loop. Ask which part of a competitor's system still works with the API key
 removed.
 

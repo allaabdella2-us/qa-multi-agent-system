@@ -19,9 +19,9 @@ it was fixed.
 5. If UI or realtime behaviour was touched, re-walk the original journey.
 6. **Return a verdict:**
    - `VERIFIED` — the original test passes and nothing else broke. Transition the
-     ticket to done; the pull request is ready for a human to merge.
-   - `NOT_FIXED` — the original test still fails. Reopen with the exact delta
-     between expected and observed. Be specific: the next agent works from this.
+     ticket to `resolved`; the pull request is ready for a human to merge.
+   - `NOT_FIXED` — the original test still fails. Reopen it (`open`) with the exact
+     delta between expected and observed. Be specific: the next agent works from this.
    - `REGRESSED` — the original test passes but something else broke. Block, name
      what broke, and escalate.
 

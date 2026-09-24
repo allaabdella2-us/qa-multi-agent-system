@@ -20,6 +20,7 @@ access and no more.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import subprocess
@@ -128,18 +129,27 @@ class LocalGit(VcsAdapter):
         """
         if self._verified_root:
             return
-        proc = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=self.repo, capture_output=True, text=True,
-            timeout=self.timeout_s, check=False,
-        )
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=self.repo, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=self.timeout_s, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VcsError(f"git rev-parse timed out after {self.timeout_s}s") from exc
+        except OSError as exc:  # git missing, repo path gone
+            raise VcsError(f"could not run git: {exc}") from exc
         if proc.returncode != 0:
             raise VcsError(
                 f"{self.repo} is not a git repository, so there is nowhere to branch or "
                 f"commit. Run `git init` there, or point the target profile at a checkout."
             )
         toplevel = Path(proc.stdout.strip()).resolve()
-        if toplevel != self.repo:
+        # `samefile`, not `!=`: on a case-insensitive filesystem a profile that
+        # spells the directory `~/Code/api` while git reports `~/code/api` names
+        # the same checkout, and was refused as "inside another repository".
+        if toplevel != self.repo and not _same_dir(toplevel, self.repo):
             raise VcsError(
                 f"{self.repo} is inside the git repository at {toplevel}, not its own. "
                 "Refusing: git does not stop at a directory boundary, so branching or "
@@ -156,11 +166,18 @@ class LocalGit(VcsAdapter):
         if args and args[0] in _MUTATING_GIT:
             self._require_own_repo()
         try:
+            # `errors="replace"`: a Latin-1 source file in a diff, or one such
+            # byte in a commit message, made strict decoding raise out of the
+            # tool and lose the whole result.
             proc = subprocess.run(
                 ["git", *args],
                 cwd=self.repo,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                env=_NO_PROMPT_ENV(),
                 timeout=self.timeout_s,
                 check=False,
             )
@@ -217,6 +234,22 @@ class LocalGit(VcsAdapter):
         return written
 
     def commit(self, message: str, paths: Sequence[str] | None = None) -> str:
+        files = self.stage(paths)
+        if not files:
+            raise VcsError("nothing staged to commit")
+        return self.commit_files(message, files)
+
+    def stage(self, paths: Sequence[str] | None = None) -> list[str]:
+        """Stage `paths` and return exactly the files now staged under them.
+
+        The return value is the point. `commit` used to `git add` the paths and
+        then run a bare `git commit`, which commits the whole *index* -- so a
+        `secret.env` the operator had staged before the run, or a previous
+        finding's files left staged when a pre-commit hook rejected its commit,
+        went into this agent's commit, and could be pushed from there. What is
+        staged under the requested paths is what gets committed, by name, and
+        nothing else; anything else in the index is left exactly where it was.
+        """
         if paths:
             # One pathspec at a time, tolerating the ones that match nothing.
             # `git add -- a b c` is all-or-nothing: a single unmatched pathspec
@@ -224,16 +257,42 @@ class LocalGit(VcsAdapter):
             # *nothing* is staged. Callers pass the agent's `write_paths`, and a
             # repository that simply has no `web/src` -- an API-only service --
             # made every commit fail with an error about a directory the agent
-            # was never going to touch. What actually got staged is checked
-            # below, so a genuinely empty commit still refuses.
+            # was never going to touch.
             for path in paths:
                 self._git("add", "--", path, check=False)
-        else:
-            self._git("add", "-A")
-        staged = self._git("diff", "--cached", "--name-only").strip()
-        if not staged:
+            return [f for f in self.staged_files() if any(_within(f, p) for p in paths)]
+        self._git("add", "-A")
+        return self.staged_files()
+
+    def staged_files(self) -> list[str]:
+        """Every path in the index that differs from HEAD, renames split in two."""
+        out = self._git("diff", "--cached", "--name-only", "--no-renames")
+        return [line for line in out.splitlines() if line.strip()]
+
+    def staged_line_count(self, files: Sequence[str]) -> int:
+        """Lines added plus removed across `files`, as staged. Binary files count 0."""
+        if not files:
+            return 0
+        out = self._git("diff", "--cached", "--numstat", "--no-renames", "--", *files)
+        return _sum_numstat(out)
+
+    def committed_line_count(self, files: Sequence[str], ref: str = "HEAD") -> int:
+        """Lines added plus removed across `files` in the commit at `ref`."""
+        if not files:
+            return 0
+        out = self._git("show", "--numstat", "--no-renames", "--format=", ref, "--", *files)
+        return _sum_numstat(out)
+
+    def unstage(self, files: Sequence[str]) -> None:
+        """Put `files` back to unstaged. Best-effort: a repo with no commit has no HEAD."""
+        if files:
+            self._git("reset", "-q", "--", *files, check=False)
+
+    def commit_files(self, message: str, files: Sequence[str]) -> str:
+        """Commit exactly `files` -- `git commit -- <paths>` ignores the rest of the index."""
+        if not files:
             raise VcsError("nothing staged to commit")
-        self._git(*self._identity_args(), "commit", "-m", message)
+        self._git(*self._identity_args(), "commit", "-m", message, "--", *files)
         return self._git("rev-parse", "HEAD").strip()
 
     def diff(self, ref: str | None = None, paths: Sequence[str] | None = None) -> str:
@@ -283,6 +342,41 @@ _GH_UNAUTHENTICATED = (
     "adapter deliberately holds no token of its own and reuses your gh "
     "credentials), or set `vcs: local` in config/system.yaml."
 )
+
+
+def _NO_PROMPT_ENV() -> dict[str, str]:  # noqa: N802 - reads as the constant it stands for
+    """This process's environment, minus any chance of an interactive prompt.
+
+    An HTTPS push with no credential helper put a password prompt on the
+    operator's terminal and hung the agent's turn for the full timeout.
+    """
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+
+
+def _sum_numstat(out: str) -> int:
+    """`added<TAB>removed<TAB>path` lines, summed. Binary files (`-`) count 0."""
+    total = 0
+    for line in out.splitlines():
+        added, _, rest = line.partition("\t")
+        removed = rest.partition("\t")[0]
+        if added.isdigit() and removed.isdigit():
+            total += int(added) + int(removed)
+    return total
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:
+        return False
+
+
+def _within(path: str, spec: str) -> bool:
+    """Is a repo-relative file covered by a pathspec an agent asked to stage?"""
+    spec = spec.strip().rstrip("/")
+    if spec in ("", "."):
+        return True
+    return path == spec or path.startswith(spec + "/") or fnmatch.fnmatch(path, spec)
 
 
 def _reject_flaglike(kind: str, value: str) -> str:
@@ -374,8 +468,6 @@ class GitHubVcs(LocalGit):
     # override what `gh` would infer from the checkout's remotes.
     OPTIONAL_ENV = ("GITHUB_REPOSITORY", "GITHUB_DEFAULT_BRANCH")
 
-    DEFAULT_BASE = "main"
-
     def __init__(
         self,
         repo: Path | str,
@@ -419,9 +511,17 @@ class GitHubVcs(LocalGit):
         """`gh api` expands `{owner}`/`{repo}` from the checkout when unset."""
         return self.repo_slug or "{owner}/{repo}"
 
-    def default_base(self) -> str:
-        """Base branch for a new PR when the caller names none."""
-        return os.environ.get("GITHUB_DEFAULT_BRANCH") or self.DEFAULT_BASE
+    def default_base(self) -> str | None:
+        """Base branch for a new PR when the caller names none, or None for
+        "the repository's own default", which `gh pr create` resolves itself.
+
+        This returned `"main"` whenever `GITHUB_DEFAULT_BRANCH` was unset, while
+        the tool told the agent it defaulted to the repository's default. In a
+        repository whose default is `master`, every `open_pr` failed -- and
+        FIXER's `must_call` is `open_pr`; in one with a stale `main` beside a
+        default `develop`, the PR targeted the wrong branch.
+        """
+        return os.environ.get("GITHUB_DEFAULT_BRANCH") or None
 
     @staticmethod
     def _guard_head(branch: str) -> str:
@@ -469,7 +569,8 @@ class GitHubVcs(LocalGit):
         see AUTOMATION_NOTICE.
         """
         head = self._guard_head(branch)
-        base_ref = _reject_flaglike("base", base or self.default_base())
+        chosen = base or self.default_base()
+        base_ref = _reject_flaglike("base", chosen) if chosen else None
         subject = str(title).strip()
         if not subject:
             raise VcsError("a PR needs a title.")
@@ -490,7 +591,7 @@ class GitHubVcs(LocalGit):
             "create",
             *self._repo_args(),
             f"--head={head}",
-            f"--base={base_ref}",
+            *([f"--base={base_ref}"] if base_ref else []),
             f"--title={subject}",
             f"--body={self.pr_body(body, key)}",
         ]
@@ -578,6 +679,10 @@ def _run_gh(argv: list[str], cwd: Path, timeout_s: int, *, check: bool = True) -
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            env=_NO_PROMPT_ENV(),
             timeout=timeout_s,
             check=False,
         )

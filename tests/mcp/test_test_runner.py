@@ -586,12 +586,13 @@ def test_an_unreadable_package_json_falls_back_rather_than_raising(tmp_path):
 
 
 def test_a_js_id_is_split_into_a_file_and_a_title(tmp_path):
-    """vitest and jest have no nodeid: a file narrows, `-t` matches the title."""
+    """vitest and jest have no nodeid: a file narrows, the name pattern matches
+    the title. One token, so the title is a value and never a flag."""
     root = _package_json(tmp_path / "e", devDependencies={"vitest": "^2.0.0"})
     assert tr._single_selectors(root, "src/lib/dates.test.ts::utcDayKey works") == [
-        "src/lib/dates.test.ts", "-t", "utcDayKey works",
+        "src/lib/dates.test.ts", "--testNamePattern=utcDayKey works",
     ]
-    assert tr._single_selectors(root, "utcDayKey works") == ["-t", "utcDayKey works"]
+    assert tr._single_selectors(root, "utcDayKey works") == ["--testNamePattern=utcDayKey works"]
 
 
 def test_a_pytest_nodeid_is_still_passed_through_whole(tmp_path):
