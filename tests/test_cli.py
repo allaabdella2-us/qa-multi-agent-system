@@ -105,7 +105,7 @@ def test_a_rehearsal_is_not_refused_for_a_danger_it_cannot_reach(runner, tmp_pat
         ["run", "--mode", "pr-check", "--config", str(project / ".qaas" / "config")],
     )
     assert real.exit_code == 1, real.output
-    assert "not its own" in real.output
+    assert "not its own" in " ".join(real.output.split())  # Rich wraps long paths
 
 
 def test_unknown_agent_is_rejected_before_anything_runs(runner):

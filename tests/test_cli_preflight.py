@@ -116,7 +116,9 @@ def test_sweep_refuses_a_target_inside_an_enclosing_repository(runner, tmp_path,
     subprocess.run(["git", "init", "-q", str(project)], check=True)
     result = runner.invoke(cli.app, ["sweep", "--mode", "pr-check"])
     assert result.exit_code == 1, result.output
-    assert "not its own" in result.output
+    # Whitespace-folded: Rich wraps at 80 columns, and a long temp path (CI's
+    # `/tmp/pytest-of-runner/...`) put the line break inside the phrase.
+    assert "not its own" in " ".join(result.output.split())
     assert calls["router"] == 0
 
 
