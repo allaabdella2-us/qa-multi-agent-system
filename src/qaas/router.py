@@ -1221,7 +1221,12 @@ class Router:
             or self._base_ref
             or "main"
         )
-        fix_branch: str | None = None
+        # A resumed cycle verifies the fix it already has. Starting VERIFIER on
+        # the reproduction branch -- which by construction carries no fix --
+        # guaranteed NOT_FIXED and a fresh FIXER round, so a ticket whose fix a
+        # reviewer had approved, or a human had answered `proceed` on, could
+        # never simply be re-verified.
+        fix_branch: str | None = self._prior_fix_branch(store, ticket)
 
         #: What the last VERIFIER actually observed, carried into the next fix
         #: attempt. Without it `_remediate` re-dispatches FIXER with a
@@ -1355,7 +1360,11 @@ class Router:
             # raised the question re-raises it having never been told the
             # answer, and the human answers the same escalation every run.
             await self._dispatch(reviewer, store, budget, report,
-                                 tasks.reviewer(ticket, envelope, self.config, guidance=guidance), map_version)
+                                 tasks.reviewer(
+                                     ticket, envelope, self.config, guidance=guidance,
+                                     branch=self._branch_written_since(store, vcs_mark),
+                                     base=self._base_ref,
+                                 ), map_version)
             entry = self._entry_since(store, "review", ticket, review_mark)
             review = entry.detail.get("decision") if entry else None
             if review == "APPROVE":
@@ -1438,6 +1447,34 @@ class Router:
             branch = entry.detail.get("branch")
             if branch:
                 return str(branch)
+        return None
+
+    def _prior_fix_branch(self, store, ticket: str) -> str | None:
+        """The fix branch an earlier round left for `ticket`, if it may be verified now.
+
+        Only an *approved* one: the last word on the ticket must be REVIEWER's
+        APPROVE, or a human's `proceed` recorded after the last review. A fix a
+        reviewer rejected is not one to certify. The branch must still exist.
+        """
+        last = None
+        for entry in store.ledger():
+            if entry.detail.get("ticket_key") != ticket:
+                continue
+            if entry.kind == "review":
+                last = entry.detail.get("decision") == "APPROVE"
+            elif entry.kind == "human_decision":
+                last = entry.detail.get("decision") == HumanDecision.PROCEED
+        if not last:
+            return None
+        for entry in reversed(list(store.ledger("vcs"))):
+            branch = str(entry.detail.get("branch") or "")
+            if entry.agent != "FIXER" or not branch:
+                continue
+            scope = entry.detail.get("scope")
+            # Ledgers written before vcs entries carried a scope name the ticket
+            # in the branch, by FIXER's own convention.
+            if scope == ticket or (scope is None and ticket.upper() in branch.upper()):
+                return self._existing_ref(branch)
         return None
 
     @staticmethod

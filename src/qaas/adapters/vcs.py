@@ -72,8 +72,11 @@ class VcsAdapter(ABC):
         """Stage `paths` (all tracked changes if None) and commit. Returns the sha."""
 
     @abstractmethod
-    def diff(self, ref: str | None = None, paths: Sequence[str] | None = None) -> str:
-        """Unified diff of the working tree, optionally against `ref`."""
+    def diff(
+        self, ref: str | None = None, paths: Sequence[str] | None = None, head: str | None = None
+    ) -> str:
+        """Unified diff of the working tree against `ref`, or of `ref...head` when
+        `head` is given -- committed history only, the working tree ignored."""
 
     @abstractmethod
     def list_branches(self) -> list[str]:
@@ -295,14 +298,24 @@ class LocalGit(VcsAdapter):
         self._git(*self._identity_args(), "commit", "-m", message, "--", *files)
         return self._git("rev-parse", "HEAD").strip()
 
-    def diff(self, ref: str | None = None, paths: Sequence[str] | None = None) -> str:
+    def diff(
+        self, ref: str | None = None, paths: Sequence[str] | None = None, head: str | None = None
+    ) -> str:
         # `ref` reached argv raw while `pr_diff` and `list_changed_files` both
         # called `_reject_flaglike` on theirs. `git diff --output=<path>` exits 0
         # and writes the diff to that path, so the one tool documented
         # "read-only" could create or truncate any file the process can reach --
         # and REVIEWER, whose policy grants no write access at all, holds it.
         args = ["diff"]
-        if ref:
+        if head:
+            # Committed history only: what a pull request from `head` would
+            # contain. A working-tree diff also shows whatever else is
+            # uncommitted in the checkout -- a real REVIEWER blocked a correct
+            # fix for "editing the golden ledger", which was the operator's own
+            # uncommitted edit and in none of FIXER's commits.
+            base = _reject_flaglike("ref", ref or "HEAD")
+            args.append(f"{base}...{_reject_flaglike('head', head)}")
+        elif ref:
             args.append(_reject_flaglike("ref", ref))
         if paths:
             args.extend(["--", *paths])

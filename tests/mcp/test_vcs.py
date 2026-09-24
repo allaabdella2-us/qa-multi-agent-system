@@ -557,3 +557,19 @@ async def test_the_reproduction_branch_is_read_from_git_not_from_the_agent(repo,
     assert not result.get("is_error"), result
     stored = ctx.store.get_envelope(envelope.id)
     assert stored.reproduction.environment.branch == "qa/repro/abc12345-limit"
+
+
+async def test_a_committed_diff_ignores_what_is_uncommitted_in_the_checkout(repo, tmp_path):
+    """A real REVIEWER blocked a correct fix for "editing the golden ledger" -- the
+    operator's own uncommitted edit, shown by a working-tree diff, in none of
+    FIXER's commits. `head` diffs committed history only."""
+    git(repo, "checkout", "-q", "-b", "fix/QAAS-1")
+    (repo / "src" / "app.py").write_text("VALUE = 2\n")
+    git(repo, "commit", "-qam", "fix")
+    (repo / "README.md").write_text("an operator's uncommitted edit\n")
+    tools = tools_for(make_ctx("REVIEWER", repo, tmp_path))
+    working = await tools["diff"]({"ref": "main"})
+    committed = await tools["diff"]({"ref": "main", "head": "fix/QAAS-1"})
+    assert "README.md" in working["content"][0]["text"]
+    text = committed["content"][0]["text"]
+    assert "src/app.py" in text and "README.md" not in text

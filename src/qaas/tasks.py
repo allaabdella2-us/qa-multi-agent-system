@@ -549,6 +549,8 @@ def reviewer(
     config: SystemConfig | None = None,
     *,
     guidance: str = "",
+    branch: str | None = None,
+    base: str | None = None,
 ) -> str:
     """The adversarial review task. REVIEWER is Phase 3.
 
@@ -567,7 +569,16 @@ def reviewer(
             f"The test that defines success: {envelope.reproduction.failing_test or '(none recorded)'}\n"
         )
     answered = f"\n{guidance.strip()}" if guidance.strip() else ""
-    return f"""Review the fix for {ticket_key} as an adversarial reviewer.{context}{answered}{_diff_budget(config, "FIXER")}
+    # Named, because a working-tree diff shows everything uncommitted in the
+    # checkout, and a real REVIEWER escalated a correct fix for an operator's
+    # own uncommitted edit that was in none of FIXER's commits.
+    where = (
+        f"\n\nThe fix is committed on `{branch}`. Review exactly what it adds: "
+        f"`diff(ref=\"{base or 'main'}\", head=\"{branch}\")`. Anything else uncommitted "
+        "in the working tree is not part of this fix and not FIXER's.\n"
+        if branch else ""
+    )
+    return f"""Review the fix for {ticket_key} as an adversarial reviewer.{context}{answered}{where}{_diff_budget(config, "FIXER")}
 
 Does the change address the root cause or only the symptom? Is the diff minimal?
 Does it break a contract, a schema, or a public API? Does it introduce a security

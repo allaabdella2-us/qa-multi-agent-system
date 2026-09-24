@@ -1635,3 +1635,36 @@ async def test_a_verified_ticket_resolves_this_targets_memory(cfg, tmp_path, ver
     _filed(store)
     await make_conductor(cfg, tmp_path).run("fix-cycle", run_id=store.run_id)
     assert seen and seen[0].get("target") == str(cfg.target or "")
+
+
+@pytest.fixture
+def fixed_target(tmp_path):
+    import subprocess
+
+    root = tmp_path / "target"
+    root.mkdir()
+    for args in (["init", "-q", "-b", "master"], ["commit", "-q", "--allow-empty", "-m", "init"],
+                 ["branch", "fix/QAAS-54-dup"]):
+        subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("events", "expected"),
+    [
+        ([("review", "APPROVE")], "fix/QAAS-54-dup"),
+        ([("review", "ESCALATE_TO_HUMAN"), ("human_decision", "proceed")], "fix/QAAS-54-dup"),
+        ([("review", "REQUEST_CHANGES")], None),
+        ([("human_decision", "proceed"), ("review", "REQUEST_CHANGES")], None),
+        ([("review", "APPROVE"), ("human_decision", "hold")], None),
+    ],
+)
+def test_a_resumed_cycle_verifies_an_approved_fix_not_the_repro_branch(cfg, tmp_path, fixed_target, events, expected):
+    """Starting on the reproduction branch -- which carries no fix by
+    construction -- meant an approved fix could never simply be re-verified."""
+    store = RunStore.new(tmp_path / "state")
+    store.log("vcs", agent="FIXER", action="commit", branch="fix/QAAS-54-dup", scope="QAAS-54")
+    for kind, decision in events:
+        store.log(kind, agent="REVIEWER", ticket_key="QAAS-54", decision=decision)
+    router = Router(cfg, target_root=fixed_target, root=tmp_path / "state")
+    assert router._prior_fix_branch(store, "QAAS-54") == expected

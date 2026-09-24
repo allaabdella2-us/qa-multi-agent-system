@@ -300,7 +300,7 @@ def build_tools(ctx: ToolContext) -> list:
             branch = vcs().create_branch(name, base or None)
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
-        ctx.store.log("vcs", agent=ctx.agent.name, action="create_branch", branch=branch, base=base)
+        ctx.store.log("vcs", agent=ctx.agent.name, scope=ctx.scope, action="create_branch", branch=branch, base=base)
         return ok(f"Created and switched to '{branch}' from {base or 'the current HEAD'}.",
                   branch=branch, base=base)
 
@@ -350,7 +350,7 @@ def build_tools(ctx: ToolContext) -> list:
             vcs().write_files({relative: content})
         except OSError as exc:
             return err(f"could not write {relative}: {exc}")
-        ctx.store.log("vcs", agent=ctx.agent.name, action="write_file", path=relative, branch=branch)
+        ctx.store.log("vcs", agent=ctx.agent.name, scope=ctx.scope, action="write_file", path=relative, branch=branch)
         return ok(f"Wrote {relative} ({len(content)} chars) on {branch}.", path=relative, branch=branch)
 
     @tool(
@@ -452,7 +452,7 @@ def build_tools(ctx: ToolContext) -> list:
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
         _charge_lines(ctx, adapter, files)
-        ctx.store.log("vcs", agent=ctx.agent.name, action="commit", branch=branch, sha=sha)
+        ctx.store.log("vcs", agent=ctx.agent.name, scope=ctx.scope, action="commit", branch=branch, sha=sha)
         return ok(
             f"Committed {sha[:10]} on {branch}: {len(files)} file(s).",
             sha=sha, branch=branch, paths=staged, files=files,
@@ -460,18 +460,21 @@ def build_tools(ctx: ToolContext) -> list:
 
     @tool(
         "diff",
-        "Unified diff of the working tree, optionally against a ref. Read-only.",
+        "Unified diff, read-only. With `head`: the committed changes from `ref` to `head` -- "
+        "what a pull request would contain, ignoring anything uncommitted in the checkout; "
+        "use this to review a fix. Without `head`: the working tree against `ref`.",
         {
             "type": "object",
             "properties": {
                 "ref": {"type": "string", "description": "Compare against this ref, e.g. 'main' or a sha."},
+                "head": {"type": "string", "description": "A branch or sha: diff `ref...head`, committed changes only."},
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Limit to these paths."},
             },
         },
     )
     async def diff(args: dict[str, Any]) -> dict[str, Any]:
         try:
-            patch = await asyncio.to_thread(vcs().diff, args.get("ref"), args.get("paths"))
+            patch = await asyncio.to_thread(vcs().diff, args.get("ref"), args.get("paths"), args.get("head"))
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
         if not patch.strip():
@@ -521,7 +524,7 @@ def build_tools(ctx: ToolContext) -> list:
             pushed = await asyncio.to_thread(adapter.push, branch)
         except (VcsError, NotImplementedError, ValueError) as exc:
             return err(str(exc))
-        ctx.store.log("vcs", agent=ctx.agent.name, action="push", branch=pushed)
+        ctx.store.log("vcs", agent=ctx.agent.name, scope=ctx.scope, action="push", branch=pushed)
         return ok(f"Pushed '{pushed}' to the remote.", branch=pushed)
 
     @tool(
@@ -585,6 +588,7 @@ def build_tools(ctx: ToolContext) -> list:
         ctx.store.log(
             "vcs",
             agent=ctx.agent.name,
+            scope=ctx.scope,
             action="open_pr",
             branch=branch,
             ticket=ticket,
