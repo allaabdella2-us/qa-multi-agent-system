@@ -17,6 +17,7 @@ import json
 import queue
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -102,6 +103,8 @@ class RunWatcher:
         self._thread: threading.Thread | None = None
         self._drain: asyncio.Task | None = None
         self.done = False
+        #: When the view stopped following the ledger. See `Dashboard._evict_if_stale`.
+        self.done_at: float | None = None
 
     # -- lifecycle --------------------------------------------------------
 
@@ -115,7 +118,7 @@ class RunWatcher:
             # for every finished run anyone opened. An interrupted run is the
             # same file with no `run_finished` in it: the same forever, minus
             # even the line that would have ended it.
-            self.done = True
+            self.done, self.done_at = True, time.time()
             return
         # EOF is taken *here*, on the caller's thread, not inside `_tail`.
         # Seeking in the thread leaves a window between the view being built and
@@ -175,7 +178,7 @@ class RunWatcher:
             if entry is _EMPTY:
                 continue
             if entry is None:
-                self.done = True
+                self.done, self.done_at = True, time.time()
                 # The tail also ends when the ledger goes stale (a killed run
                 # never writes `run_finished`). Announcing `completed: True`
                 # for that told the page a run had finished cleanly when it had
@@ -346,7 +349,19 @@ class Dashboard:
         if watcher is None or not watcher.done:
             return
         store = self.store(run_id)
-        if store is not None and state.is_live(store):
+        if store is None:
+            return
+        # Live now, or written since the view stopped following it. The second
+        # half is the case the first missed: a resume that had already
+        # *finished* by the next page load is not live, so a real resumed run
+        # -- a fix cycle appended to the run that filed its tickets -- kept
+        # showing the first invocation's $5 and three agents until the
+        # dashboard was restarted.
+        try:
+            grown = watcher.done_at is not None and store.ledger_path.stat().st_mtime > watcher.done_at
+        except OSError:
+            grown = False
+        if grown or state.is_live(store):
             self.watchers.pop(run_id, None)
 
     def view(self, run_id: str) -> state.RunView | None:

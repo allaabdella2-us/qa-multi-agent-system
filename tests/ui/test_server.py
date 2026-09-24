@@ -481,3 +481,28 @@ def test_a_cross_origin_page_cannot_rewrite_the_overrides(tmp_path: Path) -> Non
 
     # The page's own writes still work.
     assert client.post("/api/config/override", json=payload).status_code == 200
+
+
+def test_a_resume_that_already_finished_still_refreshes_the_view(tmp_path: Path) -> None:
+    """A finished view was dropped only if the run was live *at the next request*.
+    A real fix cycle appended to a finished run and finished before the page
+    was reloaded, so the dashboard kept showing the first invocation's cost and
+    agents until it was restarted."""
+    import os
+    import time
+
+    store = build_run(tmp_path, "run-resumed", finish=True)
+    dash = Dashboard(tmp_path, specs=SPECS)
+    before = dash.watcher("run-resumed")
+    assert before is not None and before.done
+    cost_before = before.view.cost_usd
+
+    store.log("run_started", mode="full-loop", agents=["VERIFIER"])
+    store.log("agent_finished", agent="VERIFIER", subtype="success", cost_usd=1.5, num_turns=3)
+    store.log("run_finished", agents_run=1, cost_usd=1.5)
+    later = time.time() + 5
+    os.utime(store.ledger_path, (later, later))
+
+    after = dash.view("run-resumed")
+    assert dash.watchers.get("run-resumed") is not before
+    assert after.cost_usd > cost_before
