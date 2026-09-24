@@ -350,7 +350,7 @@ qaas run --mode nightly --dashboard   # serve it alongside a run
 ```
 
 <p align="center">
-  <img src="docs/dashboard.png" alt="The dashboard" width="820">
+  <img src="docs/dashboard.png" alt="The dashboard over a full sixteen-agent run: every phase complete, agent cards by layer, the timeline, findings and the ledger" width="880">
 </p>
 
 It shows the phases, one card per agent (cost, findings, refusals), the
