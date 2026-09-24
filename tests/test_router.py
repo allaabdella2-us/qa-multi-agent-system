@@ -1668,3 +1668,21 @@ def test_a_resumed_cycle_verifies_an_approved_fix_not_the_repro_branch(cfg, tmp_
         store.log(kind, agent="REVIEWER", ticket_key="QAAS-54", decision=decision)
     router = Router(cfg, target_root=fixed_target, root=tmp_path / "state")
     assert router._prior_fix_branch(store, "QAAS-54") == expected
+
+
+def test_the_router_checks_out_the_branch_verifier_will_verify(cfg, tmp_path, fixed_target):
+    """VERIFIER cannot move the tree and `spin_up` will not; inside one loop it
+    only worked because FIXER left the tree on its branch."""
+    import subprocess
+
+    router = Router(cfg, target_root=fixed_target, root=tmp_path / "state")
+    router._checkout(RunStore.new(tmp_path / "state"), "fix/QAAS-54-dup")
+    current = subprocess.run(["git", "-C", str(fixed_target), "branch", "--show-current"],
+                             capture_output=True, text=True).stdout.strip()
+    assert current == "fix/QAAS-54-dup"
+
+
+def test_a_checkout_that_cannot_happen_is_recorded_not_raised(cfg, tmp_path, fixed_target):
+    store = RunStore.new(tmp_path / "state")
+    Router(cfg, target_root=fixed_target, root=tmp_path / "state")._checkout(store, "no/such-branch")
+    assert any("could not check out" in e.detail.get("reason", "") for e in store.ledger("skipped"))

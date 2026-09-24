@@ -1236,6 +1236,7 @@ class Router:
         while True:
             budget.check()
             verdict_mark = len(list(store.ledger("verdict")))
+            self._checkout(store, fix_branch or repro_branch)
             await self._dispatch(
                 specs["VERIFIER"], store, budget, report,
                 tasks.verifier(ticket, envelope, branch=fix_branch or repro_branch), map_version,
@@ -1448,6 +1449,29 @@ class Router:
             if branch:
                 return str(branch)
         return None
+
+    def _checkout(self, store, ref: str | None) -> None:
+        """Put the working tree on the branch VERIFIER is about to verify.
+
+        VERIFIER is told which branch to verify and cannot move the tree -- it
+        is read-only, and `spin_up(branch=...)` refuses rather than checking
+        out. Nothing else moved it either: inside one loop it worked because
+        FIXER happened to leave the tree on its own branch, and re-verifying
+        two tickets back to back verified the second against the first's code.
+        The router holds the branch name, so the router checks it out. Never
+        raises: a checkout that fails is recorded, and VERIFIER, whose
+        `spin_up` compares branches, says so in its verdict.
+        """
+        if not ref or self.target_root is None:
+            return
+        try:
+            from qaas.adapters.vcs import LocalGit
+
+            repo = LocalGit(self.target_root)
+            if repo.current_branch() != ref:
+                repo.checkout(ref)
+        except Exception as exc:  # noqa: BLE001 - VcsError, OSError: recorded, not fatal
+            store.log("skipped", reason=f"could not check out {ref} for verification: {exc}")
 
     def _prior_fix_branch(self, store, ticket: str) -> str | None:
         """The fix branch an earlier round left for `ticket`, if it may be verified now.
