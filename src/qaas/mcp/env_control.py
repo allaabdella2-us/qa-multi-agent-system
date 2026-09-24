@@ -55,7 +55,9 @@ SEED_DIR = DEFAULT_SEED_DIR
 #: operator point it at a non-PATH install, without either one editing code.
 DOCKER_BIN_ENV = "QAAS_DOCKER_BIN"
 
-DEFAULT_UP_TIMEOUT_S = 180
+#: Long enough for a first build of a service built from source (dependency
+#: layers included); later spin-ups hit the layer cache and take seconds.
+DEFAULT_UP_TIMEOUT_S = 600
 POLL_INTERVAL_S = 2.0
 SEED_TIMEOUT_S = 120
 SHORT_TIMEOUT_S = 30
@@ -696,7 +698,17 @@ def build_tools(ctx: ToolContext) -> list:
         timeout = float(args.get("timeout_s") or DEFAULT_UP_TIMEOUT_S)
         deadline = asyncio.get_running_loop().time() + timeout
 
-        up = await _exec(compose_argv("up", "-d", *requested), timeout, cwd=ctx.target_root)
+        # `--build`, because a service built from source bakes its code into an
+        # image, and `up -d` alone reuses whatever image is already there. The
+        # description above always said this server "builds whatever is checked
+        # out"; it did not. A real fix cycle proved the cost: FIXER committed a
+        # correct one-line fix, REVIEWER approved it, and VERIFIER -- having
+        # checked the fix branch out and spun up -- measured the old code in the
+        # stale container and returned NOT_FIXED, so VERIFIED was unreachable
+        # on any target whose services are built rather than mounted. Compose
+        # rebuilds only services with a `build:` section, and the layer cache
+        # makes an unchanged rebuild take seconds.
+        up = await _exec(compose_argv("up", "-d", "--build", *requested), timeout, cwd=ctx.target_root)
         if up.timed_out:
             return err(
                 f"`docker compose up -d` did not finish within {timeout:.0f}s. "

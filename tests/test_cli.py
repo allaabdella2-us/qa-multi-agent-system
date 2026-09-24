@@ -772,3 +772,9 @@ def test_a_malformed_golden_ledger_is_an_error_not_a_traceback(tmp_path, content
     with pytest.raises(typer.Exit) as exited:
         cli._golden_or_exit(ledger)
     assert exited.value.exit_code == 1
+
+
+def test_config_heads_the_target_search_rather_than_replacing_it(tmp_path):
+    """`--config <dir>` took the directory alone, so `qaas run --target corvid
+    --config <dir-with-one-override>` could not see the project's profiles."""
+    assert "corvid" in cli._target_files(tmp_path)

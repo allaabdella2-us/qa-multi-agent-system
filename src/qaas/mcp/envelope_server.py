@@ -7,7 +7,9 @@ emits a finding with no evidence gets refused. Neither is negotiable by argument
 
 from __future__ import annotations
 
+import fnmatch
 import json
+import subprocess
 from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -110,6 +112,39 @@ EMIT_SCHEMA: dict[str, Any] = {
     # forwarded it into the model.
     "additionalProperties": False,
 }
+
+
+def _git_out(root, *args: str) -> str | None:
+    """One git command's stdout in the target, or None. Never raises."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _reproduction_branch(ctx: ToolContext, claimed: str) -> str:
+    """The branch the failing test is committed on -- read from git, not taken on trust.
+
+    `environment.branch` is what the router sends VERIFIER back to and what
+    FIXER's branch starts from, and it was whatever REPRODUCER typed. In a real
+    run that was `"master @ d8add44 (spin_up refused 'main' ...)"` -- a
+    description of where the *app* ran -- so the router found no such ref,
+    VERIFIER was told to verify on a sentence, and FIXER branched from master
+    without the test that defines success. REPRODUCER records its verdict while
+    standing on the branch it just committed to, so that branch is the answer;
+    a claim is kept only if it names a real ref.
+    """
+    current = _git_out(ctx.target_root, "branch", "--show-current")
+    patterns = ctx.agent.policy.branch_patterns
+    if current and any(fnmatch.fnmatch(current, p) for p in patterns):
+        return current
+    if claimed and _git_out(ctx.target_root, "rev-parse", "--verify", "--quiet", f"{claimed}^{{commit}}"):
+        return claimed
+    return ""
 
 
 def build_tools(ctx: ToolContext) -> list:
@@ -343,12 +378,15 @@ def build_tools(ctx: ToolContext) -> list:
         if envelope is None:
             return err(f"No finding with id {args['envelope_id']} in this run.")
 
+        environment = dict(args.get("environment") or {})
+        claimed = str(environment.get("branch") or "")
+        environment["branch"] = _reproduction_branch(ctx, claimed)
         repro = {
             "status": args["status"],
             "steps": args.get("steps", []),
             "failing_test": args.get("failing_test"),
             "flake_rate": args.get("flake_rate", 0.0),
-            "environment": args.get("environment", {}),
+            "environment": environment,
             "verified_by": "REPRODUCER",
         }
         try:
@@ -376,6 +414,8 @@ def build_tools(ctx: ToolContext) -> list:
             status=args["status"],
             flake_rate=repro["flake_rate"],
             fileable=fileable,
+            branch=environment["branch"],
+            **({"claimed_branch": claimed} if claimed and claimed != environment["branch"] else {}),
         )
         verdict = "will reach TRIAGE" if fileable else f"held: {reason}"
         return ok(

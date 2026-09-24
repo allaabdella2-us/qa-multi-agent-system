@@ -563,6 +563,12 @@ def build_options(
     extra_env: dict[str, str] | None = None,
 ) -> ClaudeAgentOptions:
     """Everything one agent needs, assembled from its spec."""
+    # The sandboxed shell's private temp directory exists before the guardrail
+    # is built, so the guardrail can let the agent use it -- see below.
+    tmpdir = None
+    if sandbox.applies(spec) and ctx.config.sandbox.mode != "off":
+        tmpdir = sandbox.make_tmpdir(spec.name)
+        ctx.scratch_dir = tmpdir
     guard = Guardrail(ctx)
 
     env = scrubbed_credentials()
@@ -578,8 +584,7 @@ def build_options(
     # user runs, and a `CLAUDE_CODE_TMPDIR` the sandbox cannot write sends
     # Python's `tempfile` -- and so pytest's `tmp_path` -- into the checkout.
     sandbox_settings = None
-    if sandbox.applies(spec) and ctx.config.sandbox.mode != "off":
-        tmpdir = sandbox.make_tmpdir(spec.name)
+    if tmpdir is not None:
         sandbox_settings = sandbox.settings_for(spec, ctx, tmpdir)
         env[sandbox.TMPDIR_ENV] = str(tmpdir)
     env.update(extra_env or {})

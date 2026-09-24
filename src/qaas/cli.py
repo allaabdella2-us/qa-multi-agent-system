@@ -254,8 +254,11 @@ def _target_files(config_dir: Path | str | None) -> dict[str, Path]:
     disappeared from `qaas targets` and from `--target`. Profiles union by
     filename, exactly as agents and skills do.
     """
-    dirs = [Path(config_dir)] if config_dir is not None else list(Workspace.resolve().config_dirs)
-    return target_files(dirs)
+    # `--config` heads the search; it does not replace it. This took the
+    # directory alone, so `qaas run --target corvid --config <dir-with-one-
+    # override>` reported "no target profile 'corvid'" while `load_config`,
+    # reading the same flag, found it.
+    return target_files(list(Workspace.resolve(config=config_dir).config_dirs))
 
 
 def _read_profile(name: str, directory: Path):

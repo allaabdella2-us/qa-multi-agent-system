@@ -43,6 +43,9 @@ class ToolContext:
     #: reproduction branch for FIXER, the ref the run started on otherwise.
     #: None falls back to whatever is checked out.
     base_ref: str | None = None
+    #: The agent's private temp directory (its sandboxed shell's `TMPDIR`), or
+    #: None. Writable by that agent whatever its policy: nothing reads it back.
+    scratch_dir: Path | None = None
 
     @property
     def touched_files(self) -> set[str]:

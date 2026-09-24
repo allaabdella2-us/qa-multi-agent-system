@@ -1022,3 +1022,39 @@ def test_a_push_to_main_still_names_the_rule_it_breaks(tmp_path):
     decision = _guard("FIXER", tmp_path).check("Bash", {"command": "git push origin fix/main-menu:main"})
     assert not decision.allowed
     assert "mcp__vcs__" not in decision.reason
+
+
+def _guard_with_scratch(agent: str, tmp_path: Path) -> tuple[Guardrail, Path]:
+    cfg = load_config(search=CONFIG_SEARCH)
+    scratch = tmp_path / "qaas-scratch"
+    scratch.mkdir()
+    ctx = ToolContext(
+        store=RunStore.new(root=tmp_path / "state"), maps=SystemMapStore(tmp_path / "state"),
+        config=cfg, agent=cfg.agents[agent], target_root=TARGET, scratch_dir=scratch,
+    )
+    return Guardrail(ctx), scratch
+
+
+@pytest.mark.parametrize(
+    "command",
+    ['uvicorn app:app > "$TMPDIR/uvicorn-fix.log" 2>&1', "echo x > ${TMPDIR}/probe.txt"],
+)
+@pytest.mark.parametrize("agent", ["FIXER", "VERIFIER"])
+def test_the_agents_own_temp_dir_is_writable_from_the_shell(tmp_path, agent, command):
+    """A real FIXER was refused `> "$TMPDIR/uvicorn-fix.log"`: the quoted,
+    unexpanded path resolved to a file inside the checkout named `"$TMPDIR`."""
+    guard, _ = _guard_with_scratch(agent, tmp_path)
+    decision = guard.check("Bash", {"command": command})
+    assert decision.allowed, f"{agent} {command}: {decision.reason}"
+
+
+def test_write_into_the_temp_dir_is_scratch_not_product(tmp_path):
+    guard, scratch = _guard_with_scratch("FIXER", tmp_path)
+    assert guard.check("Write", {"file_path": str(scratch / "verify.py")}).allowed
+    assert not guard.ctx.touched_files  # costs no diff budget
+
+
+def test_the_temp_dir_is_not_a_way_out(tmp_path):
+    guard, _ = _guard_with_scratch("VERIFIER", tmp_path)
+    decision = guard.check("Bash", {"command": 'echo x > "$TMPDIR/../../escape.txt"'})
+    assert not decision.allowed

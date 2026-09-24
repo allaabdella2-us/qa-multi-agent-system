@@ -1213,7 +1213,14 @@ class Router:
         # escalate. A live run recorded exactly that ("this branch cannot carry
         # a fix"). Where FIXER put the fix is only knowable after the fact, so
         # it is read back out of the ledger below.
-        repro_branch = envelope.reproduction.environment.branch or "main"
+        # A real ref or nothing: `environment.branch` held a sentence once
+        # (see `envelope_server._reproduction_branch`), and VERIFIER was sent to
+        # verify on it.
+        repro_branch = (
+            self._existing_ref(envelope.reproduction.environment.branch or None)
+            or self._base_ref
+            or "main"
+        )
         fix_branch: str | None = None
 
         #: What the last VERIFIER actually observed, carried into the next fix

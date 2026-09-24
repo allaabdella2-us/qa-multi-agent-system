@@ -293,6 +293,10 @@ class Guardrail:
         #: qaas's own state: the ledger, memory.db, config, `.env`. Refused to
         #: every agent whatever its policy -- see `_state_path`.
         self._state_root = Path(ctx.store.root).resolve()
+        #: The agent's private temp directory -- its sandboxed shell's
+        #: `TMPDIR`. See `_in_scratch`.
+        scratch = getattr(ctx, "scratch_dir", None)
+        self._scratch = Path(scratch).resolve() if scratch else None
         self._allowed_globs = [p for p in self.policy.write_paths if _is_glob(p)]
         # Every MCP server the agent declared, as an allowlist prefix.
         self._mcp_prefixes = tuple(f"mcp__{s}__" for s in self.agent.mcp_servers)
@@ -434,6 +438,30 @@ class Guardrail:
             return Decision(False, "write refused: no file path in the call")
         return self._check_path(str(raw))
 
+    def _in_scratch(self, raw: str) -> bool:
+        """Is this a write into the agent's own private temp directory?
+
+        The sandbox makes that directory the shell's `TMPDIR` and one of only
+        two places it may write, so an agent reaches for it -- and a real FIXER
+        was refused twice for doing so: `Write /private/tmp/qaas-fixer-…/probe.py`
+        as "outside FIXER's sandbox", and `> "$TMPDIR/uvicorn.log"` resolved as
+        a file *inside the checkout* literally named `"$TMPDIR`. Nothing reads
+        the directory back, it is deleted when the turn ends, and it is not the
+        product, so it is open to every shell agent and costs no diff budget.
+        """
+        if self._scratch is None:
+            return False
+        text = raw.strip().strip("'\"")
+        for var in ("${TMPDIR}", "$TMPDIR"):
+            if text == var or text.startswith(var + "/"):
+                text = str(self._scratch) + text[len(var):]
+                break
+        try:
+            resolved = Path(text).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return resolved == self._scratch or resolved.is_relative_to(self._scratch)
+
     def _check_path(self, raw: str, *, count_against_budget: bool = True) -> Decision:
         """The §8.1/§8.2 matrix, applied to one path an agent wants to write.
 
@@ -442,6 +470,8 @@ class Guardrail:
         through `_check_bash`, and `mcp/vcs.py` reaches it instead of keeping
         its own near-copy. Three doors, one answer.
         """
+        if self._in_scratch(raw):
+            return Decision(True)
         if not self.policy.write_paths:
             return self._read_only_decision()
 

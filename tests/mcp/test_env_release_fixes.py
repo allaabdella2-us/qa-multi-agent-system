@@ -266,3 +266,27 @@ async def test_a_login_that_redirects_is_not_followed(make_ctx, tmp_path, server
     result = await handlers(build_tools(ctx))["impersonate"]({"role": "admin"})
     assert is_error(result) and "302" in text_of(result)
     assert elsewhere_saw.requests == []
+
+
+async def test_spin_up_rebuilds_what_is_checked_out(make_ctx, monkeypatch):
+    """A service built from source bakes its code into its image, and `up -d`
+    alone reused the stale one: in a real fix cycle VERIFIER checked out FIXER's
+    branch, spun up, measured the old code and returned NOT_FIXED for a correct
+    fix. `--build` is what makes "builds whatever is checked out" true."""
+    import sys
+
+    from qaas.mcp import env_control
+    from qaas.mcp.context import handlers
+
+    monkeypatch.setenv(env_control.DOCKER_BIN_ENV, sys.executable)
+    seen: list[list[str]] = []
+
+    async def fake_exec(argv, timeout, *, stdin=None, cwd=None):
+        seen.append(list(argv))
+        return env_control._Proc(argv=list(argv), code=1, out="", err="stop here")
+
+    monkeypatch.setattr(env_control, "_exec", fake_exec)
+    tools = handlers(env_control.build_tools(make_ctx("BROWSER")))
+    await tools["spin_up"]({})
+    up = next(a for a in seen if "up" in a)
+    assert "--build" in up, up

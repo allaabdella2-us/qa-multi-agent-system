@@ -533,3 +533,27 @@ async def test_a_security_fix_is_committed_but_never_published(repo, tmp_path):
 def test_open_pr_leaves_the_base_to_the_repository_when_none_is_named(monkeypatch):
     monkeypatch.delenv("GITHUB_DEFAULT_BRANCH", raising=False)
     assert GitHubVcs.default_base(object.__new__(GitHubVcs)) is None
+
+
+async def test_the_reproduction_branch_is_read_from_git_not_from_the_agent(repo, tmp_path):
+    """A real REPRODUCER wrote `"master @ d8add44 (spin_up refused 'main' ...)"`
+    into `environment.branch`; VERIFIER was sent to verify on that sentence and
+    FIXER branched from master without the failing test."""
+    from qaas.envelope import DefectEnvelope
+    from qaas.mcp.envelope_server import build_tools as envelope_tools
+
+    ctx = make_ctx("REPRODUCER", repo, tmp_path)
+    git(repo, "checkout", "-q", "-b", "qa/repro/abc12345-limit")
+    envelope = DefectEnvelope(
+        run_id=ctx.store.run_id, discovered_by="API", domain="api", **{"class": "bug"},
+        title="limit ignored", summary="s", severity="major", confidence=0.9,
+    )
+    ctx.store.put_envelope(envelope)
+    tools = handlers(envelope_tools(ctx))
+    result = await tools["record_reproduction"]({
+        "envelope_id": envelope.id, "status": "reproduced", "confidence": 0.95,
+        "environment": {"branch": "master @ d8add44 (spin_up refused 'main')"},
+    })
+    assert not result.get("is_error"), result
+    stored = ctx.store.get_envelope(envelope.id)
+    assert stored.reproduction.environment.branch == "qa/repro/abc12345-limit"
