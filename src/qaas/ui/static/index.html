@@ -30,6 +30,15 @@
     <button data-view="runs" class="on"><svg class="i"><use href="#i-runs"/></svg>runs</button>
     <button data-view="config"><svg class="i"><use href="#i-config"/></svg>configuration</button>
   </nav>
+  <div class="replay" id="replay-ctl" hidden>
+    <button id="replay-btn" title="Play this run back as if it were live">▶ replay</button>
+    <select id="replay-speed" title="Replay speed" aria-label="Replay speed">
+      <option value="30">×30</option>
+      <option value="60" selected>×60</option>
+      <option value="120">×120</option>
+      <option value="300">×300</option>
+    </select>
+  </div>
   <div class="spacer"></div>
   <div class="status" id="status"><span class="dot"></span><span id="status-text">—</span></div>
   <div class="clock">

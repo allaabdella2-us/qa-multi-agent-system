@@ -60,9 +60,14 @@ function renderHeader(v) {
   // "not completed" as "live" pulsed a green dot and ran the clock over such a
   // run forever; the server decides from the ledger's age, and says so.
   const live = !v.completed && !v.interrupted;
-  status.className = "status" + (live ? " live" : v.stopped_early || v.interrupted ? " stopped" : "");
-  $("status-text").textContent = live ? "live"
+  // A replay is a finished run played back: say so, rather than "live".
+  const replaying = live && v.replay;
+  status.className = "status" + (replaying ? " replay" : live ? " live"
+    : v.stopped_early || v.interrupted ? " stopped" : "");
+  $("status-text").textContent = replaying ? `replay ×${v.replay}` : live ? "live"
     : v.interrupted ? "interrupted" : v.stopped_early ? "stopped early" : "complete";
+  // Offered for a run that is over, never over a live one.
+  $("replay-ctl").hidden = live;
 
   $("elapsed").textContent = hms(v.elapsed_s);
   // The cap is wall clock, never dollars: no shipped run mode sets a budget
@@ -234,11 +239,14 @@ function renderTimeline(v) {
   // A resumed run carries a second `run_started`, and `v.started` is that later
   // one -- so agents dispatched in the first session began before it. The axis
   // starts at the earliest thing it has to draw, or their bars fall off it.
+  // During a replay "now" is the last replayed line, not the wall clock: the
+  // run happened hours ago, and a running bar drawn to now would span them all.
+  const now = v.replay && v.last_at ? new Date(v.last_at).getTime() : Date.now();
   const starts = lanes.map((a) => new Date(a.started_at).getTime());
   const t0 = Math.min(new Date(v.started).getTime(), ...starts);
   const t1 = Math.max(
     t0 + Math.max(v.elapsed_s, 1) * 1000,
-    ...lanes.map((a) => new Date(a.finished_at || Date.now()).getTime()));
+    ...lanes.map((a) => (a.finished_at ? new Date(a.finished_at).getTime() : now)));
   const span = Math.max(1, t1 - t0);
 
   const LEFT = 92, ROW = 20, PAD = 10, W = 1000;
@@ -255,7 +263,7 @@ function renderTimeline(v) {
   lanes.forEach((a, i) => {
     const y = i * ROW + 6;
     const start = new Date(a.started_at).getTime();
-    const end = new Date(a.finished_at || Date.now()).getTime();
+    const end = a.finished_at ? new Date(a.finished_at).getTime() : now;
     out += `<text class="lane-label" x="4" y="${y + 10}">${esc(a.name.slice(0, 12))}</text>`;
     out += `<rect class="lane-bg" x="${LEFT}" y="${y + 3}" width="${width}" height="8" rx="2"/>`;
     out += `<rect class="bar" x="${x(start)}" y="${y + 3}" fill="${colour[a.status] || "var(--k-dim)"}"
@@ -559,15 +567,20 @@ function applyPatch(p) {
     elapsed_s: p.elapsed_s, cost_usd: p.cost_usd, phase: p.phase,
     phase_status: p.phase_status, counts: p.counts, completed: p.completed,
     interrupted: p.interrupted, stopped_early: p.stopped_early, escalations: p.escalations,
+    replay: p.replay, last_at: p.last_at,
   });
+  // Present on every patch from a current server; kept when absent.
+  for (const k of ["started", "mode", "wall_clock_s", "target_name", "target_sha", "target_dirty"]) {
+    if (p[k] !== undefined) v[k] = p[k];
+  }
   renderHeader(v); renderPhases(v); renderCounters(v); renderTabs(v);
   if (p.agents && Object.keys(p.agents).length) patchAgents(p.agents);
   refreshTimeline();
 }
 
-function connect(runId) {
+function connect(runId, url = `/api/runs/${runId}/stream`) {
   if (state.source) state.source.close();
-  const source = new EventSource(`/api/runs/${runId}/stream`);
+  const source = new EventSource(url);
   state.source = source;
 
   source.addEventListener("snapshot", (m) => renderAll(JSON.parse(m.data)));
@@ -578,10 +591,18 @@ function connect(runId) {
     pushFeed(e);
   });
   source.addEventListener("finding", (m) => {
-    state.view.findings.push(JSON.parse(m.data));
+    // By id: a revised finding (a ticket key stamped on it) replaces its row.
+    const f = JSON.parse(m.data);
+    const at = state.view.findings.findIndex((x) => x.id === f.id);
+    if (at >= 0) state.view.findings[at] = f; else state.view.findings.push(f);
     state.view.findings.sort((a, b) => a.severity_rank - b.severity_rank || b.confidence - a.confidence);
     renderTabs(state.view);
     if (state.tab === "findings") renderPanel();
+  });
+  source.addEventListener("denial", (m) => {
+    state.view.denials.push(JSON.parse(m.data));
+    renderCounters(state.view); renderTabs(state.view);
+    if (state.tab === "guardrails") renderPanel();
   });
   source.addEventListener("ticket", (m) => {
     const t = JSON.parse(m.data);
@@ -601,9 +622,25 @@ function connect(runId) {
     getJSON(`/api/runs/${runId}`).then(renderAll).catch(() => {}); };
 }
 
+/* Play a finished run back as if it were live. The server walks the ledger at
+ * `speed` times real time and sends the very events a live run sends, so every
+ * panel fills in exactly as it did. `?replay=60` in the page's URL starts one on
+ * load, which is what a screen recording wants. */
+function replay(runId, speed) {
+  const url = new URL(location.href);
+  url.searchParams.set("replay", speed);
+  history.replaceState(null, "", url);
+  connect(runId, `/api/runs/${runId}/replay?speed=${encodeURIComponent(speed)}`);
+}
+
 async function openRun(runId) {
   state.runId = runId;
-  history.replaceState(null, "", `#${runId}`);
+  // Opening a run is not replaying it: drop a `?replay=` left by the last one,
+  // or reloading the page would start a playback nobody asked for.
+  const url = new URL(location.href);
+  url.searchParams.delete("replay");
+  url.hash = runId;
+  history.replaceState(null, "", url);
   renderAll(await getJSON(`/api/runs/${runId}`));
   state.artifacts = await getJSON(`/api/runs/${runId}/artifacts`).catch(() => []);
   renderTabs(state.view);
@@ -628,12 +665,21 @@ document.addEventListener("click", (event) => {
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("drawer").hidden = true; });
 $("quiet").addEventListener("change", () => renderFeed(state.view));
+$("replay-btn").addEventListener("click", () => {
+  if (state.runId) replay(state.runId, $("replay-speed").value);
+});
 
 (async function start() {
   try {
+    // Read before `openRun`, which clears it from the address bar.
+    const speed = new URLSearchParams(location.search).get("replay");
     const runId = location.hash.slice(1) ||
       (await getJSON("/api/runs/live")).run_id;
     await openRun(runId);
+    if (speed) {
+      $("replay-speed").value = speed;
+      replay(runId, speed);
+    }
   } catch (error) {
     document.querySelector(".stage").innerHTML =
       `<div class="empty">${esc(error)}</div>`;
@@ -641,7 +687,7 @@ $("quiet").addEventListener("change", () => renderFeed(state.view));
   // The header clock must move between ledger lines: an agent can think for a
   // minute without writing one, and a frozen clock reads as a dead run.
   setInterval(() => {
-    if (state.view && !state.view.completed && !state.view.interrupted) {
+    if (state.view && !state.view.completed && !state.view.interrupted && !state.view.replay) {
       state.view.elapsed_s += 1;
       renderHeader(state.view);
     }

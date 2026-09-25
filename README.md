@@ -357,6 +357,11 @@ It shows the phases, one card per agent (cost, findings, refusals), the
 findings, tickets, escalations and a live feed of the ledger — and the
 installation's configuration.
 
+**Replay a finished run** as if it were live: pick a speed and click **▶ replay**
+in the header, or open `http://127.0.0.1:7777/?replay=60#<run-id>`. At ×60 a
+five-hour run plays back in about two minutes, agent by agent, finding by
+finding, ticket by ticket.
+
 | Card | Meaning |
 |---|---|
 | Green — *done* | The agent's latest invocation succeeded |

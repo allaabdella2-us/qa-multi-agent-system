@@ -199,37 +199,8 @@ class RunWatcher:
             self._emit(entry, before)
 
     def _emit(self, entry, before: Mapping[str, str]) -> None:
-        view = self.view
-        if entry.kind not in trace.QUIET_KINDS:
-            self._broadcast("ledger", view.recent[-1])
-        if entry.kind == LedgerKind.ENVELOPE and view.findings:
-            self._broadcast("finding", view.findings[-1].to_json())
-        if entry.kind in (LedgerKind.TICKET, LedgerKind.VERDICT, LedgerKind.VERIFIED):
-            key = entry.detail.get("key") or entry.detail.get("ticket_key")
-            if key and str(key) in view.tickets:
-                self._broadcast("ticket", view.tickets[str(key)].to_json())
-        # Agent cards and the header change on almost every line, so the patch
-        # carries only the agents whose row actually moved.
-        moved = {
-            n: a.to_json()
-            for n, a in view.agents.items()
-            if before.get(n) != a.status or (entry.agent == n)
-        }
-        self._broadcast(
-            "patch",
-            {
-                "elapsed_s": round(view.elapsed_s, 1),
-                "cost_usd": round(view.cost_usd, 4),
-                "phase": view.phase,
-                "phase_status": view.phase_status,
-                "counts": view.counts,
-                "completed": view.completed,
-                "interrupted": view.interrupted,
-                "stopped_early": view.stopped_early,
-                "escalations": view.escalations,
-                "agents": moved,
-            },
-        )
+        for event, data in events_for(self.view, entry, before):
+            self._broadcast(event, data)
 
     def _broadcast(self, event: str, data: Any) -> None:
         message = {"event": event, "data": data}
@@ -258,6 +229,75 @@ class RunWatcher:
 
     def detach(self, client: asyncio.Queue) -> None:
         self.clients.discard(client)
+
+
+def events_for(view: state.RunView, entry, before: Mapping[str, str]) -> list[tuple[str, Any]]:
+    """What the page is told after `entry` was applied to `view`.
+
+    One function for the live tail and for a replay, so a replayed run is drawn
+    by exactly the code that draws a live one -- the page cannot tell them apart
+    except by the `replay` flag it is shown.
+    """
+    out: list[tuple[str, Any]] = []
+    by_id = {f.id: f for f in view.findings}
+    if entry.kind not in trace.QUIET_KINDS:
+        out.append(("ledger", view.recent[-1]))
+    # A finding is sent by id and the page replaces it if it has one. It sent
+    # `findings[-1]` for every `envelope` line -- but an envelope is re-logged
+    # whenever it is revised (a ticket key stamped, a reproduction recorded),
+    # so the latest finding was pushed again as new: one defect listed three
+    # times until the page was reloaded.
+    if entry.kind == LedgerKind.ENVELOPE:
+        finding = by_id.get(entry.detail.get("envelope_id"))
+        if finding is not None:
+            out.append(("finding", finding.to_json()))
+    if entry.kind == LedgerKind.DENIAL and view.denials:
+        # The counter and the guardrails tab read this list, and nothing sent
+        # it: both said 0 on a live run refusing things in the feed beside them.
+        out.append(("denial", view.denials[-1].to_json()))
+    if entry.kind in (LedgerKind.TICKET, LedgerKind.VERDICT, LedgerKind.VERIFIED):
+        key = entry.detail.get("key") or entry.detail.get("ticket_key")
+        if key and str(key) in view.tickets:
+            ticket = view.tickets[str(key)]
+            out.append(("ticket", ticket.to_json()))
+            # The finding it files now carries the key; say so on its row.
+            filed = by_id.get(ticket.envelope_id)
+            if filed is not None:
+                out.append(("finding", filed.to_json()))
+    # Agent cards and the header change on almost every line, so the patch
+    # carries only the agents whose row actually moved.
+    moved = {
+        n: a.to_json()
+        for n, a in view.agents.items()
+        if before.get(n) != a.status or (entry.agent == n)
+    }
+    out.append((
+        "patch",
+        {
+            "elapsed_s": round(view.elapsed_s, 1),
+            "cost_usd": round(view.cost_usd, 4),
+            "phase": view.phase,
+            "phase_status": view.phase_status,
+            "counts": view.counts,
+            "completed": view.completed,
+            "interrupted": view.interrupted,
+            "stopped_early": view.stopped_early,
+            "escalations": view.escalations,
+            "replay": view.replay_speed,
+            "last_at": state._iso(view.last_at),
+            # The header's run facts. A live page has them from its snapshot; a
+            # replay starts from an empty one and learns them from `run_started`,
+            # and without `started` the timeline had no origin and drew nothing.
+            "started": state._iso(view.started),
+            "mode": view.mode,
+            "wall_clock_s": view.wall_clock_s,
+            "target_name": view.target_name,
+            "target_sha": view.target_sha,
+            "target_dirty": view.target_dirty,
+            "agents": moved,
+        },
+    ))
+    return out
 
 
 class Dashboard:
@@ -640,6 +680,56 @@ async def _stream(request: Request) -> Response:
     return EventSourceResponse(events())
 
 
+#: A replay compresses the run by `speed`, and caps any single pause at this.
+#: A real run holds hours of nothing -- a provider limit waited out, an agent
+#: thinking -- and replayed faithfully that is a frozen screen.
+REPLAY_MAX_GAP_S = 1.5
+
+
+async def _pause(seconds: float) -> None:
+    """The replay's pacing, separate so a test can measure it without waiting."""
+    await asyncio.sleep(seconds)
+
+
+async def _replay(request: Request) -> Response:
+    """Play a finished run back as if it were live, `speed` times faster.
+
+    Built from the ledger the way the live view is -- an empty `RunView`, the
+    same `apply`, the same events -- so what it shows is what the run showed.
+    Read-only like every other GET: it paces the file, and writes nothing.
+    """
+    from sse_starlette.sse import EventSourceResponse
+
+    dash: Dashboard = request.app.state.dash
+    run_id = request.path_params["run_id"]
+    store = dash.store(run_id)
+    if store is None:
+        return _err("no such run")
+    speed = _int_param(request.query_params.get("speed"), 60, low=1, high=10_000)
+    entries = state.read_ledger(store)
+    view = state.RunView(
+        run_id=run_id, store=store, specs=dash.specs,
+        min_confidence=dash.min_confidence, replay_speed=speed,
+    )
+
+    async def events():
+        yield {"event": "snapshot", "data": json.dumps(view.to_json(), default=_json_default)}
+        previous = None
+        for entry in entries:
+            if previous is not None:
+                pause = (entry.at - previous).total_seconds() / speed
+                if pause > 0:
+                    await _pause(min(pause, REPLAY_MAX_GAP_S))
+            previous = entry.at
+            before = {n: a.status for n, a in view.agents.items()}
+            view.apply(entry)
+            for event, data in events_for(view, entry, before):
+                yield {"event": event, "data": json.dumps(data, default=_json_default)}
+        yield {"event": "done", "data": json.dumps({"run_id": run_id, "replay": True})}
+
+    return EventSourceResponse(events())
+
+
 async def _config(request: Request) -> Response:
     """Everything this installation is configured to do, in one payload.
 
@@ -729,6 +819,7 @@ def build_app(dash: Dashboard) -> Starlette:
         Route("/api/runs/{run_id}", _run),
         Route("/api/runs/{run_id}/events", _events),
         Route("/api/runs/{run_id}/stream", _stream),
+        Route("/api/runs/{run_id}/replay", _replay),
         Route("/api/runs/{run_id}/findings/{envelope_id}", _finding),
         Route("/api/runs/{run_id}/artifacts", _artifacts),
         Route("/api/runs/{run_id}/artifacts/{name:path}", _artifact),

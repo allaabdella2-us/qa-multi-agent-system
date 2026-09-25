@@ -210,6 +210,15 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .status.live .dot { background: var(--k-green); animation: pulse 1.6s ease-in-out infinite; }
 .status.live { color: var(--k-green); }
 .status.stopped .dot { background: var(--k-red); }
+.status.replay .dot { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.status.replay { color: var(--accent); }
+.replay { display: flex; align-items: center; gap: 4px; margin-left: 10px; }
+.replay button, .replay select {
+  padding: 5px 9px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--bg-card); color: var(--ink-dim); font-size: 11px;
+  letter-spacing: .03em; font-family: inherit;
+}
+.replay button:hover { color: var(--ink); border-color: var(--accent); }
 .status.stopped { color: var(--k-red); }
 @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); }
                    50% { opacity: .35; transform: scale(.8); } }

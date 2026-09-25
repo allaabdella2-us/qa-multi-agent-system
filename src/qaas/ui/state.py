@@ -316,6 +316,10 @@ class RunView:
     #: Bytes of the ledger this view has applied, when it was built by reading
     #: the file -- where a live tail must pick up. See `replay`.
     offset: int | None = None
+    #: Set when this view is a finished run being played back (`/replay`). Its
+    #: clock is the last replayed line's, not the wall's -- the run happened
+    #: hours ago, and measuring to now would show every agent running for hours.
+    replay_speed: int | None = None
 
     roster: list[str] = field(default_factory=list)
     agents: dict[str, AgentView] = field(default_factory=dict)
@@ -343,7 +347,7 @@ class RunView:
     def elapsed_s(self) -> float:
         if self.started is None:
             return 0.0
-        stopped = self.last_at if self.interrupted else None
+        stopped = self.last_at if (self.interrupted or self.replay_speed) else None
         end = self.finished or stopped or datetime.now(timezone.utc)
         return max(0.0, (end - self.started).total_seconds())
 
@@ -695,6 +699,8 @@ class RunView:
             "completed": self.completed,
             "interrupted": self.interrupted,
             "live": self.live,
+            "replay": self.replay_speed,
+            "last_at": _iso(self.last_at),
             "stopped_early": self.stopped_early,
             "target_name": self.target_name,
             "target_root": self.target_root,
