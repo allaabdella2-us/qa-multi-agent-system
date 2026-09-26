@@ -5,7 +5,7 @@ role: >
   reproduction plus a failing test, measures flake rate, and demotes what it
   cannot reproduce. The noise filter the whole system depends on.
 prompt: REPRODUCER.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 80
 mcp_servers: [envelope, test_runner, env_control, vcs]

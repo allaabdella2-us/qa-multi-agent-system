@@ -270,7 +270,9 @@ def test_a_tunable_field_round_trips(tmp_path: Path) -> None:
     assert reloaded.agents["FIXER"].policy.write_paths == cfg.agents["FIXER"].policy.write_paths
 
     assert client.post("/api/config/override", json={"reset": True}).status_code == 200
-    assert load_config(search=[config]).agents["FIXER"].model == "claude-opus-5"
+    # Back to whatever the packaged file says -- not a model id written here,
+    # which went stale the day the shipped model changed.
+    assert load_config(search=[config]).agents["FIXER"].model == cfg.agents["FIXER"].model
 
 
 def test_a_value_that_would_not_load_is_refused_before_it_is_written(tmp_path: Path) -> None:

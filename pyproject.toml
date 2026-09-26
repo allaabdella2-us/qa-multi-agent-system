@@ -20,7 +20,11 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-    "claude-agent-sdk>=0.2.127",
+    # 0.2.159 bundles Claude Code 2.1.281, the first that knows Opus 5.5 --
+    # the model every shipped agent now runs. The 2.1.259 bundled with 0.2.152
+    # refused it as `unrecognized_model`, so an older SDK installs, validates
+    # and then fails every agent at its first turn.
+    "claude-agent-sdk>=0.2.159",
     "pydantic>=2.11",
     "pyyaml>=6.0",
     # typer>=0.16 is not cosmetic: click 8.2 changed Parameter.make_metavar()

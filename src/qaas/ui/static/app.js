@@ -1146,8 +1146,8 @@ $("theme").addEventListener("click", () => {
  * undoes all of it.
  */
 
-const MODELS = ["claude-opus-5", "claude-opus-4-7", "claude-sonnet-5",
-                "claude-haiku-4-5-20251001"];
+const MODELS = ["claude-opus-5-5[1m]", "claude-opus-5-5", "claude-opus-5",
+                "claude-opus-4-7", "claude-sonnet-5", "claude-haiku-4-5-20251001"];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const SEVERITIES = ["trivial", "minor", "major", "critical", "blocker"];
 

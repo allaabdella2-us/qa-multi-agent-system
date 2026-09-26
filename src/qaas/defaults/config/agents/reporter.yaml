@@ -5,7 +5,7 @@ role: >
   escalations, recurrence -- and reports the pattern across them, including what
   the run could not reach. Audits the run, never the application.
 prompt: REPORTER.md
-model: claude-sonnet-5
+model: "claude-opus-5-5[1m]"
 effort: medium
 max_turns: 40
 mcp_servers: [envelope, defect_memory, tracker]

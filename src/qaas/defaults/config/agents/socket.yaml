@@ -9,7 +9,7 @@ role: >
   here, so SOCKET reads the connection code and reports at the confidence of a
   source reading, not of a measurement.
 prompt: SOCKET.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 60
 mcp_servers: [envelope, env_control, defect_memory]

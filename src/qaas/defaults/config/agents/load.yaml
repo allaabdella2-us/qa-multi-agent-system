@@ -8,7 +8,7 @@ role: >
   runner, no metrics backend and no profiler -- so it never claims behaviour
   under load that it did not observe.
 prompt: LOAD.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 60
 mcp_servers: [envelope, env_control, defect_memory]

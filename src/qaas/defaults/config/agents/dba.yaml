@@ -7,7 +7,7 @@ role: >
   the ORM makes easy to write. Reports what the schema actually says, never what
   the model layer claims.
 prompt: DBA.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 60
 mcp_servers: [envelope, env_control, defect_memory]

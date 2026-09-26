@@ -7,7 +7,7 @@ role: >
   one activity, and the domain knowledge belongs in loadable skills, not in five
   nearly identical prompts.
 prompt: FIXER.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 80
 mcp_servers: [envelope, test_runner, env_control, vcs, tracker, contract_diff]

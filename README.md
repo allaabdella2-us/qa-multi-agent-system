@@ -469,6 +469,10 @@ Every command takes `--help`.
 
 ## What's new in 0.0.2
 
+- **Every agent runs Claude Opus 5.5 with the 1M-token context**
+  (`claude-opus-5-5[1m]`), which needs `claude-agent-sdk` 0.2.159 or newer — the
+  first whose bundled Claude Code knows the model. Change one agent's model in
+  `.qaas/config/overrides.yaml` or from the dashboard's configuration view.
 - **Sixteen agents** — ARCHITECT, DBA, AUDITOR, SOCKET, GUIDE, LOAD and
   SYNTHESIZER join the roster, and a verify loop (REPRODUCER → VERIFIER → FIXER →
   REVIEWER → VERIFIER) that runs per ticket.
@@ -506,7 +510,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest -q                              # 1602 tests, offline, free, no API key
+pytest -q                              # 1609 tests, offline, free, no API key
 qaas validate                          # config, prompts and allowlists cohere
 qaas run --mode pr-check --dry-run     # every agent's options assemble
 ```

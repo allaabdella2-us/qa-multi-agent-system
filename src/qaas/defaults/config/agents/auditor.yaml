@@ -6,7 +6,7 @@ role: >
   leak internals to a caller. Reports a concrete exploit path or lowers its
   confidence -- a security finding without one is a guess wearing a severity.
 prompt: AUDITOR.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 60
 mcp_servers: [envelope, env_control, defect_memory]

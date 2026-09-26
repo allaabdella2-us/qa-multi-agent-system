@@ -4,7 +4,7 @@ role: >
   Builds and maintains the shared system map every other agent reads: services,
   routes, API surface, schema, dependency graph, ownership.
 prompt: MAPPER.md
-model: claude-sonnet-5      # extraction, not judgment
+model: "claude-opus-5-5[1m]"
 effort: medium
 max_turns: 60
 mcp_servers: [envelope]

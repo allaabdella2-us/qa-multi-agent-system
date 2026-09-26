@@ -5,7 +5,7 @@ role: >
   authorization, error-taxonomy inconsistency, unbounded results, validation gaps.
   Ships a failing contract test as evidence, never a bare opinion.
 prompt: API.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 60
 mcp_servers: [envelope, contract_diff, env_control, defect_memory]

@@ -89,7 +89,7 @@ class AgentSpec(BaseModel):
     prompt: str  # path relative to src/qaas/prompts/
     enabled: bool = True
 
-    model: str = "claude-opus-5"
+    model: str = "claude-opus-5-5[1m]"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_turns: int = 40
     max_budget_usd: float | None = None

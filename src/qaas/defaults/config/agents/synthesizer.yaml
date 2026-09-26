@@ -7,7 +7,7 @@ role: >
   reading both files before asserting it. Never searches for a fresh defect in a
   domain -- that is the work of the agent that owns the surface.
 prompt: SYNTHESIZER.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 50
 

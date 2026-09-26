@@ -8,7 +8,7 @@ role: >
   user's. BROWSER owns whether a feature works; GUIDE owns whether anyone can
   find it.
 prompt: GUIDE.md
-model: claude-opus-5
+model: "claude-opus-5-5[1m]"
 effort: high
 max_turns: 80
 mcp_servers: [envelope, env_control, playwright, defect_memory]
