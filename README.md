@@ -2,7 +2,7 @@
   <img src="docs/logo.jpg" alt="qaas" width="140">
 </p>
 
-<h1 align="center">qaas</h1>
+<h1 align="center">🐦‍⬛ qaas</h1>
 
 <p align="center">
   <em>Sixteen governed Claude Code sessions that read your repository, find
@@ -173,13 +173,8 @@ stops cleanly and prints the resume command.
 
 ## Run modes
 
-| Mode | Agents | Wall clock | Files tickets | Use it for |
-|---|---|---|---|---|
-| `pr-check` | 8 | 15 min | yes | Every pull request |
-| `nightly` | 13 | 2 h | yes | A scheduled sweep: find, reproduce, file |
-| `incident` | 1 | 10 min | no | A quick diagnostic |
-| `fix-cycle` | 3 | 4 h | yes | Fix and verify tickets already filed |
-| `full-loop` | 16 | 8 h | yes | Everything, end to end |
+Choose one with `--mode`: `pr-check`, `nightly`, `incident`, `fix-cycle` or
+`full-loop` (all sixteen agents, end to end).
 
 Useful flags on `qaas run`:
 
