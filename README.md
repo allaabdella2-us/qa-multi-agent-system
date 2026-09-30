@@ -52,7 +52,7 @@ rather than bookkeeping: they are separate operating-system processes with
 separate permissions.
 
 <p align="center">
-  <img src="docs/roster.png" alt="The sixteen agents by phase" width="880">
+  <img src="docs/harness.png" alt="The QAAS harness: sixteen agents from map to report, with the reproduce, fix, review and verify loop" width="880">
 </p>
 
 | Agent | Phase | What it is for |
