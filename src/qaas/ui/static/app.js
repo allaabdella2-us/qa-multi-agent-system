@@ -306,6 +306,22 @@ function renderTabs(v) {
   $("n-artifacts").textContent = state.artifacts.length;
 }
 
+// The same refusal, over and over, is one fact with a count. A sandboxed test
+// suite that dials an unlisted host retries it, and every retry is a denial:
+// one real run logged 1,430 of them, which the page rendered as 1,430 identical
+// lines because the host -- the only thing that differed -- was never shown.
+// Display only: the ledger keeps every line, and the tab's counter stays raw.
+function groupDenials(denials) {
+  const seen = new Map();
+  for (const d of denials) {
+    const a = d.args || {};
+    const key = [d.agent, d.tool, d.reason, a.host || "", a.command || ""].join("\u0000");
+    const hit = seen.get(key);
+    if (hit) hit.n += 1; else seen.set(key, { d, n: 1 });
+  }
+  return [...seen.values()];
+}
+
 const PANELS = {
   findings: (v) => v.findings.length ? v.findings.map((f) => `
     <button class="row row-find" data-finding="${esc(f.id)}">
@@ -318,11 +334,12 @@ const PANELS = {
     </button>`).join("")
     : `<div class="empty">no findings yet</div>`,
 
-  guardrails: (v) => v.denials.length ? v.denials.map((d) => `
+  guardrails: (v) => v.denials.length ? groupDenials(v.denials).map(({ d, n }) => `
     <div class="row row-den">
       <span class="by">${clock(d.at)}</span>
-      <span class="dom">${esc(d.agent)} · ${esc(d.tool)}</span>
+      <span class="dom">${esc(d.agent)} · ${esc(d.tool)}${n > 1 ? ` <b>×${n}</b>` : ""}</span>
       <span class="reason">${esc(d.reason)}${
+        d.args && d.args.host ? ` <code>${esc(d.args.host)}</code>` : ""}${
         d.args && d.args.command ? ` <code>${esc(d.args.command).slice(0, 120)}</code>` : ""}</span>
     </div>`).join("")
     // Not an error state: a discovery agent being refused Bash is the matrix
