@@ -643,3 +643,101 @@ def test_a_typescript_selector_is_recognised_as_a_path(tmp_path):
     for name in ("src/x.test.ts", "src/x.test.tsx", "x.spec.js", "a/b.mjs"):
         assert tr._looks_like_a_path(name), name
     assert not tr._looks_like_a_path("rounds half up")
+
+
+# -- the target's own interpreter ---------------------------------------------
+
+
+def _fake_venv(directory):
+    """A `.venv/bin/python` that exists and is executable; it is never run."""
+    python = directory / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    return python
+
+
+def test_a_target_with_a_venv_runs_its_tests_under_that_interpreter(tmp_path):
+    """QAAS-62: pytest ran under qaas's interpreter and died at collection."""
+    python = _fake_venv(tmp_path)
+    assert tr._target_python(tmp_path) == str(python)
+
+
+def test_the_venv_is_found_from_a_subdirectory_of_the_checkout(tmp_path):
+    (tmp_path / ".git").mkdir()
+    sub = tmp_path / "python"
+    python = _fake_venv(sub)
+    deeper = sub / "tests"
+    deeper.mkdir()
+    assert tr._target_python(deeper) == str(python)
+
+
+def test_a_project_with_no_venv_keeps_qaas_interpreter(tmp_path):
+    """Every existing target stays on exactly the path it was on."""
+    assert tr._target_python(tmp_path) == tr.sys.executable
+
+
+def test_the_search_stops_at_the_checkout_root(tmp_path):
+    """Another project's venv above the checkout is not this target's."""
+    _fake_venv(tmp_path)
+    checkout = tmp_path / "clone"
+    (checkout / ".git").mkdir(parents=True)
+    assert tr._target_python(checkout) == tr.sys.executable
+
+
+def test_the_venv_interpreter_reaches_pytest_argv(tmp_path):
+    argv = tr._base_argv(["t.py"], None, "/x/.venv/bin/python")
+    assert argv[0] == "/x/.venv/bin/python"
+    assert tr._base_argv(["t.py"], None)[0] == tr.sys.executable
+
+
+# -- the target's own test environment ----------------------------------------
+
+
+def test_a_profile_may_declare_what_its_tests_need():
+    from qaas.target import TargetProfile
+
+    profile = TargetProfile(
+        name="proj", root=".", test_env={"PYTHONPATH": "${TARGET_ROOT}/tests/alias"}
+    )
+    assert profile.test_env == {"PYTHONPATH": "${TARGET_ROOT}/tests/alias"}
+    assert TargetProfile(name="proj", root=".").test_env == {}
+
+
+@pytest.mark.parametrize("name", ["GITHUB_TOKEN", "DB_PASSWORD", "STRIPE_API_KEY"])
+def test_a_profile_cannot_carry_a_credential(name):
+    """A profile is a committed file. Secrets go through QAAS_TARGET_*."""
+    from pydantic import ValidationError
+
+    from qaas.target import TargetProfile
+
+    with pytest.raises(ValidationError, match="QAAS_TARGET_"):
+        TargetProfile(name="proj", root=".", test_env={name: "x"})
+    TargetProfile(name="proj", root=".", test_env={"QAAS_TARGET_DB_PASSWORD": "env"})
+
+
+def test_target_root_expands_in_the_declared_environment(ctx, project):
+    from qaas.target import TargetProfile
+
+    assert tr._target_test_env(ctx) == {}
+    ctx.config.profile = TargetProfile(
+        name="proj", root=str(project), test_env={"PYTHONPATH": "${TARGET_ROOT}/alias"}
+    )
+    assert tr._target_test_env(ctx) == {"PYTHONPATH": f"{project.resolve()}/alias"}
+
+
+async def test_a_declared_variable_reaches_the_tests(ctx, project, tools):
+    """The QAAS-62 case: the suite passes only if the profile's variable arrives."""
+    from qaas.target import TargetProfile
+
+    (project / "tests" / "test_needs_env.py").write_text(
+        "import os\n\ndef test_it():\n    assert os.environ.get('SUITE_NEEDS') == 'yes'\n"
+    )
+    before = await tools["run_suite"]({"selector": "tests/test_needs_env.py"})
+    assert outcome_of(before, "test_it") == "failed"
+
+    ctx.config.profile = TargetProfile(
+        name="proj", root=str(project), test_env={"SUITE_NEEDS": "yes"}
+    )
+    after = await tools["run_suite"]({"selector": "tests/test_needs_env.py"})
+    assert outcome_of(after, "test_it") == "passed"

@@ -297,6 +297,18 @@ async def _run_async(argv: list[str], cwd: Path, timeout_s: int, env_extra: dict
         raise
 
 
+def _target_test_env(ctx: ToolContext) -> dict[str, str]:
+    """What the target's profile says its own tests need, `${TARGET_ROOT}` expanded.
+
+    Empty for a profile that declares nothing, which is every profile written
+    before `test_env` existed.
+    """
+    profile = getattr(ctx.config, "profile", None)
+    declared = getattr(profile, "test_env", None) or {}
+    root = str(ctx.target_root.resolve())
+    return {name: value.replace("${TARGET_ROOT}", root) for name, value in declared.items()}
+
+
 def _resolve_cwd(ctx: ToolContext, raw: str | None) -> tuple[Path | None, str | None]:
     """Working directory for a run: the repo root, or a directory inside it.
 
@@ -561,23 +573,25 @@ def _parse_js_report(path: Path, cwd: Path) -> list[dict[str, Any]] | None:
 
 
 async def _js_tests(
-    runner: str, cwd: Path, selectors: list[str], timeout_s: int
+    runner: str, cwd: Path, selectors: list[str], timeout_s: int,
+    env_extra: dict[str, str] | None = None,
 ) -> tuple[_Completed, list[dict[str, Any]], str]:
     with tempfile.TemporaryDirectory(prefix="qaas-js-") as tmp:
         report_path = Path(tmp) / "report.json"
-        proc = await _run_async(_js_argv(runner, selectors, report_path), cwd, timeout_s)
+        proc = await _run_async(_js_argv(runner, selectors, report_path), cwd, timeout_s, env_extra)
         rows = _parse_js_report(report_path, cwd) or []
     return proc, rows, f"{runner}-json"
 
 
 async def _run_tests(
-    cwd: Path, selectors: list[str], timeout_s: int
+    cwd: Path, selectors: list[str], timeout_s: int,
+    env_extra: dict[str, str] | None = None,
 ) -> tuple[_Completed, list[dict[str, Any]], str]:
     """Run this project's suite, whichever runner it uses."""
     runner = _detect_runner(cwd)
     if runner in _JS_RUNNERS:
-        return await _js_tests(runner, cwd, selectors, timeout_s)
-    return await _pytest(cwd, selectors, timeout_s)
+        return await _js_tests(runner, cwd, selectors, timeout_s, env_extra)
+    return await _pytest(cwd, selectors, timeout_s, env_extra)
 
 
 # ---------------------------------------------------------------------------
@@ -586,12 +600,53 @@ async def _run_tests(
 
 
 def _json_report_available() -> bool:
-    """Whether the child interpreter (which is this one) has the plugin."""
+    """Whether this interpreter has the plugin.
+
+    Only meaningful when the child *is* this interpreter; `_pytest` does not ask
+    when it runs the target's own venv, because that venv's plugins are the
+    target's business, not ours.
+    """
     return importlib.util.find_spec("pytest_jsonreport") is not None
 
 
-def _base_argv(selectors: list[str], json_report_path: Path | None) -> list[str]:
-    argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--tb=short"]
+#: How far above `cwd` to look for a virtualenv before giving up.
+_VENV_SEARCH_LEVELS = 4
+_VENV_DIRS = (".venv", "venv")
+
+
+def _target_python(cwd: Path) -> str:
+    """The interpreter the target's own tests should run under.
+
+    It was `sys.executable` unconditionally, which is the interpreter running
+    *qaas*. A target with its own virtualenv -- every `uv sync` or `poetry
+    install` project -- then died at collection with `ModuleNotFoundError` for
+    its own dependencies, which the runner correctly refuses to call a test
+    outcome. VERIFIER recorded NOT_FIXED over a fix that passed its acceptance
+    test by hand (QAAS-62), so no Python target with a venv could reach VERIFIED.
+    `VIRTUAL_ENV` was in the child's environment allowlist and made this look
+    supported; the argv ignored it.
+
+    Looks in `cwd` and its parents, and stops at the checkout root (the
+    directory holding `.git`) so it can never pick up a venv belonging to some
+    other project. No venv means the old behaviour, unchanged.
+    """
+    here = cwd.resolve()
+    for directory in (here, *here.parents)[:_VENV_SEARCH_LEVELS]:
+        for name in _VENV_DIRS:
+            candidate = directory / name / "bin" / "python"
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                # Not `.resolve()`: a venv's python is a symlink to the base
+                # interpreter, and resolving it drops the venv's site-packages.
+                return str(candidate)
+        if (directory / ".git").exists():
+            break
+    return sys.executable
+
+
+def _base_argv(
+    selectors: list[str], json_report_path: Path | None, python: str | None = None
+) -> list[str]:
+    argv = [python or sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--tb=short"]
     if json_report_path is not None:
         argv += ["--json-report", f"--json-report-file={json_report_path}", "-q"]
     else:
@@ -714,12 +769,15 @@ def _totals(rows: list[dict[str, Any]]) -> dict[str, int]:
     return {"total": len(rows), **{outcome: counts[outcome] for outcome in sorted(counts)}}
 
 
-async def _pytest(cwd: Path, selectors: list[str], timeout_s: int) -> tuple[_Completed, list[dict[str, Any]], str]:
+async def _pytest(
+    cwd: Path, selectors: list[str], timeout_s: int, env_extra: dict[str, str] | None = None
+) -> tuple[_Completed, list[dict[str, Any]], str]:
     """Run pytest and return (process, per-test rows, parser used)."""
-    use_json = _json_report_available()
+    python = _target_python(cwd)
+    use_json = python == sys.executable and _json_report_available()
     with tempfile.TemporaryDirectory(prefix="qaas-pytest-") as tmp:
         report_path = Path(tmp) / "report.json" if use_json else None
-        proc = await _run_async(_base_argv(selectors, report_path), cwd, timeout_s)
+        proc = await _run_async(_base_argv(selectors, report_path, python), cwd, timeout_s, env_extra)
 
         # An unknown option (an older pytest without --durations-min, say) is a
         # usage error, not a test failure. Retry once with the minimal flag set
@@ -727,8 +785,8 @@ async def _pytest(cwd: Path, selectors: list[str], timeout_s: int) -> tuple[_Com
         if proc.returncode == _EXIT_USAGE_ERROR and not use_json and _UNKNOWN_OPTION_RE.search(
             proc.stdout + proc.stderr
         ):
-            argv = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--tb=short", "-v", "-rfE"]
-            proc = await _run_async(argv + selectors, cwd, timeout_s)
+            argv = [python, "-m", "pytest", "-p", "no:cacheprovider", "--tb=short", "-v", "-rfE"]
+            proc = await _run_async(argv + selectors, cwd, timeout_s, env_extra)
 
         rows: list[dict[str, Any]] | None = None
         if report_path is not None:
@@ -867,7 +925,7 @@ def build_tools(ctx: ToolContext) -> list:
                 else [_KEYWORD_FLAG[_detect_runner(cwd)], selector]
             )
 
-        proc, rows, parser = await _run_tests(cwd, selectors, timeout_s)
+        proc, rows, parser = await _run_tests(cwd, selectors, timeout_s, _target_test_env(ctx))
         if not proc.started:
             return err(proc.stderr)
         if _matched_nothing(proc) and not rows:
@@ -927,7 +985,9 @@ def build_tools(ctx: ToolContext) -> list:
         if refusal:
             return err(refusal)
 
-        proc, rows, parser = await _run_tests(cwd, _single_selectors(cwd, test_id), timeout_s)
+        proc, rows, parser = await _run_tests(
+            cwd, _single_selectors(cwd, test_id), timeout_s, _target_test_env(ctx)
+        )
         if not proc.started:
             return err(proc.stderr)
         if _matched_nothing(proc):
@@ -1024,7 +1084,8 @@ def build_tools(ctx: ToolContext) -> list:
                 )
                 break
             proc, rows, _ = await _run_tests(
-                cwd, _single_selectors(cwd, test_id), max(1, int(min(timeout_s, remaining)))
+                cwd, _single_selectors(cwd, test_id), max(1, int(min(timeout_s, remaining))),
+                _target_test_env(ctx),
             )
             if not proc.started:
                 return err(proc.stderr)

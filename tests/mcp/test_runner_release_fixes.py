@@ -145,7 +145,7 @@ async def test_a_js_title_that_matches_nothing_is_not_twenty_passes(tmp_path, mo
     (root / "package.json").write_text(json.dumps({"devDependencies": {"vitest": "^2"}}))
     (root / "a.test.ts").write_text("")
 
-    async def fake_run_tests(cwd, selectors, timeout_s):
+    async def fake_run_tests(cwd, selectors, timeout_s, env_extra=None):
         proc = tr._Completed(["npx"], 0, "", "", 0.1, False)
         return proc, [{"nodeid": "a.test.ts::something else", "outcome": "skipped"}], "vitest-json"
 

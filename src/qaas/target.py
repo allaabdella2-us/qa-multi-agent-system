@@ -207,6 +207,20 @@ class TargetProfile(BaseModel):
     #: Omitted means "whatever the agent says", which is every existing profile.
     diff_budget: DiffBudget | None = None
 
+    #: Variables this repository's own test suite needs set, and nothing else
+    #: gives it. `${TARGET_ROOT}` expands to the checkout.
+    #:
+    #: `test_runner` runs the suite on an environment *allowlist*, so a variable
+    #: the target needs has to be named somewhere. langsmith-sdk's tests only
+    #: reach their HTTP mock with `PYTHONPATH=${TARGET_ROOT}/python/tests/httpx2_alias`;
+    #: without it they open real sockets and fail on DNS. VERIFIER could not set
+    #: it, recorded NOT_FIXED over a fix that passed its acceptance test by hand,
+    #: and the ticket slid back to Backlog (QAAS-62).
+    #:
+    #: Not for credentials: a name that says it holds a secret is refused here.
+    #: `QAAS_TARGET_*` is the documented route for those and already passes.
+    test_env: dict[str, str] = Field(default_factory=dict)
+
     #: Golden ledger for calibration. Absent for real applications — you only
     #: have one for an app whose defects you planted yourself.
     ledger: str | None = None
@@ -215,6 +229,22 @@ class TargetProfile(BaseModel):
     def _name_is_a_slug(self) -> "TargetProfile":
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", self.name):
             raise ValueError("target name must be a lowercase slug, e.g. 'my-app'")
+        return self
+
+    @model_validator(mode="after")
+    def _test_env_holds_no_secrets(self) -> "TargetProfile":
+        # Imported here: `registry` imports `config`, which imports this module.
+        from qaas.registry import _CREDENTIAL_NAME
+
+        for name in self.test_env:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"test_env: '{name}' is not a variable name")
+            if _CREDENTIAL_NAME.search(name) and not name.upper().startswith("QAAS_TARGET_"):
+                raise ValueError(
+                    f"test_env: '{name}' looks like a credential. A profile is a committed "
+                    "file; name an environment variable with the QAAS_TARGET_ prefix instead, "
+                    "which the test runner already passes through."
+                )
         return self
 
     def root_path(self, base: Path | None = None) -> Path:
