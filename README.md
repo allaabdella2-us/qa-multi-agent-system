@@ -35,7 +35,7 @@
 13. [Customising it](#customising-it)
 14. [Command reference](#command-reference)
 15. [Troubleshooting](#troubleshooting)
-16. [What's new in 0.0.2](#whats-new-in-002)
+16. [What's new in 0.0.3](#whats-new-in-003)
 17. [Roadmap and contributing](#roadmap-and-contributing)
 
 ---
@@ -462,7 +462,17 @@ Every command takes `--help`.
 
 ---
 
-## What's new in 0.0.2
+## What's new in 0.0.3
+
+- **A target's tests run under its own virtualenv** (`.venv` or `venv`), so a
+  fix to a `uv` or `poetry` project can reach VERIFIED.
+- **`test_env` in a target profile**, for variables the target's own suite
+  needs; `${TARGET_ROOT}` expands to the checkout, and credential-shaped names
+  are refused.
+- **Repeated refusals are grouped** on the dashboard's Guardrails tab, with the
+  refused host shown.
+
+### In 0.0.2
 
 - **Every agent runs Claude Opus 5.5 with the 1M-token context**
   (`claude-opus-5-5[1m]`), which needs `claude-agent-sdk` 0.2.159 or newer — the
@@ -505,7 +515,7 @@ git clone https://github.com/allaabdella2-us/qa-multi-agent-system
 cd qa-multi-agent-system
 uv venv && uv pip install -e ".[dev]"
 
-pytest -q                              # 1609 tests, offline, free, no API key
+pytest -q                              # 1620 tests, offline, free, no API key
 qaas validate                          # config, prompts and allowlists cohere
 qaas run --mode pr-check --dry-run     # every agent's options assemble
 ```
@@ -516,4 +526,4 @@ entry in `defects.yaml` in the same commit.
 
 ---
 
-**Status:** 0.0.2, beta. **License:** MIT.
+**Status:** 0.0.3, beta. **License:** MIT.

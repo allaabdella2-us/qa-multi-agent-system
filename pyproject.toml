@@ -2,7 +2,7 @@
 # Distribution name is `qaas-python` (`qaas` was taken); the import package and
 # the CLI are both `qaas`.
 name = "qaas-python"
-version = "0.0.2"
+version = "0.0.3"
 description = "A harness that runs sixteen governed Claude Code sessions over your repo: find, reproduce, file, fix, verify"
 dynamic = ["readme"]
 license = "MIT"
@@ -55,7 +55,7 @@ Repository = "https://github.com/allaabdella2-us/qa-multi-agent-system"
 # package's -- so both sidebar links land in it.
 Documentation = "https://github.com/allaabdella2-us/qa-multi-agent-system#readme"
 Issues = "https://github.com/allaabdella2-us/qa-multi-agent-system/issues"
-Changelog = "https://github.com/allaabdella2-us/qa-multi-agent-system#whats-new-in-002"
+Changelog = "https://github.com/allaabdella2-us/qa-multi-agent-system#whats-new-in-003"
 
 [build-system]
 requires = ["hatchling", "hatch-fancy-pypi-readme"]
